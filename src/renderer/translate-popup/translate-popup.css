@@ -1,0 +1,141 @@
+/* 划词翻译卡片 —— 冰蓝玻璃小卡，风格与 popover/overlay 统一 */
+:root {
+  --brand: #4b7cff;
+  --brand-strong: #3a63e6;
+  --ink: #1a2033;
+  --ink-sub: #5a6478;
+  --line: #e3e9f4;
+  --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  font-family: var(--font);
+  -webkit-user-select: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+.tp-card {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(155deg, rgba(255, 255, 255, 0.96), rgba(238, 244, 255, 0.94));
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: 14px;
+  box-shadow: 0 0.5em 1.4em rgba(40, 70, 150, 0.22);
+  backdrop-filter: blur(18px) saturate(1.4);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  overflow: hidden;
+  /* 顶部作为拖动把手 */
+  -webkit-app-region: drag;
+}
+
+/* 头部 */
+.tp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.tp-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--brand-strong);
+  letter-spacing: 0.02em;
+}
+.tp-target {
+  font-size: 11px;
+  color: var(--ink-sub);
+  background: rgba(75, 124, 255, 0.1);
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+.tp-close {
+  margin-left: auto;
+  -webkit-app-region: no-drag;
+  border: none;
+  background: transparent;
+  color: var(--ink-sub);
+  font-size: 13px;
+  cursor: pointer;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  line-height: 1;
+}
+.tp-close:hover { background: rgba(0, 0, 0, 0.06); color: var(--ink); }
+
+/* 主体：原文 + 译文，可滚动 */
+.tp-body {
+  flex: 1;
+  padding: 10px 12px;
+  overflow-y: auto;
+  -webkit-app-region: no-drag;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.tp-src {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-sub);
+  word-break: break-word;
+  max-height: 66px;
+  overflow-y: auto;
+}
+.tp-divider {
+  height: 1px;
+  background: var(--line);
+  margin: 8px 0;
+}
+.tp-trans {
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  font-weight: 500;
+  word-break: break-word;
+}
+.tp-trans.err { color: #d1495b; font-size: 12.5px; font-weight: 400; }
+
+/* loading 三点 */
+.tp-loading { display: flex; align-items: center; gap: 5px; color: var(--ink-sub); }
+.tp-loading-text { font-size: 12px; margin-left: 4px; }
+.tp-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--brand);
+  animation: tp-bounce 1.2s infinite ease-in-out both;
+}
+.tp-dot:nth-child(1) { animation-delay: -0.24s; }
+.tp-dot:nth-child(2) { animation-delay: -0.12s; }
+@keyframes tp-bounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+/* 底部 */
+.tp-foot {
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+}
+.tp-btn {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.tp-btn:hover { border-color: var(--brand); color: var(--brand-strong); }
+.tp-btn:disabled { opacity: 0.5; cursor: default; }
+.tp-btn.copied { background: var(--brand); color: #fff; border-color: var(--brand); }

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Electron 在 Hardened Runtime 下运行所需（JIT / 可执行内存 / 加载未公证框架 / dyld 环境变量） -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <!-- 录屏可能采集音频时需要（屏幕录制本身由 TCC + Info.plist 用途文案控制，无需此处声明） -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+</dict>
+</plist>

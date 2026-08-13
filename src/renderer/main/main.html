@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: kkthumb:; media-src 'self' blob: data:; connect-src 'self' blob: data:; font-src 'self' data:; object-src 'none'; base-uri 'none'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' blob: data:; font-src 'self' data:; object-src 'none'; base-uri 'none'" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>困困截屏助手</title>
+  <!-- 统一设计系统在前，页面样式在后（后者可覆盖局部细节） -->
+  <link rel="stylesheet" href="../shared/design.css" />
+  <link rel="stylesheet" href="./main.css" />
+  <link rel="stylesheet" href="./pages/capture.css" />
+  <link rel="stylesheet" href="./pages/history.css" />
+  <link rel="stylesheet" href="./pages/ai.css" />
+  <link rel="stylesheet" href="./pages/settings.css" />
+</head>
+<body class="app">
+
+  <!-- ① 顶部细标题栏：整条可拖拽，左侧 78px 让位 macOS 红绿灯 -->
+  <header class="titlebar">
+    <div class="titlebar-brand">
+      <span class="titlebar-app">困困截屏助手</span>
+      <span class="titlebar-sep" aria-hidden="true"></span>
+      <span class="titlebar-page" id="titlebar-page">快捷截图</span>
+    </div>
+    <!-- 右侧占位：保持标题居中观感，无交互操作 -->
+    <div class="titlebar-right" aria-hidden="true"></div>
+  </header>
+
+  <!-- ② 左侧固定侧边导航 -->
+  <aside class="sidebar">
+    <nav class="nav" id="nav" aria-label="主导航">
+      <button class="nav-item" type="button" data-page="capture">
+        <svg class="ico nav-ico" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 8a2 2 0 0 1 2-2h2l1.2-2h5.6L17 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+          <circle cx="12" cy="12.5" r="3.2" />
+        </svg>
+        <span class="nav-text">快捷截图</span>
+      </button>
+      <button class="nav-item" type="button" data-page="history">
+        <svg class="ico nav-ico" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3 2" />
+        </svg>
+        <span class="nav-text">历史记录</span>
+      </button>
+      <button class="nav-item" type="button" data-page="ai">
+        <svg class="ico nav-ico" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3l1.8 4.7L18.5 9.5 13.8 11.3 12 16l-1.8-4.7L5.5 9.5l4.7-1.8z" />
+        </svg>
+        <span class="nav-text">AI 工作台</span>
+      </button>
+      <button class="nav-item" type="button" data-page="settings">
+        <svg class="ico nav-ico" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l1.8 1.8 M17.2 17.2 19 19 M19 5l-1.8 1.8 M6.8 17.2 5 19" />
+        </svg>
+        <span class="nav-text">设置</span>
+      </button>
+    </nav>
+
+    <!-- 侧栏底部：低调的帮助 / 反馈 / 版本号 -->
+    <div class="sidebar-foot">
+      <button class="foot-link" type="button" id="foot-help">帮助</button>
+      <button class="foot-link" type="button" id="foot-feedback">反馈</button>
+      <span class="foot-ver">版本 0.1.0</span>
+    </div>
+  </aside>
+
+  <!-- ③ 主内容区，可滚动 -->
+  <main id="page" class="page"></main>
+
+  <!-- 按顺序：先各页面模块（注册到 window.KKPages），最后外壳 main.js -->
+  <script src="./pages/capture.js"></script>
+  <script src="./pages/history.js"></script>
+  <script src="./pages/ai.js"></script>
+  <script src="./pages/settings.js"></script>
+  <script src="./main.js"></script>
+</body>
+</html>

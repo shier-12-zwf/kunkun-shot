@@ -1,0 +1,609 @@
+/* 历史记录页样式
+ * 复用 shared/design.css 的色彩 / 圆角 / 阴影变量，不另起一套配色。
+ * 布局：顶部工具条 + 主体（左侧分组网格滚动区 + 右侧详情面板）。 */
+
+/* —— 页面骨架 —— */
+.kk-history {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* —— 顶部工具条 —— */
+.kk-hist-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+  flex-wrap: wrap;
+}
+
+/* 搜索框（图标内嵌） */
+.kk-hist-search {
+  position: relative;
+  width: 230px;
+  flex: none;
+}
+.kk-hist-search .ico-sm {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-soft);
+  pointer-events: none;
+}
+.kk-hist-search .input {
+  padding-left: 33px;
+}
+/* 隐藏原生 search 清除按钮，统一观感 */
+.kk-hist-search .input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* 类型筛选胶囊条 */
+.kk-hist-filters {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.kk-hist-spacer {
+  flex: 1 1 auto;
+}
+
+/* —— 主体：网格 + 详情 —— */
+.kk-hist-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 16px;
+  padding: 16px 20px 18px;
+}
+
+/* 左侧网格滚动区 */
+.kk-hist-grid-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/* —— 分组 —— */
+.kk-hist-group {
+  margin-bottom: 22px;
+}
+.kk-hist-group:last-child {
+  margin-bottom: 4px;
+}
+.kk-hist-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 11px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 4px 0 6px;
+  background: linear-gradient(var(--bg) 70%, transparent);
+  cursor: pointer;
+  user-select: none;
+}
+/* 折叠箭头：展开向下、折叠向右 */
+.kk-hist-group-caret {
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 11px;
+  color: var(--text-soft);
+  transform: rotate(90deg);
+  transition: transform .15s;
+}
+.kk-hist-group.is-collapsed .kk-hist-group-caret {
+  transform: rotate(0deg);
+}
+.kk-hist-group.is-collapsed .kk-hist-grid {
+  display: none;
+}
+.kk-hist-group-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+.kk-hist-group-count {
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+/* —— 缩略图网格 —— */
+.kk-hist-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 14px;
+}
+
+/* —— 卡片 —— */
+.kk-hist-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: transform .14s, box-shadow .14s, border-color .14s;
+}
+.kk-hist-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
+  border-color: #cdddff;
+}
+.kk-hist-card.single,
+.kk-hist-card.selected {
+  border-color: var(--brand);
+  box-shadow: var(--shadow-md), 0 0 0 2px rgba(75, 124, 255, .35);
+}
+
+/* 缩略图容器（固定比例） */
+.kk-hist-thumb {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background:
+    var(--bg-sunken)
+    repeating-conic-gradient(rgba(0,0,0,.025) 0% 25%, transparent 0% 50%) 50% / 18px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.kk-hist-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.kk-hist-thumb-ph {
+  color: var(--text-soft);
+  opacity: .6;
+}
+.kk-hist-thumb-ph .ico-lg {
+  width: 30px;
+  height: 30px;
+}
+
+/* 左上角勾选框 */
+.kk-hist-check {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-xs);
+  border: 1.5px solid var(--line);
+  background: rgba(255, 255, 255, .92);
+  color: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transform: scale(.85);
+  transition: opacity .14s, transform .14s, background .14s, border-color .14s, color .14s;
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+.kk-hist-card:hover .kk-hist-check {
+  opacity: 1;
+  transform: scale(1);
+}
+.kk-hist-check:hover {
+  border-color: var(--brand);
+}
+.kk-hist-check:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  opacity: 1;
+}
+.kk-hist-check .ico-sm {
+  width: 13px;
+  height: 13px;
+}
+.kk-hist-card.selected .kk-hist-check {
+  opacity: 1;
+  transform: scale(1);
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+/* 右下角类型角标 */
+.kk-hist-badge {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text);
+  background: rgba(255, 255, 255, .9);
+  border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+.kk-hist-badge .ico-sm {
+  width: 13px;
+  height: 13px;
+  color: var(--brand);
+}
+
+/* 卡片底部元信息 */
+.kk-hist-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.kk-hist-card-time {
+  color: var(--text);
+  font-weight: 600;
+}
+.kk-hist-card-dims {
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* —— 右侧详情面板 —— */
+.kk-hist-detail {
+  flex: none;
+  width: 290px;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.kk-hist-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex: none;
+}
+.kk-hist-detail-type {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--brand-strong);
+  background: var(--brand-soft);
+  padding: 3px 9px;
+  border-radius: 999px;
+}
+.kk-hist-detail-type .ico-sm {
+  color: var(--brand);
+}
+
+/* 原图预览 */
+.kk-hist-preview {
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background:
+    var(--bg-sunken)
+    repeating-conic-gradient(rgba(0,0,0,.025) 0% 25%, transparent 0% 50%) 50% / 18px 18px;
+  min-height: 150px;
+  max-height: 280px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+.kk-hist-preview img {
+  max-width: 100%;
+  max-height: 280px;
+  object-fit: contain;
+  display: block;
+}
+.kk-hist-preview-loading {
+  font-size: 12.5px;
+  color: var(--text-soft);
+  padding: 24px;
+}
+
+/* 信息表 */
+.kk-hist-info {
+  flex: none;
+  margin-bottom: 16px;
+  border-top: 1px solid var(--line);
+}
+.kk-hist-info-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.kk-hist-info-k {
+  font-size: 12.5px;
+  color: var(--text-soft);
+  flex: none;
+}
+.kk-hist-info-v {
+  font-size: 12.5px;
+  color: var(--text);
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 操作按钮区（两列网格） */
+.kk-hist-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: auto;
+}
+.kk-hist-act {
+  justify-content: flex-start;
+  height: 38px;
+  padding: 0 12px;
+}
+/* 发送到 AI 工作台 占满整行 */
+.kk-hist-act.kk-hist-act-wide {
+  grid-column: 1 / -1;
+}
+.kk-hist-act-ok {
+  background: rgba(27, 182, 115, .12) !important;
+  color: var(--ok) !important;
+  border-color: transparent !important;
+}
+.kk-hist-act-ok svg {
+  color: var(--ok);
+}
+
+/* 详情空状态 */
+.kk-hist-detail-empty {
+  margin: auto 0;
+  text-align: center;
+  padding: 30px 14px;
+  color: var(--text-soft);
+}
+.kk-hist-detail-empty .ico-lg {
+  width: 40px;
+  height: 40px;
+  color: var(--brand);
+  opacity: .55;
+  margin-bottom: 12px;
+}
+.kk-hist-detail-empty-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.kk-hist-detail-empty-desc {
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* —— 批量面板 —— */
+.kk-hist-bulk {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.kk-hist-bulk-count {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: var(--r-md);
+  background: var(--brand-soft);
+  margin-bottom: 14px;
+  flex: none;
+}
+.kk-hist-bulk-num {
+  font-size: 26px;
+  font-weight: 800;
+  color: var(--brand-strong);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.kk-hist-bulk-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--brand-strong);
+}
+
+/* 选中缩略图条带 */
+.kk-hist-bulk-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+  flex: none;
+}
+.kk-hist-bulk-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--r-xs);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--bg-sunken);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-soft);
+}
+.kk-hist-bulk-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.kk-hist-bulk-more {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-soft);
+}
+
+/* 批量面板按钮：两列布局（全选 / 取消选择 / 批量导出 / 批量删除）。 */
+.kk-hist-bulk .kk-hist-actions {
+  grid-template-columns: 1fr 1fr;
+}
+
+/* —— 搜索无结果 —— */
+.kk-hist-noresult {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-soft);
+}
+.kk-hist-noresult .ico-lg {
+  width: 38px;
+  height: 38px;
+  color: var(--brand);
+  opacity: .5;
+  margin-bottom: 12px;
+}
+.kk-hist-noresult-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 5px;
+}
+.kk-hist-noresult-desc {
+  font-size: 12.5px;
+}
+
+/* —— 空状态（无历史，插画式）—— */
+.kk-hist-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  height: 100%;
+  min-height: 380px;
+  padding: 30px;
+}
+.kk-hist-empty-art {
+  position: relative;
+  width: 132px;
+  height: 132px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 22px;
+}
+.kk-hist-empty-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 45%, var(--brand-soft), transparent 70%);
+}
+.kk-hist-empty-ring.r2 {
+  inset: 22px;
+  background: radial-gradient(circle, rgba(123, 104, 255, .16), transparent 72%);
+}
+.kk-hist-empty-cam {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  fill: none;
+  stroke: var(--brand);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.kk-hist-empty-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-strong);
+  margin-bottom: 8px;
+}
+.kk-hist-empty-desc {
+  font-size: 13px;
+  color: var(--text-soft);
+  line-height: 1.65;
+  max-width: 340px;
+  margin-bottom: 22px;
+}
+.kk-hist-empty-btn {
+  height: 40px;
+  padding: 0 22px;
+}
+
+/* —— 自绘确认弹窗 —— */
+.kk-hist-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(20, 35, 75, .28);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+  animation: kkHistFade .14s ease;
+}
+@keyframes kkHistFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.kk-hist-dialog {
+  width: 340px;
+  max-width: calc(100vw - 40px);
+  padding: 20px 22px 18px;
+  box-shadow: var(--shadow-pop);
+  animation: kkHistPop .16s ease;
+}
+@keyframes kkHistPop {
+  from { opacity: 0; transform: translateY(8px) scale(.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.kk-hist-dialog-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-strong);
+  margin-bottom: 8px;
+}
+.kk-hist-dialog-desc {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.6;
+  margin-bottom: 18px;
+}
+.kk-hist-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* —— 窄宽度下详情面板下沉到底部 —— */
+@media (max-width: 760px) {
+  .kk-hist-body {
+    flex-direction: column;
+  }
+  .kk-hist-detail {
+    width: 100%;
+    align-self: auto;
+    max-height: 320px;
+  }
+}

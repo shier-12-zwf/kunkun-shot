@@ -1,0 +1,555 @@
+/* 困困截图工具 · 标注覆盖层样式（仿 PixPin 浅色干净风） */
+
+:root {
+  --accent: #2563eb;
+  --danger: #ef4444;
+  --success: #16a34a;
+  --panel: #ffffff;
+  --panel-2: #f5f6f8;
+  --text: #1f2329;
+  --text-2: #8a9099;
+  --border: #e5e7eb;
+  --mask: rgba(0, 0, 0, 0.45);
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
+  --font: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+html,
+body {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  font-family: var(--font);
+  background: transparent;
+  /* 整个 overlay 默认十字光标，方便框选 */
+  cursor: crosshair;
+}
+
+/* ===== 背景截图层 ===== */
+.bg-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* ===== 蒙层（四块拼出选区镂空效果） ===== */
+.mask {
+  position: fixed;
+  background: var(--mask);
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* ===== 顶部提示 ===== */
+.hint {
+  position: fixed;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  padding: 8px 16px;
+  background: rgba(31, 35, 41, 0.85);
+  color: #fff;
+  font-size: 13px;
+  border-radius: 8px;
+  pointer-events: none;
+  box-shadow: var(--shadow);
+}
+
+/* ===== 选区 ===== */
+.selection {
+  position: fixed;
+  z-index: 10;
+  border: 1px solid var(--accent);
+  box-sizing: border-box;
+  /* 选区整体可拖动 */
+  cursor: move;
+}
+
+/* 标注画布铺满选区 */
+.anno-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* 当处于标注绘制状态时，画布接管指针；否则让选区拖动生效 */
+.selection.annotating .anno-canvas {
+  cursor: crosshair;
+}
+.selection.annotating {
+  cursor: default;
+}
+
+/* ===== 控制点 ===== */
+.handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border: 1.5px solid var(--accent);
+  border-radius: 50%;
+  z-index: 12;
+  transform: translate(-50%, -50%);
+}
+
+.handle[data-pos="nw"] { left: 0; top: 0; cursor: nwse-resize; }
+.handle[data-pos="n"]  { left: 50%; top: 0; cursor: ns-resize; }
+.handle[data-pos="ne"] { left: 100%; top: 0; cursor: nesw-resize; }
+.handle[data-pos="e"]  { left: 100%; top: 50%; cursor: ew-resize; }
+.handle[data-pos="se"] { left: 100%; top: 100%; cursor: nwse-resize; }
+.handle[data-pos="s"]  { left: 50%; top: 100%; cursor: ns-resize; }
+.handle[data-pos="sw"] { left: 0; top: 100%; cursor: nesw-resize; }
+.handle[data-pos="w"]  { left: 0; top: 50%; cursor: ew-resize; }
+
+/* 标注绘制时隐藏控制点，避免误触 */
+.selection.annotating .handle {
+  display: none;
+}
+
+/* ===== 尺寸标签 ===== */
+.size-label {
+  position: fixed;
+  z-index: 20;
+  padding: 3px 8px;
+  background: rgba(31, 35, 41, 0.85);
+  color: #fff;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  border-radius: 6px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* ===== 放大镜 ===== */
+.magnifier {
+  position: fixed;
+  z-index: 60;
+  width: 120px;
+  pointer-events: none;
+}
+
+.magnifier canvas {
+  display: block;
+  width: 120px;
+  height: 90px;
+  border: 2px solid #fff;
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  background: #000;
+  image-rendering: pixelated;
+}
+
+.mag-cross-h,
+.mag-cross-v {
+  position: absolute;
+  background: rgba(37, 99, 235, 0.8);
+  pointer-events: none;
+}
+.mag-cross-h {
+  left: 2px;
+  right: 2px;
+  top: calc(45px + 2px);
+  height: 1px;
+}
+.mag-cross-v {
+  top: 2px;
+  height: 90px;
+  left: calc(60px + 2px);
+  width: 1px;
+}
+
+.mag-color {
+  margin-top: 4px;
+  padding: 2px 6px;
+  background: rgba(31, 35, 41, 0.85);
+  color: #7dd3fc;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  border-radius: 4px;
+  text-align: center;
+  line-height: 1.4;
+}
+
+.mag-info {
+  margin-top: 2px;
+  padding: 2px 6px;
+  background: rgba(31, 35, 41, 0.85);
+  color: #fff;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  border-radius: 4px;
+  text-align: center;
+  line-height: 1.4;
+}
+
+/* ===== 轻提示（复制颜色反馈） ===== */
+.kk-tip {
+  position: fixed;
+  left: 50%;
+  top: 14px;
+  transform: translateX(-50%) translateY(-6px);
+  z-index: 90;
+  max-width: 70vw;
+  padding: 6px 14px;
+  background: rgba(31, 35, 41, 0.88);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.5;
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.kk-tip.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ===== 工具栏 ===== */
+.toolbar {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  cursor: default;
+}
+
+.tool-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.divider {
+  width: 1px;
+  height: 22px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+/* 图标按钮通用 */
+.tool-btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.tool-btn:hover {
+  background: var(--panel-2);
+}
+.tool-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+.tool-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.tool-btn:disabled:hover {
+  background: transparent;
+}
+
+.tool-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* 矩形/椭圆/马赛克/序号圈 这类需要描边形状，用 currentColor 描边即可 */
+.tool-btn svg .num-glyph {
+  font-size: 9px;
+  fill: currentColor;
+  stroke: none;
+  text-anchor: middle;
+  font-family: var(--font);
+}
+
+/* 颜色块 */
+.color-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  background: var(--c);
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+  transition: transform 0.1s;
+}
+.color-btn:hover {
+  transform: scale(1.12);
+}
+.color-btn.active {
+  border-color: var(--accent);
+}
+
+/* 粗细 */
+.width-btn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+.width-btn:hover {
+  background: var(--panel-2);
+}
+.width-btn.active {
+  background: var(--accent);
+}
+.width-btn span {
+  display: block;
+  width: 16px;
+  background: var(--text);
+  border-radius: 4px;
+}
+.width-btn.active span {
+  background: #fff;
+}
+
+/* 动作按钮（带文字） */
+.action-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 9px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.action-btn:hover {
+  background: var(--panel-2);
+}
+.action-btn svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.action-btn.primary {
+  background: var(--accent);
+  color: #fff;
+}
+.action-btn.primary:hover {
+  background: #1d4ed8;
+}
+.action-btn.danger {
+  color: var(--danger);
+  padding: 0 8px;
+}
+.action-btn.danger:hover {
+  background: #fef2f2;
+}
+/* 默认高亮项（由 mode 决定，按 Enter 执行） */
+.action-btn.default-action {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 7px;
+}
+.action-btn.primary.default-action {
+  outline-color: #fff;
+}
+
+/* 翻译目标语言选择（工具栏内，紧邻「翻译」按钮） */
+.tr-lang {
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  font-family: var(--font);
+  padding: 0 4px;
+  cursor: pointer;
+  outline: none;
+}
+.tr-lang:hover {
+  background: var(--panel);
+}
+
+/* ===== 截图层内联 AI 浮窗（翻译就地 / 问AI） ===== */
+.aii {
+  position: fixed;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.42);
+  overflow: hidden;
+  font-family: var(--font);
+  -webkit-user-select: text;
+  user-select: text;
+  animation: aii-in 0.14s ease;
+}
+@keyframes aii-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 翻译：盖在原截图选区上的暗色磨砂玻璃 */
+.aii-translate {
+  background: rgba(17, 21, 28, 0.82);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  color: #f2f5fb;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+/* 问 AI：浮动白色卡片 */
+.aii-ask {
+  background: #ffffff;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.aii-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+  font-size: 12px;
+  flex: none;
+}
+.aii-translate .aii-head { border-bottom: 1px solid rgba(255, 255, 255, 0.12); }
+.aii-ask .aii-head { border-bottom: 1px solid var(--panel-2); }
+.aii-title { font-weight: 700; }
+.aii-spin { font-size: 11px; opacity: 0.7; }
+.aii-tools { margin-left: auto; display: flex; gap: 2px; }
+.aii-btn {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  opacity: 0.85;
+  transition: background 0.12s, opacity 0.12s;
+}
+.aii-btn:hover { background: rgba(127, 127, 127, 0.2); opacity: 1; }
+.aii-x { font-size: 13px; }
+
+.aii-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 10px 13px;
+  overflow-y: auto;
+  font-size: 13.5px;
+  line-height: 1.62;
+}
+.aii-translate .aii-body { min-height: 38px; }
+.aii-ask .aii-body { min-height: 56px; }
+
+.aii-text { white-space: pre-wrap; word-break: break-word; }
+.aii-text.ai-err { color: #ff9aa8; }
+
+.aii-msg { margin-bottom: 12px; }
+.aii-msg:last-child { margin-bottom: 0; }
+.aii-msg b {
+  display: block;
+  font-size: 10.5px;
+  letter-spacing: 0.3px;
+  opacity: 0.55;
+  margin-bottom: 3px;
+  font-weight: 700;
+}
+.aii-ask .aii-user .aii-text { color: var(--accent); }
+
+.aii-input {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid var(--panel-2);
+  flex: none;
+}
+.aii-ta {
+  flex: 1;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  outline: none;
+  max-height: 84px;
+  color: var(--text);
+}
+.aii-ta:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14); }
+.aii-send {
+  flex: none;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 8px;
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.aii-send:hover { background: #1d4fd0; }
+.aii-send:disabled { opacity: 0.55; cursor: default; }
+
+/* ===== 文字输入框 ===== */
+.text-input {
+  position: fixed;
+  z-index: 45;
+  min-width: 60px;
+  min-height: 24px;
+  padding: 2px 4px;
+  border: 1px dashed var(--accent);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--accent);
+  font-family: var(--font);
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  line-height: 1.25;
+  white-space: pre;
+  -webkit-user-select: text;
+  user-select: text;
+}

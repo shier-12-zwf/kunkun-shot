@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>划词翻译</title>
+  <link rel="stylesheet" href="translate-popup.css" />
+</head>
+<body>
+  <div class="tp-card" id="card">
+    <div class="tp-head">
+      <span class="tp-title">划词翻译</span>
+      <span class="tp-target" id="target"></span>
+      <button class="tp-close" id="btnClose" title="关闭 (Esc)">✕</button>
+    </div>
+
+    <div class="tp-body">
+      <div class="tp-src" id="src"></div>
+      <div class="tp-divider"></div>
+      <div class="tp-trans" id="trans">
+        <div class="tp-loading" id="loading">
+          <span class="tp-dot"></span><span class="tp-dot"></span><span class="tp-dot"></span>
+          <span class="tp-loading-text">翻译中…</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="tp-foot">
+      <button class="tp-btn" id="btnCopy">复制译文</button>
+    </div>
+  </div>
+  <script src="translate-popup.js"></script>
+</body>
+</html>

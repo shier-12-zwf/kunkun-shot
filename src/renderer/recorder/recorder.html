@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' blob: data:; font-src 'self' data:; object-src 'none'; base-uri 'none'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' blob: data:; font-src 'self' data:; object-src 'none'; base-uri 'none'" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>录屏控制条</title>
+  <link rel="stylesheet" href="./recorder.css" />
+</head>
+<body>
+  <!-- 胶囊形录屏控制条：开始/计时/停止/取消 -->
+  <div class="bar" id="bar">
+    <!-- 开始录制：红点圆形按钮 -->
+    <button class="btn btn-start" id="btnStart" title="开始录制" aria-label="开始录制">
+      <span class="dot"></span>
+    </button>
+
+    <!-- 录制状态指示 + 计时器 -->
+    <div class="status" id="status">
+      <span class="live-dot" id="liveDot"></span>
+      <span class="timer" id="timer">00:00</span>
+    </div>
+
+    <!-- 停止录制：方块图标 -->
+    <button class="btn btn-stop" id="btnStop" title="停止并保存" aria-label="停止并保存" disabled>
+      <span class="square"></span>
+    </button>
+
+    <!-- 取消：关闭 -->
+    <button class="btn btn-cancel" id="btnCancel" title="取消录制" aria-label="取消录制">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+      </svg>
+    </button>
+
+    <!-- 错误 / 提示信息 -->
+    <div class="toast" id="toast" hidden></div>
+  </div>
+
+  <script src="./recorder.js"></script>
+</body>
+</html>

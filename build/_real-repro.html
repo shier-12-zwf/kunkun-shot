@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="../src/renderer/shared/design.css" />
+<link rel="stylesheet" href="../src/renderer/main/main.css" />
+<link rel="stylesheet" href="../src/renderer/main/pages/capture.css" />
+<link rel="stylesheet" href="../src/renderer/main/pages/history.css" />
+<link rel="stylesheet" href="../src/renderer/main/pages/ai.css" />
+<link rel="stylesheet" href="../src/renderer/main/pages/settings.css" />
+</head>
+<body class="app">
+  <header class="titlebar">
+    <div class="titlebar-brand">
+      <span class="titlebar-app">困困截屏助手</span>
+      <span class="titlebar-sep"></span>
+      <span class="titlebar-page" id="titlebar-page">设置</span>
+    </div>
+    <div class="titlebar-right"></div>
+  </header>
+  <aside class="sidebar">
+    <nav class="nav" id="nav">
+      <button class="nav-item" type="button" data-page="capture"><span class="nav-text">快捷截图</span></button>
+      <button class="nav-item" type="button" data-page="history"><span class="nav-text">历史记录</span></button>
+      <button class="nav-item" type="button" data-page="ai"><span class="nav-text">AI 工作台</span></button>
+      <button class="nav-item active" type="button" data-page="settings"><span class="nav-text">设置</span></button>
+    </nav>
+    <div class="sidebar-foot">
+      <button class="foot-link" id="foot-help">帮助</button>
+      <button class="foot-link" id="foot-feedback">反馈</button>
+      <span class="foot-ver">版本 0.1.0</span>
+    </div>
+  </aside>
+  <main id="page" class="page"></main>
+
+  <script>
+    window.kkapi = new Proxy({
+      getConfig: function () {
+        return Promise.resolve({
+          general: { theme: 'light', saveDir: '', launchAtLogin: false },
+          shortcuts: { capture: 'CommandOrControl+Shift+A', ocr: '', longShot: '', record: '', pinClipboard: '' },
+          deepseek: { apiKey: '', baseUrl: 'https://api.deepseek.com/v1', visionModel: 'deepseek-v4-pro', textModel: 'deepseek-v4-flash', askImagePrompt: '', ocrPrompt: '', translatePrompt: '', polishPrompt: '' },
+          ocr: { engine: 'local', lang: 'chi_sim+eng' },
+          capture: { copyAfterCapture: false, autoPin: false },
+          recording: { fps: 12, toGif: true }
+        });
+      },
+      setConfig: function (p) { return Promise.resolve(p); },
+      historyList: function () { return Promise.resolve([]); },
+      onHistoryChanged: function () { return function () {}; },
+      onInit: function () {},
+      onNav: function () {},
+      testDeepSeek: function () { return Promise.resolve({ ok: false, message: 'stub' }); },
+      uid: function () { return 'id-' + Math.random().toString(36).slice(2); }
+    }, { get: function (t, p) { if (p in t) return t[p]; return function () { return Promise.resolve({}); }; } });
+  </script>
+  <script src="../src/renderer/main/pages/capture.js"></script>
+  <script src="../src/renderer/main/pages/history.js"></script>
+  <script src="../src/renderer/main/pages/ai.js"></script>
+  <script src="../src/renderer/main/pages/settings.js"></script>
+  <script src="../src/renderer/main/main.js"></script>
+  <script>window.KKMain && window.KKMain.go('settings');</script>
+</body>
+</html>

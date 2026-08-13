@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="../src/renderer/shared/design.css" />
+<link rel="stylesheet" href="../src/renderer/main/main.css" />
+<link rel="stylesheet" href="../src/renderer/main/pages/settings.css" />
+</head>
+<body class="app">
+  <header class="titlebar"><div class="titlebar-brand"><span class="titlebar-app">困困截屏助手</span></div></header>
+  <aside class="sidebar"><div class="nav"><button class="nav-item active"><span class="nav-text">设置</span></button></div></aside>
+  <main id="page" class="page">
+    <div class="settings-page">
+      <div class="settings-scroll">
+        <div class="settings-inner">
+          <header class="settings-header">
+            <div class="settings-title"><span>设置</span></div>
+            <div class="settings-sub">通用 / 快捷键 / 截图 / 录屏 / OCR / AI 模型 / 存储与隐私 — 多数改动即时保存</div>
+          </header>
+          <div class="settings-grid">
+            <section class="card card-pad group">
+              <div class="group-head"><div class="group-title"><span>通用</span></div></div>
+              <div class="group-desc">启动行为、保存目录与外观主题。</div>
+              <div class="group-body">
+                <div class="row-field">
+                  <div class="row-meta"><div class="row-label">开机自动启动</div><div class="row-hint">登录系统后自动在后台运行困困截屏助手</div></div>
+                  <div class="row-control"><label class="kk-toggle"><input class="kk-toggle-input" type="checkbox"><span class="kk-toggle-track"><span class="kk-toggle-thumb"></span></span></label></div>
+                </div>
+                <div class="stack-field">
+                  <label class="label">截图保存目录</label>
+                  <input class="input" placeholder="留空 = 系统「图片」目录" />
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+      <div class="settings-footer">
+        <div class="footer-left"><span class="footer-note">AI 模型为敏感配置，需点此保存才会生效</span></div>
+        <div class="footer-right"><button class="btn btn-primary">保存 AI 配置</button></div>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

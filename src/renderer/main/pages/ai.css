@@ -1,0 +1,424 @@
+/* AI 工作台页样式（主窗口内嵌页，注入到 #page）
+ * 复用 ../shared/design.css 的设计令牌与组件类；本文件只补三栏布局与页内私有样式。
+ * 所有类名以 kk-ai- 前缀作用域化，避免与外壳 / 其它页冲突。 */
+
+/* ============ 三栏总布局 ============ */
+.kk-ai-root {
+  display: grid;
+  grid-template-columns: 220px minmax(280px, 1.2fr) minmax(360px, 1.4fr);
+  gap: 14px;
+  height: 100%;
+  min-height: 0;
+  padding: 14px;
+  box-sizing: border-box;
+}
+
+/* 每一栏都是实色卡片，纵向 flex，内部可独立滚动 */
+.kk-ai-left,
+.kk-ai-mid,
+.kk-ai-right {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.kk-ai-left { padding: 12px; }
+.kk-ai-mid { padding: 12px 14px 14px; }
+.kk-ai-right { padding: 12px 14px 12px; }
+
+/* 列头（标题 + 可选操作） */
+.kk-ai-col-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.kk-ai-col-head .group-title { margin-bottom: 0; }
+
+/* 左栏折叠：收成窄条，只留图标 + 展开按钮 */
+.kk-ai-left-toggle {
+  padding: 2px 8px;
+  font-size: 15px;
+  line-height: 1;
+  flex: none;
+}
+.kk-ai-root.is-left-collapsed {
+  grid-template-columns: 48px minmax(280px, 1.2fr) minmax(360px, 1.4fr);
+}
+.kk-ai-root.is-left-collapsed .kk-ai-left {
+  padding: 12px 6px;
+}
+.kk-ai-root.is-left-collapsed .kk-ai-left .group-title span,
+.kk-ai-root.is-left-collapsed .kk-ai-history-list {
+  display: none;
+}
+.kk-ai-root.is-left-collapsed .kk-ai-col-head {
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 中栏折叠：收成窄条，只留展开按钮，腾空间给 AI 对话 */
+.kk-ai-mid-toggle {
+  padding: 2px 8px;
+  font-size: 15px;
+  line-height: 1;
+  flex: none;
+}
+.kk-ai-root.is-mid-collapsed {
+  grid-template-columns: 220px 48px minmax(360px, 1.4fr);
+}
+.kk-ai-root.is-left-collapsed.is-mid-collapsed {
+  grid-template-columns: 48px 48px minmax(360px, 1.4fr);
+}
+.kk-ai-root.is-mid-collapsed .kk-ai-mid {
+  padding: 12px 6px;
+}
+.kk-ai-root.is-mid-collapsed .kk-ai-mid > *:not(.kk-ai-col-head) {
+  display: none;
+}
+.kk-ai-root.is-mid-collapsed .kk-ai-mid .group-title span {
+  display: none;
+}
+.kk-ai-root.is-mid-collapsed .kk-ai-mid .kk-ai-col-head {
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+/* 折叠态只保留展开按钮，隐藏「回到历史」等 */
+.kk-ai-root.is-mid-collapsed .kk-ai-mid .kk-ai-col-head .btn:not(.kk-ai-mid-toggle) {
+  display: none;
+}
+
+/* 通用小按钮（紧凑） */
+.kk-ai-mini {
+  height: 30px;
+  padding: 0 11px;
+  font-size: 12.5px;
+}
+
+/* ============ 左栏：历史缩略图列表 ============ */
+.kk-ai-history-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 2px;
+}
+
+.kk-ai-thumb {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  cursor: pointer;
+  text-align: left;
+  transition: background .14s, border-color .14s, box-shadow .14s;
+}
+.kk-ai-thumb:hover { background: var(--brand-soft); border-color: #cdddff; }
+.kk-ai-thumb:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.kk-ai-thumb.is-active {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+  box-shadow: 0 0 0 1px var(--brand) inset;
+}
+
+.kk-ai-thumb-img {
+  flex: 0 0 auto;
+  width: 54px;
+  height: 42px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-soft);
+}
+.kk-ai-thumb-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.kk-ai-thumb-meta { min-width: 0; flex: 1 1 auto; }
+.kk-ai-thumb-time { font-size: 12.5px; font-weight: 600; color: var(--text-strong); }
+.kk-ai-thumb-dim { font-size: 11.5px; color: var(--text-soft); margin-top: 2px; }
+
+/* 左栏空态 */
+.kk-ai-side-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 26px 12px;
+  text-align: center;
+  color: var(--text-soft);
+}
+.kk-ai-side-empty .ico-lg { color: var(--text-soft); }
+.kk-ai-side-empty-t { font-size: 13px; font-weight: 600; color: var(--text); }
+.kk-ai-side-empty-d { font-size: 11.5px; line-height: 1.5; }
+.kk-ai-side-empty .kk-ai-mini { margin-top: 4px; }
+
+/* ============ 中栏：当前图片预览 ============ */
+.kk-ai-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  border-radius: var(--r-md);
+  background: var(--bg-sunken);
+  overflow: auto;
+}
+.kk-ai-preview-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  cursor: zoom-in;
+}
+
+/* 中栏空态 */
+.kk-ai-preview-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-soft);
+}
+.kk-ai-preview-empty .ico-lg { color: var(--text-soft); }
+.kk-ai-preview-empty-t { font-size: 13.5px; font-weight: 600; color: var(--text); }
+.kk-ai-preview-empty-d { font-size: 12px; line-height: 1.5; max-width: 280px; }
+
+/* ============ 右栏：对话式工作区 ============ */
+/* 能力胶囊行 */
+.kk-ai-chips {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* OCR 可编辑结果区 */
+.kk-ai-ocr {
+  flex: 0 0 auto;
+  margin-bottom: 10px;
+}
+.kk-ai-ocr-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.kk-ai-ocr-head .label { margin-bottom: 0; }
+.kk-ai-ocr-actions { display: flex; gap: 6px; }
+.kk-ai-ocr-area {
+  min-height: 70px;
+  max-height: 150px;
+  font-size: 13px;
+}
+
+/* 消息流 */
+.kk-ai-stream {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+/* 消息流空态 */
+.kk-ai-stream-empty {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 20px;
+  text-align: center;
+  color: var(--text-soft);
+}
+.kk-ai-stream-empty .ico-lg { color: var(--brand); opacity: .7; }
+.kk-ai-stream-empty-t { font-size: 14px; font-weight: 700; color: var(--text); }
+.kk-ai-stream-empty-d { font-size: 12px; line-height: 1.5; max-width: 300px; }
+
+/* 消息气泡 */
+.kk-ai-msg {
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  max-width: 92%;
+}
+.kk-ai-msg.is-user {
+  align-self: flex-end;
+  background: var(--brand-soft);
+  border-color: #d7e3ff;
+}
+.kk-ai-msg.is-ai { align-self: flex-start; }
+
+.kk-ai-msg-role {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .3px;
+  text-transform: uppercase;
+  color: var(--text-soft);
+  margin-bottom: 5px;
+}
+.kk-ai-msg.is-user .kk-ai-msg-role { color: var(--brand-strong); justify-content: flex-end; }
+.kk-ai-msg.is-ai .kk-ai-msg-role { color: var(--purple); }
+
+.kk-ai-msg-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.65;
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+.kk-ai-msg-tools {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
+}
+
+/* 流式闪烁光标 */
+.kk-ai-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 14px;
+  margin-left: 2px;
+  background: var(--brand);
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  animation: kkAiBlink 1s steps(2, start) infinite;
+}
+@keyframes kkAiBlink { to { visibility: hidden; } }
+
+/* 错误提示（红色 callout，配合 .status err 徽标） */
+.kk-ai-error {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 13px;
+  border: 1px solid rgba(240, 80, 110, .25);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--r-md);
+  background: rgba(240, 80, 110, .07);
+}
+.kk-ai-error .status.err { align-self: flex-start; }
+.kk-ai-error-msg {
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.kk-ai-link {
+  align-self: flex-start;
+  color: var(--brand);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.kk-ai-link:hover { color: var(--brand-strong); }
+
+/* 底部输入区 */
+.kk-ai-composer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 9px;
+  padding-top: 11px;
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.kk-ai-input {
+  flex: 1 1 auto;
+  min-height: 38px;
+  max-height: 132px;
+  resize: none;
+  line-height: 1.5;
+}
+.kk-ai-send {
+  flex: 0 0 auto;
+  height: 38px;
+}
+
+/* ============ 放大查看（灯箱） ============ */
+.kk-ai-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: rgba(20, 30, 60, .62);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  cursor: zoom-out;
+}
+.kk-ai-lightbox img {
+  max-width: 92vw;
+  max-height: 88vh;
+  object-fit: contain;
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-pop);
+  background: var(--surface);
+  cursor: default;
+}
+.kk-ai-lightbox-close {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  width: 38px;
+  height: 38px;
+  color: #fff;
+  background: rgba(255, 255, 255, .14);
+}
+.kk-ai-lightbox-close:hover { background: rgba(255, 255, 255, .26); color: #fff; }
+
+/* ============ 窄宽自适应：堆叠左栏到顶部横向 ============ */
+@media (max-width: 900px) {
+  .kk-ai-root {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: minmax(160px, 0.6fr) 1fr;
+  }
+  .kk-ai-left {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+  .kk-ai-history-list {
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .kk-ai-thumb { width: auto; flex: 0 0 auto; min-width: 150px; }
+}

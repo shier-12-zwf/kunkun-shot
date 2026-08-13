@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>截屏助手图标</title>
+<style>
+  /* 困困截图工具 · 主图标（高还原玻璃版 · 白色 App 底板，纯 CSS 原创实现）
+     依据更新后的设计稿：白色圆角底板 + 三层错位玻璃 + 黑色指针 + 克制光晕 + 四角截屏框，
+     中央图形缩小并在底板内保留安全边距。1em = 图标尺寸，内部全用 em，整体自适应缩放。 */
+  :root {
+    --size: min(1024px, 100vmin);
+    --r-plate: 0.2em;      /* 底板圆角 */
+    --r-glass: 0.085em;    /* 玻璃方块圆角 */
+    --c-cyan: #25cfe6;
+    --c-purple: #a866ff;
+    --c-yellow: #ffd23d;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: transparent;     /* 页面中性透明，不参与图标画面 */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  /* 画布（透明），四周留出投影空间 */
+  .icon {
+    position: relative;
+    width: var(--size);
+    height: var(--size);
+    font-size: var(--size);
+  }
+
+  /* ===== 白色圆角 App 底板 ===== */
+  .plate {
+    position: absolute;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    width: 0.8em; height: 0.8em;          /* 缩小一点，给周边柔光留空间 */
+    border-radius: var(--r-plate);
+    background: linear-gradient(155deg, #2b303b 0%, #161a23 48%, #0a0c11 100%);
+    border: 0.004em solid rgba(255, 255, 255, 0.09);
+    box-shadow:
+      0 0 0.05em 0.004em rgba(120, 180, 255, 0.6),     /* 周边柔光（冷蓝近层） */
+      0 0 0.085em 0.01em rgba(75, 140, 235, 0.34),     /* 更外层弥散柔光 */
+      0 0.02em 0.05em rgba(0, 0, 0, 0.5),              /* 接地投影 */
+      inset 0 0.012em 0.026em rgba(255, 255, 255, 0.16); /* 顶部内高光 */
+  }
+
+  /* ===== 玻璃核心舞台（底板内居中，留安全边距） ===== */
+  .stage {
+    position: absolute;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    width: 0.62em; height: 0.62em;
+  }
+
+  /* ===== 三层错位玻璃方块 ===== */
+  .layer {
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 0.46em; height: 0.46em;
+    border-radius: var(--r-glass);
+  }
+  .layer.l1 {
+    transform: translate(-50%, -50%) translate(-0.052em, -0.058em) rotate(-9deg);
+    background: rgba(120, 170, 255, 0.30);
+    border: 0.004em solid rgba(110, 155, 230, 0.5);
+    box-shadow: 0 0.012em 0.03em rgba(30, 60, 120, 0.22);
+  }
+  .layer.l2 {
+    transform: translate(-50%, -50%) translate(0.05em, 0.024em) rotate(7deg);
+    background: rgba(120, 170, 255, 0.40);
+    border: 0.004em solid rgba(110, 155, 230, 0.55);
+    box-shadow: 0 0.012em 0.03em rgba(30, 60, 120, 0.22);
+  }
+  /* 前层：冰蓝磨砂玻璃 */
+  .layer.l3 {
+    transform: translate(-50%, -50%) rotate(-2deg);
+    background: linear-gradient(150deg, rgba(198, 222, 255, 0.94), rgba(150, 192, 252, 0.8));
+    border: 0.006em solid rgba(255, 255, 255, 0.85);
+    box-shadow:
+      inset 0 0.012em 0.024em rgba(255, 255, 255, 0.95),
+      inset 0 -0.02em 0.045em rgba(70, 120, 205, 0.5),
+      0 0.018em 0.04em rgba(30, 60, 120, 0.32);
+    -webkit-backdrop-filter: blur(0.015em);
+    backdrop-filter: blur(0.015em);
+  }
+  .layer.l3::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.62) 0%, rgba(255, 255, 255, 0) 46%);
+  }
+
+  /* ===== 点击彩色光晕（克制，正常混合低透明，避免在浅底上消失） ===== */
+  .glow {
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 0.16em; height: 0.16em;
+    border-radius: 50%;
+    filter: blur(0.03em);
+    opacity: 0.42;
+  }
+  .glow.cy { background: var(--c-cyan);   transform: translate(-50%, -50%) translate(-0.062em, -0.05em); }
+  .glow.pu { background: var(--c-purple); transform: translate(-50%, -50%) translate(0.06em, 0.046em); }
+  .glow.ye { background: var(--c-yellow); transform: translate(-50%, -50%) translate(0.05em, -0.062em); opacity: 0.34; }
+
+  /* ===== 四个白色 L 形截屏角标（带蓝色投影，确保在浅玻璃上可见） ===== */
+  .frame {
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 0.33em; height: 0.33em;
+    transform: translate(-50%, -50%);
+    filter: drop-shadow(0 0.003em 0.008em rgba(20, 50, 110, 0.7));
+  }
+  .corner {
+    position: absolute;
+    width: 0.068em; height: 0.068em;
+    border: 0.015em solid #ffffff;
+  }
+  .corner.tl { top: 0; left: 0; border-right: none; border-bottom: none; border-top-left-radius: 0.013em; }
+  .corner.tr { top: 0; right: 0; border-left: none; border-bottom: none; border-top-right-radius: 0.013em; }
+  .corner.bl { bottom: 0; left: 0; border-right: none; border-top: none; border-bottom-left-radius: 0.013em; }
+  .corner.br { bottom: 0; right: 0; border-left: none; border-top: none; border-bottom-right-radius: 0.013em; }
+
+  /* ===== 中心黑色鼠标指针（白描边增强对比） ===== */
+  .cursor {
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 0.16em; height: 0.222em;
+    transform: translate(-56%, -50%) rotate(-3deg);
+  }
+  .cursor i {
+    position: absolute;
+    inset: 0;
+    clip-path: polygon(0 0, 0 73%, 20% 57%, 33% 92%, 47% 85%, 33% 53%, 61% 53%);
+  }
+  .cursor .stroke {
+    transform: scale(1.18);
+    transform-origin: 8% 8%;
+    background: #ffffff;
+  }
+  .cursor .fill {
+    background: #0a1024;
+    filter: drop-shadow(0 0.005em 0.012em rgba(0, 0, 0, 0.5));
+  }
+</style>
+</head>
+<body>
+  <div class="icon">
+    <div class="plate"></div>
+    <div class="stage">
+      <div class="layer l1"></div>
+      <div class="layer l2"></div>
+      <div class="layer l3"></div>
+
+      <div class="glow cy"></div>
+      <div class="glow pu"></div>
+      <div class="glow ye"></div>
+
+      <div class="frame">
+        <span class="corner tl"></span>
+        <span class="corner tr"></span>
+        <span class="corner bl"></span>
+        <span class="corner br"></span>
+      </div>
+
+      <div class="cursor">
+        <i class="stroke"></i>
+        <i class="fill"></i>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,357 @@
+/* 困困截屏助手 · 快捷截图首页布局
+ * 仅写本页结构与装饰，配色/组件复用 ../../shared/design.css 的设计令牌。 */
+
+/* ===== 页面容器：纵向堆叠，居中收窄 ===== */
+.cap-header {
+  text-align: center;
+  margin: 6px 0 18px;
+}
+.cap-title {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.4px;
+  color: var(--text-strong);
+  line-height: 1.25;
+}
+.cap-subtitle {
+  margin-top: 6px;
+  font-size: 13.5px;
+  color: var(--text-soft);
+}
+
+/* ===== 中央大尺寸玻璃捕捉区 ===== */
+.cap-stage {
+  display: block;
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 0;
+  border: 1px solid var(--glass-border);
+  cursor: pointer;
+  /* 玻璃背景与阴影来自 .glass，这里只调尺寸与交互态 */
+  transition: transform 0.12s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+  -webkit-app-region: no-drag;
+}
+.cap-stage:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-pop), inset 0 1px 1px rgba(255, 255, 255, 0.8);
+  border-color: rgba(75, 124, 255, 0.5);
+}
+.cap-stage:active {
+  transform: translateY(0);
+}
+.cap-stage:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring), var(--glass-shadow);
+}
+.cap-stage-inner {
+  position: relative;
+  height: 230px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 22px;
+}
+
+/* —— 截屏框选角标装饰 —— */
+.cap-marquee {
+  position: relative;
+  width: 200px;
+  height: 124px;
+  border: 1.5px dashed rgba(75, 124, 255, 0.55);
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.28);
+}
+.cap-corner {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border: 2.5px solid var(--brand);
+}
+.cap-corner.tl {
+  top: -2px;
+  left: -2px;
+  border-right: none;
+  border-bottom: none;
+  border-top-left-radius: 4px;
+}
+.cap-corner.tr {
+  top: -2px;
+  right: -2px;
+  border-left: none;
+  border-bottom: none;
+  border-top-right-radius: 4px;
+}
+.cap-corner.bl {
+  bottom: -2px;
+  left: -2px;
+  border-right: none;
+  border-top: none;
+  border-bottom-left-radius: 4px;
+}
+.cap-corner.br {
+  bottom: -2px;
+  right: -2px;
+  border-left: none;
+  border-top: none;
+  border-bottom-right-radius: 4px;
+}
+.cap-marquee-size {
+  position: absolute;
+  top: -12px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--brand);
+  padding: 2px 9px;
+  border-radius: 999px;
+  box-shadow: 0 2px 6px rgba(75, 124, 255, 0.4);
+  white-space: nowrap;
+}
+
+/* —— 鼠标指针装饰 —— */
+.cap-cursor {
+  position: absolute;
+  right: -10px;
+  bottom: -12px;
+  width: 30px;
+  height: 30px;
+  fill: var(--text-strong);
+  stroke: #fff;
+  stroke-width: 1.2;
+  filter: drop-shadow(0 2px 4px rgba(30, 55, 120, 0.3));
+}
+
+.cap-stage-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--brand-strong);
+}
+.cap-stage-hint .ico {
+  color: var(--brand);
+}
+
+/* ===== 主操作按钮排 ===== */
+.cap-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 14px;
+  max-width: 720px;
+  margin: 22px auto 0;
+}
+.cap-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  min-width: 116px;
+}
+.cap-act-btn {
+  width: 100%;
+  height: 44px;
+  padding: 0 18px;
+  font-size: 14px;
+}
+.cap-act-btn .ico {
+  width: 17px;
+  height: 17px;
+}
+.cap-act-label {
+  white-space: nowrap;
+}
+
+/* 倒计时进行中：延时按钮强调 + 轻微脉冲 */
+.cap-act-btn.counting {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #fff;
+  animation: cap-pulse 1s ease-in-out infinite;
+}
+@keyframes cap-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(224, 150, 42, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(224, 150, 42, 0);
+  }
+}
+
+/* —— 操作卡下方小字：快捷键 / 反馈，低对比、不抢主按钮 —— */
+.cap-act-hint {
+  min-height: 18px;
+  margin-top: 0;
+  text-align: center;
+}
+.cap-kbd {
+  display: inline-block;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-soft);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  letter-spacing: 1px;
+}
+
+/* —— 延时 3s/5s 选择器 —— */
+.cap-delay-picker {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+}
+.cap-delay-chip {
+  height: 24px;
+  padding: 0 11px;
+  font-size: 12px;
+}
+.cap-action.counting .cap-delay-picker {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* ===== 底部：最近截图 + 自动复制 ===== */
+.cap-recent {
+  max-width: 720px;
+  margin: 24px auto 8px;
+}
+.cap-recent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.cap-recent-head .group-title {
+  margin-bottom: 0;
+}
+.cap-recent-more {
+  height: 30px;
+  padding: 0 12px;
+  font-size: 12.5px;
+  color: var(--text-soft);
+}
+.cap-recent-more .ico-sm {
+  margin-left: -2px;
+}
+
+/* —— 缩略图横向条 —— */
+.cap-recent-strip {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
+}
+.cap-thumb {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-sunken);
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.14s ease, border-color 0.14s ease;
+  -webkit-app-region: no-drag;
+}
+.cap-thumb:hover {
+  transform: translateY(-2px);
+  border-color: var(--brand);
+  box-shadow: var(--shadow-md);
+}
+.cap-thumb:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cap-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.cap-recent-empty {
+  grid-column: 1 / -1;
+  padding: 18px 4px;
+  text-align: center;
+}
+
+/* —— 底部脚：自动复制开关 —— */
+.cap-recent-foot {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.cap-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+.cap-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.cap-switch-track {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 23px;
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+.cap-switch-dot {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.16s ease;
+}
+.cap-switch input:checked + .cap-switch-track {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+.cap-switch input:checked + .cap-switch-track .cap-switch-dot {
+  transform: translateX(17px);
+}
+.cap-switch input:focus-visible + .cap-switch-track {
+  box-shadow: var(--focus-ring);
+}
+.cap-switch-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+}
+.cap-switch-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.cap-switch-text .hint {
+  margin-top: 1px;
+}
+
+/* ===== 窄宽自适应：缩略图条降为 3 列 ===== */
+@media (max-width: 560px) {
+  .cap-recent-strip {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .cap-action {
+    min-width: 100px;
+  }
+}

@@ -1,0 +1,276 @@
+/* 困困截屏助手 · 菜单栏弹窗样式
+ * 透明无边框窗口（约 340 宽）。html/body 透明，靠 .pop 玻璃卡片承载内容，
+ * 四周留少量透明 padding 以显示 --shadow-pop 柔影。紧凑布局，按使用频率排列，
+ * 不做成缩小版完整应用。 */
+
+html, body {
+  height: 100%;
+  background: transparent;       /* 透明窗口 */
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* —— 根卡片：玻璃 + 厚柔影 —— */
+.pop {
+  margin: 10px;                  /* 透明边，露出阴影 */
+  padding: 13px 13px 11px;
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-pop), inset 0 1px 1px rgba(255, 255, 255, 0.8);
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+/* —— ① 首行品牌 —— */
+.pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.brand-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-sm);
+  background: var(--brand);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(75, 124, 255, 0.32);
+  flex: none;
+}
+.brand-ico .ico { width: 19px; height: 19px; stroke-width: 1.8; }
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+  min-width: 0;
+}
+.brand-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-strong);
+  white-space: nowrap;
+}
+.brand-status {
+  font-size: 11.5px;
+  color: var(--text-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* —— 通用分区 —— */
+.pop-section {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+/* —— ② 主操作：区域截图大按钮 —— */
+.capture-main {
+  width: 100%;
+  height: 46px;
+  font-size: 15px;
+  border-radius: var(--r-md);
+  gap: 9px;
+}
+.capture-main .ico { width: 20px; height: 20px; stroke-width: 1.8; }
+.capture-main .key-hint {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: var(--r-xs);
+  padding: 1px 7px;
+  letter-spacing: 0.3px;
+}
+.capture-main .key-hint:empty { display: none; }
+
+/* —— 次操作三宫格 —— */
+.action-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.action-cell {
+  height: 40px;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--r-sm);
+  padding: 0 6px;
+}
+.action-cell .ico { width: 17px; height: 17px; }
+
+/* —— 操作反馈行 —— */
+.status-row { display: flex; }
+.status-row[hidden] { display: none; }
+.status-row .status { width: 100%; justify-content: center; }
+
+/* —— 行标题 —— */
+.row-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.row-title .eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.ai-spark { color: var(--brand); }
+.ai-spark path { fill: rgba(75, 124, 255, 0.18); }
+
+/* —— 文本链接 —— */
+.text-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: none;
+  background: transparent;
+  color: var(--brand-strong);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 2px;
+  border-radius: var(--r-xs);
+}
+.text-link:hover { color: var(--brand); text-decoration: underline; }
+.text-link:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.text-link.strong { font-size: 12.5px; }
+.text-link .ico { width: 13px; height: 13px; }
+
+/* —— ③ 最近截图卡片 —— */
+.recent-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition: background .14s, border-color .14s, box-shadow .14s;
+}
+.recent-card:hover { background: var(--surface-2); border-color: #cdddff; box-shadow: var(--shadow-sm); }
+.recent-card:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.recent-thumb {
+  width: 46px;
+  height: 34px;
+  flex: none;
+  border-radius: var(--r-xs);
+  background: var(--bg-sunken) center / cover no-repeat;
+  border: 1px solid var(--line);
+}
+.recent-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+  flex: 1;
+}
+.recent-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recent-sub {
+  font-size: 11.5px;
+  color: var(--text-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recent-arrow { color: var(--text-soft); flex: none; }
+/* 无最近图时的占位态 */
+.recent-card.empty { cursor: default; }
+.recent-card.empty:hover { background: var(--surface); border-color: var(--line); box-shadow: none; }
+.recent-card.empty .recent-arrow { opacity: 0; }
+
+/* —— ④ AI 胶囊行 —— */
+.chip-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.chip-row .chip {
+  justify-content: center;
+  height: 32px;
+  padding: 0 8px;
+}
+.ai-hint {
+  font-size: 11.5px;
+  color: var(--warn);
+  margin: -2px 2px 0;
+}
+.ai-hint[hidden] { display: none; }
+
+/* —— ⑤ 底部 —— */
+.pop-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 1px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+/* 自定义开关（复用品牌色） */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch-track {
+  position: relative;
+  width: 34px;
+  height: 19px;
+  border-radius: 999px;
+  background: #cdd6e8;
+  transition: background .16s;
+  flex: none;
+}
+.switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(40, 70, 140, 0.25);
+  transition: transform .16s;
+}
+.switch input:checked + .switch-track { background: var(--brand); }
+.switch input:checked + .switch-track .switch-knob { transform: translateX(15px); }
+.switch input:focus-visible + .switch-track { box-shadow: var(--focus-ring); }
+.switch-label {
+  font-size: 12px;
+  color: var(--text-soft);
+  white-space: nowrap;
+}
+
+/* —— 深色主题下：玻璃卡片描边略亮 —— */
+body.theme-dark .switch-track { background: #2a3240; }
+body.theme-dark .switch-knob { background: #d7deec; }

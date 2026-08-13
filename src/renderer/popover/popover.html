@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' blob: data:; font-src 'self' data:; object-src 'none'; base-uri 'none'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' blob: data:; font-src 'self' data:; object-src 'none'; base-uri 'none'" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>困困截屏助手 · 菜单栏</title>
+  <!-- 复用统一设计系统 -->
+  <link rel="stylesheet" href="../shared/design.css" />
+  <link rel="stylesheet" href="./popover.css" />
+</head>
+<body>
+  <!-- 根容器：一张冰蓝玻璃卡片，四周留少量透明边以显示 --shadow-pop 柔影 -->
+  <div class="pop glass" id="pop">
+
+    <!-- ① 首行：品牌 + 当前状态 + 设置入口 -->
+    <header class="pop-head">
+      <div class="brand">
+        <span class="brand-ico" aria-hidden="true">
+          <!-- 相机线性图标 -->
+          <svg class="ico" viewBox="0 0 24 24">
+            <path d="M3 8a2 2 0 0 1 2-2h2l1.2-2h5.6L17 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            <circle cx="12" cy="12.5" r="3.2" />
+          </svg>
+        </span>
+        <div class="brand-text">
+          <span class="brand-name">困困截屏助手</span>
+          <span class="brand-status" id="headStatus">就绪</span>
+        </div>
+      </div>
+      <button class="icon-btn" id="btnSettings" title="偏好设置" aria-label="偏好设置">
+        <!-- 设置线性图标 -->
+        <svg class="ico" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l1.8 1.8 M17.2 17.2 19 19 M19 5l-1.8 1.8 M6.8 17.2 5 19" />
+        </svg>
+      </button>
+    </header>
+
+    <!-- ② 主操作区 -->
+    <section class="pop-section">
+      <!-- 突出：区域截图大按钮 -->
+      <button class="btn btn-primary capture-main" id="btnRegion">
+        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M7 3v4H3 M17 3v4h4 M7 21v-4H3 M17 21v-4h4" />
+        </svg>
+        <span>区域截图</span>
+        <kbd class="key-hint" id="hintRegion"></kbd>
+      </button>
+
+      <!-- 次操作：窗口 / 录屏 / 全屏 -->
+      <div class="action-grid">
+        <button class="btn btn-soft action-cell" id="btnWindow">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="5" width="18" height="14" rx="2" />
+            <path d="M3 9h18" />
+          </svg>
+          <span>窗口</span>
+        </button>
+        <button class="btn btn-soft action-cell" id="btnRecord">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="8" />
+            <circle cx="12" cy="12" r="3" fill="currentColor" />
+          </svg>
+          <span>录屏</span>
+        </button>
+        <button class="btn btn-soft action-cell" id="btnFull">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 9V4h5 M20 9V4h-5 M4 15v5h5 M20 15v5h-5" />
+          </svg>
+          <span>全屏</span>
+        </button>
+      </div>
+
+      <!-- 操作反馈：原位 .status，不弹遮挡层 -->
+      <div class="status-row" id="statusRow" hidden>
+        <span class="status loading" id="statusBadge" role="status" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <!-- ③ 最近截图 -->
+    <section class="pop-section recent" id="recentSection">
+      <div class="row-title">
+        <span class="eyebrow">最近截图</span>
+        <button class="text-link" id="btnAllHistory">查看全部</button>
+      </div>
+      <button class="recent-card" id="recentCard" title="打开历史记录">
+        <span class="recent-thumb" id="recentThumb" aria-hidden="true"></span>
+        <span class="recent-meta">
+          <span class="recent-name" id="recentName">暂无截图</span>
+          <span class="recent-sub" id="recentSub">截一张图后会出现在这里</span>
+        </span>
+        <svg class="ico ico-sm recent-arrow" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9 6l6 6-6 6" />
+        </svg>
+      </button>
+    </section>
+
+    <!-- ④ AI 区：对最近一张截图操作 -->
+    <section class="pop-section">
+      <div class="row-title">
+        <span class="eyebrow">
+          <svg class="ico ico-sm ai-spark" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3l1.8 4.7L18.5 9.5 13.8 11.3 12 16l-1.8-4.7L5.5 9.5l4.7-1.8z" />
+          </svg>
+          对最近截图用 AI
+        </span>
+      </div>
+      <div class="chip-row" id="chipRow">
+        <button class="chip" id="chipAsk" data-mode="ask" title="对最近截图提问">
+          <svg class="ico ico-sm" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3l1.8 4.7L18.5 9.5 13.8 11.3 12 16l-1.8-4.7L5.5 9.5l4.7-1.8z" />
+          </svg>
+          问图
+        </button>
+        <button class="chip" id="chipOcr" data-mode="ocr" title="识别最近截图中的文字">
+          <svg class="ico ico-sm" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7V5h16v2 M9 19h6 M12 5v14" />
+          </svg>
+          OCR
+        </button>
+        <button class="chip" id="chipTranslate" data-mode="translateImage" title="翻译最近截图中的文字">
+          <svg class="ico ico-sm" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 5h7 M7 5v2c0 3-2 5-4 6 M5 11c1 2 3 3 5 3 M13 19l4-9 4 9 M15 16h4" />
+          </svg>
+          翻译
+        </button>
+      </div>
+      <p class="ai-hint" id="aiHint" hidden>没有可用截图，先截一张图再试。</p>
+    </section>
+
+    <!-- ⑤ 底部：自动复制开关 + 打开主应用 -->
+    <footer class="pop-foot">
+      <label class="switch" id="copySwitch" title="截图后自动复制到剪贴板">
+        <input type="checkbox" id="copyToggle" />
+        <span class="switch-track"><span class="switch-knob"></span></span>
+        <span class="switch-label">截图后自动复制</span>
+      </label>
+      <button class="text-link strong" id="btnOpenMain">
+        打开主应用
+        <svg class="ico ico-sm" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9 6l6 6-6 6" />
+        </svg>
+      </button>
+    </footer>
+  </div>
+
+  <script src="./popover.js"></script>
+</body>
+</html>

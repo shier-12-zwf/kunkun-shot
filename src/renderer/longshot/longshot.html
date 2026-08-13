@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' blob: data:; font-src 'self' data:; object-src 'none'; base-uri 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' blob: data:; font-src 'self' data:; object-src 'none'; base-uri 'none'" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>长截图 · 困困截图工具</title>
+    <link rel="stylesheet" href="./longshot.css" />
+  </head>
+  <body>
+    <!-- 整个控制条：浅色胶囊，悬浮在选区外面 -->
+    <div class="bar" id="bar">
+      <!-- 左侧状态区：说明 + 帧数 -->
+      <div class="status">
+        <div class="title" id="hint">滚动页面会自动拼接</div>
+        <div class="meta">
+          已捕获 <span class="count" id="count">0</span> 帧
+          <span class="dot" id="liveDot" aria-hidden="true"></span>
+        </div>
+      </div>
+
+      <!-- 右侧按钮区 -->
+      <div class="actions">
+        <!-- 开始捕获 -->
+        <button class="btn btn-primary" id="btnStart" title="开始捕获">
+          <span class="ico" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="14" height="14">
+              <path d="M4 3.5v9a.5.5 0 0 0 .77.42l7-4.5a.5.5 0 0 0 0-.84l-7-4.5A.5.5 0 0 0 4 3.5z" fill="currentColor"/>
+            </svg>
+          </span>
+          <span class="label">开始</span>
+        </button>
+
+        <!-- 完成（拼接保存）-->
+        <button class="btn btn-ok" id="btnDone" title="完成并保存" disabled>
+          <span class="ico" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="14" height="14">
+              <path d="M13.5 4.5l-7 7-4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <span class="label">完成</span>
+        </button>
+
+        <!-- 取消 -->
+        <button class="btn btn-ghost" id="btnCancel" title="取消">
+          <span class="ico" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="14" height="14">
+              <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </span>
+          <span class="label">取消</span>
+        </button>
+      </div>
+    </div>
+
+    <script src="./longshot.js"></script>
+  </body>
+</html>

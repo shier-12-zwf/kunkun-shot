@@ -1,0 +1,188 @@
+/* 困困截屏助手 · 主窗口外壳布局
+ * 单窗口多页：顶部细标题栏 + 左侧固定侧栏 + 右侧可滚动内容区。
+ * 配色 / 圆角 / 阴影 / 组件一律复用 ../shared/design.css 的设计令牌，本文件只管外壳骨架。 */
+
+/* —— 整体网格：标题栏横跨顶部，下方分为侧栏 + 内容 —— */
+body.app {
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 210px 1fr;
+  grid-template-rows: 44px 1fr;
+  grid-template-areas:
+    "titlebar titlebar"
+    "sidebar  page";
+  background: var(--bg);
+  overflow: hidden; /* 滚动交给内容区自身 */
+}
+
+/* ====================== ① 顶部细标题栏 ====================== */
+.titlebar {
+  grid-area: titlebar;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 44px;
+  /* 左侧留 78px 让位 macOS 红绿灯，右侧常规留白 */
+  padding: 0 14px 0 78px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  /* 整条标题栏可拖拽移动窗口 */
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0; /* 允许内部省略号 */
+}
+
+.titlebar-app {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-strong);
+  white-space: nowrap;
+}
+
+/* 品牌名与页名之间的竖向分隔 */
+.titlebar-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--line);
+  flex: none;
+}
+
+.titlebar-page {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 右侧无操作占位，仅用于视觉平衡 */
+.titlebar-right {
+  width: 64px;
+  height: 1px;
+  flex: none;
+}
+
+/* ====================== ② 左侧侧边导航 ====================== */
+.sidebar {
+  grid-area: sidebar;
+  display: flex;
+  flex-direction: column;
+  width: 210px;
+  padding: 12px 12px 14px;
+  background: var(--bg-sunken);
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* 导航项：图标 + 文字，明确的 hover / active / focus 状态 */
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background .14s, color .14s, border-color .14s;
+}
+
+.nav-item .nav-ico {
+  width: 19px;
+  height: 19px;
+  color: var(--text-soft);
+  transition: color .14s;
+}
+
+.nav-item .nav-text {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nav-item:hover {
+  background: var(--surface);
+  border-color: var(--line);
+}
+.nav-item:hover .nav-ico { color: var(--brand); }
+
+.nav-item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* 选中态：电光蓝实底白字 */
+.nav-item.active {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(75, 124, 255, .30);
+}
+.nav-item.active .nav-ico { color: #fff; }
+.nav-item.active:hover { background: var(--brand-strong); border-color: var(--brand-strong); }
+
+/* —— 侧栏底部：低调的帮助 / 反馈 / 版本 —— */
+.sidebar-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 12px 8px 2px;
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.foot-link {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: color .14s;
+}
+.foot-link:hover { color: var(--brand); }
+.foot-link:focus-visible { outline: none; color: var(--brand); text-decoration: underline; }
+
+.foot-ver {
+  width: 100%;
+  font-size: 11px;
+  color: var(--text-soft);
+  opacity: .75;
+}
+
+/* ====================== ③ 主内容区 ====================== */
+.page {
+  grid-area: page;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--bg);
+  /* 不在外壳强加内边距，留给各页面自行控制留白；统一兜底背景即可 */
+}

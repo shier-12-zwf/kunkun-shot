@@ -1,0 +1,62 @@
+{
+  "name": "kunkun-shot",
+  "productName": "困困截图工具",
+  "version": "0.1.0",
+  "description": "一个仿 PixPin 的跨平台截图工具：区域截图/标注、贴图钉屏、长截图、OCR、录屏，并内置 DeepSeek AI（截图问 AI + OCR 文字翻译润色）。",
+  "main": "src/main/main.js",
+  "author": "困困",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "tesseract.js": "^5.1.1"
+  },
+  "devDependencies": {
+    "electron": "^42.4.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.kunkun.shot",
+    "productName": "困困截图工具",
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "tessdata",
+        "to": "tessdata"
+      }
+    ],
+    "asarUnpack": [
+      "**/node_modules/tesseract.js/**",
+      "**/node_modules/tesseract.js-core/**",
+      "**/node_modules/ffmpeg-static/**"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg"
+      ],
+      "identity": "KUN Translator Local Signing",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSScreenCaptureUsageDescription": "困困截图工具需要录制屏幕，用于区域截图、长截图与录屏。",
+        "NSMicrophoneUsageDescription": "录屏时如需同时录制声音，需要使用麦克风。",
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": false
+        }
+      }
+    }
+  }
+}

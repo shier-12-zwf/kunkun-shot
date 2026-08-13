@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' blob: data:; font-src 'self' data:; object-src 'none'; base-uri 'none'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' blob: data:; font-src 'self' data:; object-src 'none'; base-uri 'none'" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI · 困困截图工具</title>
+  <link rel="stylesheet" href="./ai.css" />
+</head>
+<body>
+  <!-- 顶部标题栏 -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="topbar-icon" id="modeIcon">🤖</span>
+      <span class="topbar-title" id="modeTitle">AI 助手</span>
+    </div>
+    <div class="topbar-right">
+      <button class="icon-btn" id="btnSettings" title="设置">⚙️</button>
+      <button class="icon-btn" id="btnMin" title="最小化">—</button>
+      <button class="icon-btn danger" id="btnClose" title="关闭">✕</button>
+    </div>
+  </header>
+
+  <!-- 截图缩略图（有 dataURL 时显示）-->
+  <div class="thumb-wrap" id="thumbWrap" hidden>
+    <img class="thumb" id="thumbImg" alt="截图缩略图" />
+  </div>
+
+  <!-- OCR 模式：可编辑文本区 + 操作按钮 -->
+  <div class="ocr-block" id="ocrBlock" hidden>
+    <textarea class="ocr-text" id="ocrText" placeholder="识别中…" spellcheck="false"></textarea>
+    <div class="ocr-actions">
+      <button class="chip-btn" id="ocrCopy">复制文字</button>
+      <button class="chip-btn" id="ocrTranslate">翻译</button>
+      <button class="chip-btn" id="ocrPolish">润色</button>
+      <button class="chip-btn accent" id="ocrAsk">问 AI</button>
+    </div>
+  </div>
+
+  <!-- 结果区（可滚动）-->
+  <main class="result" id="result">
+    <div class="placeholder" id="placeholder">结果会显示在这里…</div>
+  </main>
+
+  <!-- 底部输入区 -->
+  <footer class="composer">
+    <textarea
+      class="composer-input"
+      id="input"
+      rows="1"
+      placeholder="输入追问内容，回车发送（Shift+回车换行）"
+    ></textarea>
+    <button class="send-btn" id="btnSend" title="发送">发送</button>
+  </footer>
+
+  <script src="./ai.js"></script>
+</body>
+</html>
