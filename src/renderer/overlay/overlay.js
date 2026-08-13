@@ -37,6 +37,7 @@
     rounded: false, // 圆角截图
     axMode: false, // 智能 UI 元素识别
     axFrame: null, // 当前高亮元素(显示器CSS坐标)
+    frameStyle: 0, // 导出图边框/阴影：0=无 1=边框 2=阴影
     axBusy: false, axLast: 0, axErrShown: false,
     // 历史浏览 / 选区历史（PixPin 式 < > / R）
     histItems: null, // 历史列表缓存
@@ -102,6 +103,7 @@
   var btnRatioLock = document.getElementById('btnRatioLock');
   var btnRounded = document.getElementById('btnRounded');
   var btnAx = document.getElementById('btnAx');
+  var btnFrame = document.getElementById('btnFrame');
   var axHighlight = document.getElementById('axHighlight');
   var toolbar = document.getElementById('toolbar');
   var textInput = document.getElementById('textInput');
@@ -1760,6 +1762,38 @@
         ctx.restore();
       }
     }
+    // 边框 / 阴影（PixPin 式导出效果）
+    if (S.frameStyle > 0) {
+      const borderW = S.frameStyle === 1 ? Math.max(1, Math.round(1.5 * phys)) : 0;
+      const shadowPad = S.frameStyle === 2 ? Math.round(44 * phys) : 0;
+      const pad = borderW + shadowPad;
+      const finalC = document.createElement('canvas');
+      finalC.width = outW + pad * 2;
+      finalC.height = outH + pad * 2;
+      const fctx = finalC.getContext('2d');
+      if (S.frameStyle === 2) {
+        fctx.save();
+        fctx.shadowColor = 'rgba(0, 0, 0, 0.32)';
+        fctx.shadowBlur = Math.round(14 * phys);
+        fctx.shadowOffsetY = Math.round(3 * phys);
+        fctx.fillStyle = '#000';
+        fctx.beginPath();
+        if (fctx.roundRect) fctx.roundRect(pad, pad, outW, outH, S.rounded ? Math.round(12 * phys) : 0);
+        else fctx.rect(pad, pad, outW, outH);
+        fctx.fill();
+        fctx.restore();
+      }
+      fctx.drawImage(out, pad, pad);
+      if (S.frameStyle === 1) {
+        fctx.strokeStyle = 'rgba(0,0,0,0.18)';
+        fctx.lineWidth = borderW;
+        fctx.beginPath();
+        if (fctx.roundRect) fctx.roundRect(pad - borderW / 2, pad - borderW / 2, outW + borderW, outH + borderW, S.rounded ? Math.round(12 * phys) : 0);
+        else fctx.rect(pad - borderW / 2, pad - borderW / 2, outW + borderW, outH + borderW);
+        fctx.stroke();
+      }
+      return finalC.toDataURL('image/png');
+    }
     return out.toDataURL('image/png');
   }
 
@@ -2472,6 +2506,13 @@
     }
   }
   btnAx.addEventListener('click', toggleAx);
+  // 边框/阴影三态（PixPin 式：无 → 边框 → 阴影）
+  btnFrame.addEventListener('click', function () {
+    S.frameStyle = (S.frameStyle + 1) % 3;
+    btnFrame.classList.toggle('active', S.frameStyle > 0);
+    btnFrame.title = ['边框/阴影（当前：无）', '边框/阴影（当前：边框）', '边框/阴影（当前：阴影）'][S.frameStyle];
+    showTip(['已关闭边框/阴影', '已开启边框', '已开启阴影'][S.frameStyle]);
+  });
 
   // 比例锁定 / 圆角开关
   btnRatioLock.addEventListener('click', function () {
