@@ -193,6 +193,18 @@
   <!-- 文字输入框（编辑文字标注时浮现） -->
   <textarea id="textInput" class="text-input" hidden spellcheck="false"></textarea>
 
+  <!-- OCR 就地面板（截图内直接识别文字） -->
+  <div id="ocrPanel" class="ocr-panel" hidden>
+    <div class="ocr-head">
+      <span class="ocr-title">OCR 识别结果</span>
+      <button class="ocr-btn" id="btnOcrCopy" type="button">复制</button>
+      <button class="ocr-btn" id="btnOcrTranslate" type="button">翻译</button>
+      <button class="ocr-btn" id="btnOcrPolish" type="button">润色</button>
+      <button class="ocr-btn ocr-btn-close" id="btnOcrClose" type="button">✕</button>
+    </div>
+    <textarea id="ocrTextArea" class="ocr-text" placeholder="识别中…" spellcheck="false"></textarea>
+  </div>
+
   <!-- 二维码结果面板（识别到二维码后点击工具栏按钮出现） -->
   <div id="qrPanel" class="qr-panel" hidden>
     <div class="qr-title">二维码内容</div>

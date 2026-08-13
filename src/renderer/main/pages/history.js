@@ -265,9 +265,10 @@
           groupMap[k].items.push(it);
         });
 
+        // P2-5(B5)：分批渲染 + 懒加载缩略图（buildCard 内已用 loading=lazy），
+        // 历史很多时不再一次性铺满 DOM；每组先渲染 24 条，「加载更多」逐组追加。
         groups.forEach((g, gi) => {
           const group = el('section', 'kk-hist-group');
-          // 只展开最新一天（第一组），更早的日期默认折叠，点标题展开
           if (gi > 0) group.classList.add('is-collapsed');
           const head = el('div', 'kk-hist-group-head');
           head.innerHTML =
@@ -275,12 +276,37 @@
             '<span class="kk-hist-group-count">' + g.items.length + ' 张</span>';
           head.addEventListener('click', () => group.classList.toggle('is-collapsed'));
           group.appendChild(head);
-
           const grid = el('div', 'kk-hist-grid');
-          g.items.forEach((it) => grid.appendChild(buildCard(it)));
           group.appendChild(grid);
           gridScroll.appendChild(group);
+          g._grid = grid;
         });
+
+        groups.forEach((g) => {
+          const n = Math.min(24, g.items.length);
+          for (let i = 0; i < n; i++) g._grid.appendChild(buildCard(g.items[i]));
+          g._renderedCount = n;
+        });
+
+        const moreBtn = el('button', 'kk-hist-more');
+        moreBtn.textContent = '加载更多';
+        const refreshMore = () => {
+          moreBtn.style.display = groups.some((g) => g._renderedCount < g.items.length) ? '' : 'none';
+        };
+        moreBtn.addEventListener('click', () => {
+          groups.forEach((g) => {
+            if (g._renderedCount >= g.items.length) return;
+            let n = 0;
+            while (n < 24 && g._renderedCount + n < g.items.length) {
+              g._grid.appendChild(buildCard(g.items[g._renderedCount + n]));
+              n += 1;
+            }
+            g._renderedCount += n;
+          });
+          refreshMore();
+        });
+        gridScroll.appendChild(moreBtn);
+        refreshMore();
 
         renderDetail();
       }

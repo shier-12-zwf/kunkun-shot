@@ -609,3 +609,55 @@ body {
 .qr-btn-close {
   margin-left: auto;
 }
+
+/* ===== OCR 就地面板 ===== */
+.ocr-panel {
+  position: fixed;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  z-index: 95;
+  width: 460px;
+  max-width: 86vw;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  padding: 10px 12px;
+}
+.ocr-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.ocr-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  margin-right: auto;
+}
+.ocr-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.ocr-btn:hover { background: var(--panel-2, #f5f6f8); }
+.ocr-btn-close { border: none; }
+.ocr-text {
+  width: 100%;
+  min-height: 90px;
+  max-height: 220px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--panel-2, #f5f6f8);
+}

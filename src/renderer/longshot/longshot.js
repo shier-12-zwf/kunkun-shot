@@ -40,6 +40,11 @@
   const $dot = document.getElementById('liveDot');
   const $btnStart = document.getElementById('btnStart');
   const $btnDone = document.getElementById('btnDone');
+  const $cropBox = document.getElementById('cropBox');
+  const $cropTop = document.getElementById('cropTop');
+  const $cropBottom = document.getElementById('cropBottom');
+  const $cropTopVal = document.getElementById('cropTopVal');
+  const $cropBottomVal = document.getElementById('cropBottomVal');
   const $btnCancel = document.getElementById('btnCancel');
 
   // ====== 工具：把 dataURL 画到一个临时 canvas，拿到 ctx + 尺寸 ======
@@ -256,6 +261,15 @@
   function updateCount(n) {
     frameCount = n;
     $count.textContent = String(n);
+    // 有内容后显示裁剪控件，并把范围上限对齐当前拼接高度
+    if (stitchedHeight > 0) {
+      $cropBox.hidden = false;
+      var maxCrop = Math.max(0, stitchedHeight - 8);
+      $cropTop.max = String(maxCrop);
+      $cropBottom.max = String(maxCrop);
+      $cropTopVal.textContent = $cropTop.value + 'px';
+      $cropBottomVal.textContent = $cropBottom.value + 'px';
+    }
   }
 
   // ====== 开始捕获 ======
@@ -329,6 +343,19 @@
         exportCanvas = out;
       }
 
+      // P2-3：手动裁剪（上/下裁掉多余区域）
+      const cropT = Math.max(0, Math.min(parseInt($cropTop.value, 10) || 0, stitchedHeight - 8));
+      const cropB = Math.max(0, Math.min(parseInt($cropBottom.value, 10) || 0, stitchedHeight - 8 - cropT));
+      if (cropT > 0 || cropB > 0) {
+        const finalH = stitchedHeight - cropT - cropB;
+        const out2 = document.createElement('canvas');
+        out2.width = exportCanvas.width;
+        out2.height = finalH;
+        const octx2 = out2.getContext('2d');
+        octx2.drawImage(exportCanvas, 0, cropT, exportCanvas.width, finalH, 0, 0, exportCanvas.width, finalH);
+        exportCanvas = out2;
+      }
+
       const dataURL = exportCanvas.toDataURL('image/png');
       if (!dataURL || dataURL.length < 32 || dataURL === 'data:,') {
         throw new Error('导出失败：拼接图过大或为空，无法生成 PNG');
@@ -354,6 +381,8 @@
 
   // ====== 绑定 UI ======
   $btnStart.addEventListener('click', startCapture);
+  $cropTop.addEventListener('input', () => { $cropTopVal.textContent = $cropTop.value + 'px'; });
+  $cropBottom.addEventListener('input', () => { $cropBottomVal.textContent = $cropBottom.value + 'px'; });
   $btnDone.addEventListener('click', finish);
   $btnCancel.addEventListener('click', cancel);
 

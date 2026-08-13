@@ -90,6 +90,12 @@
   var btnQrCopy = document.getElementById('btnQrCopy');
   var btnQrOpen = document.getElementById('btnQrOpen');
   var btnQrClose = document.getElementById('btnQrClose');
+  var ocrPanel = document.getElementById('ocrPanel');
+  var ocrTextArea = document.getElementById('ocrTextArea');
+  var btnOcrCopy = document.getElementById('btnOcrCopy');
+  var btnOcrTranslate = document.getElementById('btnOcrTranslate');
+  var btnOcrPolish = document.getElementById('btnOcrPolish');
+  var btnOcrClose = document.getElementById('btnOcrClose');
   var btnRatioLock = document.getElementById('btnRatioLock');
   var btnRounded = document.getElementById('btnRounded');
   var toolbar = document.getElementById('toolbar');
@@ -288,6 +294,7 @@
     S.qrData = null;
     btnQR.hidden = true;
     hideQrPanel();
+    hideOcrPanel();
     updateSelectionView();
     showMagnifier(e);
   }
@@ -591,6 +598,9 @@
         doCancel();
       } else if (action === 'qr') {
         showQrPanel();
+      } else if (action === 'ocr') {
+        // P2-9：OCR 就地完成，不另开窗口
+        openInlineOCR();
       } else if (action === 'ask' || action === 'translate' || action === 'polish') {
         // 翻译 / 问 AI / 润色：在截图层内就地完成，不另开窗口
         openInlineAI(action);
@@ -1495,6 +1505,57 @@
 
   // 轻提示（复制颜色等短暂反馈，仿 pin 的 toast）
   var tipTimer = null;
+  // ================= OCR 就地（PixPin 式：截图内直接识别文字）=================
+  function showOcrPanel(text, loading) {
+    ocrTextArea.value = text || '';
+    ocrTextArea.placeholder = loading ? '识别中…' : '（未识别到文字）';
+    btnOcrCopy.disabled = loading || !text;
+    ocrPanel.hidden = false;
+  }
+  function hideOcrPanel() {
+    ocrPanel.hidden = true;
+  }
+  async function openInlineOCR() {
+    commitText();
+    if (!S.rect || S.rect.width < 3 || S.rect.height < 3) return;
+    if (typeof clearInlineTranslate === 'function') clearInlineTranslate();
+    var dataURL = composeImage({ clean: true });
+    if (!dataURL) return;
+    showOcrPanel('', true);
+    try {
+      var res = await kkapi.runOCR({ dataURL, engine: 'local' });
+      if (res && res.error) {
+        showOcrPanel('识别失败：' + res.error, false);
+        return;
+      }
+      var text = (res && res.text) || '';
+      showOcrPanel(text, false);
+      if (!text) showTip('未识别到文字');
+    } catch (e) {
+      showOcrPanel('识别出错：' + ((e && e.message) || e), false);
+    }
+  }
+  function bindOcrPanel() {
+    btnOcrCopy.addEventListener('click', function () {
+      var t = ocrTextArea.value;
+      if (!t) return;
+      Promise.resolve(kkapi.copyText(t))
+        .then(function () { showTip('已复制识别文字'); })
+        .catch(function () { showTip('复制失败'); });
+    });
+    btnOcrTranslate.addEventListener('click', function () {
+      var t = ocrTextArea.value.trim();
+      if (!t) return;
+      Promise.resolve(kkapi.openAIPanel({ mode: 'translate', text: t })).catch(function () {});
+    });
+    btnOcrPolish.addEventListener('click', function () {
+      var t = ocrTextArea.value.trim();
+      if (!t) return;
+      Promise.resolve(kkapi.openAIPanel({ mode: 'polish', text: t })).catch(function () {});
+    });
+    btnOcrClose.addEventListener('click', hideOcrPanel);
+  }
+
   // ================= 二维码识别（PixPin 式：框选后自动检测）=================
   function scanQr() {
     if (!S.rect || !S.bgReady || !S.bgImage) return;
@@ -2158,6 +2219,12 @@
         cancelPolyline();
         return;
       }
+      // OCR / 二维码面板开着：Esc 先关面板
+      if (!ocrPanel.hidden || !qrPanel.hidden) {
+        hideOcrPanel();
+        hideQrPanel();
+        return;
+      }
       // 内联 AI 面板打开时，Esc 先关面板（不关整个截图）
       if (S.aiOpen) {
         closeAIPanel();
@@ -2180,7 +2247,8 @@
       }
       if (S.rect && !toolbar.hidden) {
         var da = S.defaultAction || 'copy';
-        if (da === 'ask' || da === 'translate' || da === 'polish') openInlineAI(da);
+        if (da === 'ocr') openInlineOCR();
+        else if (da === 'ask' || da === 'translate' || da === 'polish') openInlineAI(da);
         else finishAction(da);
       }
       return;
@@ -2440,6 +2508,7 @@
     showTip('载入选区 ' + (idx + 1) + '/' + S.recentRects.length);
   }
   bindQrPanel();
+  bindOcrPanel();
 
   // 右键 → 取消
   document.addEventListener('contextmenu', function (e) {

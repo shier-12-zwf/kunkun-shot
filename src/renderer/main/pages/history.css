@@ -607,3 +607,19 @@
     max-height: 320px;
   }
 }
+
+/* ===== 加载更多（P2-5） ===== */
+.kk-hist-more {
+  display: block;
+  margin: 12px auto;
+  padding: 7px 22px;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+  background: var(--panel, #fff);
+  color: var(--text, #1f2329);
+  font-size: 13px;
+  cursor: pointer;
+}
+.kk-hist-more:hover {
+  background: var(--panel-2, #f5f6f8);
+}

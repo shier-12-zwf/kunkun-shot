@@ -189,3 +189,21 @@ body {
   opacity: 0.6;
   pointer-events: none;
 }
+
+/* ===== 手动裁剪 ===== */
+.crop-box {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 10px;
+  border-left: 1px solid rgba(0,0,0,0.08);
+}
+.crop-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #666;
+}
+.crop-label input[type="range"] { width: 90px; }
+.crop-val { min-width: 40px; font-variant-numeric: tabular-nums; }
