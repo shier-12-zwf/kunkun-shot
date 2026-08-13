@@ -56,7 +56,7 @@
       let config = null; // 最近一次拿到的完整配置
       let offHistory = null; // onHistoryChanged 退订函数
       let countdownTimer = null; // 延时倒计时句柄
-      let delaySec = 3; // 当前选择的延时秒数（3/5）
+      let delaySec = 3; // 当前选择的延时秒数（3/5/10）
 
       // —— 顶部任务式标题 ——
       const header = document.createElement('div');
@@ -194,10 +194,10 @@
         label: '延时截图',
         onClick: () => startCountdown(),
       });
-      // 延时按钮额外挂一排 3s/5s 选择
+      // 延时按钮额外挂一排 3s/5s/10s 选择
       const delayPicker = document.createElement('div');
       delayPicker.className = 'cap-delay-picker';
-      [3, 5].forEach((sec) => {
+      [3, 5, 10].forEach((sec) => {
         const c = document.createElement('button');
         c.type = 'button';
         c.className = 'chip cap-delay-chip' + (sec === delaySec ? ' active' : '');

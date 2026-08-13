@@ -329,6 +329,15 @@ async function readSelectedText() {
 // 划词翻译总入口：由全局快捷键触发。
 let translateBusy = false;
 async function triggerGlobalTranslate() {
+  // P2-1(B2)：划词翻译依赖 macOS 模拟 Cmd+C，非 mac 平台静默失效 → 明确提示
+  if (process.platform !== 'darwin') {
+    dialog.showMessageBox({
+      type: 'info',
+      message: '划词翻译仅支持 macOS',
+      detail: '此功能依赖 macOS 的系统辅助功能（模拟拷贝读取选中文字），Windows/Linux 暂不支持。',
+    });
+    return;
+  }
   if (translateBusy) return; // 防连点
   translateBusy = true;
   // busy 需覆盖「读选中文字 + 弹窗 + 网络翻译」整个生命周期，否则连点会并发弹多张卡片、
@@ -421,6 +430,24 @@ function doWindowCapture() {
       }
     });
   });
+}
+
+// ---------- 大图降采样（P2-6/B8）：发送给视觉 API 前压缩，避免超限/烧 token ----------
+function downscaleDataURL(dataURL, maxSide) {
+  if (!dataURL || maxSide <= 0) return dataURL;
+  try {
+    const img = nativeImage.createFromDataURL(dataURL);
+    const sz = img.getSize();
+    if (!sz.width || !sz.height) return dataURL;
+    const m = Math.max(sz.width, sz.height);
+    if (m <= maxSide) return dataURL;
+    const r = maxSide / m;
+    return img
+      .resize({ width: Math.max(1, Math.round(sz.width * r)), height: Math.max(1, Math.round(sz.height * r)), quality: 'good' })
+      .toDataURL();
+  } catch (_) {
+    return dataURL;
+  }
 }
 
 // ---------- 保存图片 ----------
@@ -699,7 +726,7 @@ function registerIpc() {
             baseUrl: p.baseUrl,
             apiKey: p.apiKey,
             model: p.visionModel,
-            messages: [deepseek.imageMessage(prompt, payload.dataURL)],
+            messages: [deepseek.imageMessage(prompt, downscaleDataURL(payload.dataURL, 2048))],
             think: false, // OCR 只要结果，不要思考
           });
           return { text: deepseek.stripThink(text) };
@@ -773,7 +800,7 @@ function registerIpc() {
         baseUrl: p.baseUrl,
         apiKey: p.apiKey,
         model: p.visionModel,
-        messages: [deepseek.imageMessage(prompt || '请分析这张截图的内容。', dataURL)],
+        messages: [deepseek.imageMessage(prompt || '请分析这张截图的内容。', downscaleDataURL(dataURL, 2048))],
         think,
       }, send);
       return { ok: true };
@@ -788,7 +815,8 @@ function registerIpc() {
     }
     let text = '';
     try {
-      text = await ocr.recognize(dataURL, config.get().ocr.lang);
+      // 本地 OCR 前也降采样：极大图会拖慢 tesseract 且无精度收益
+      text = await ocr.recognize(downscaleDataURL(dataURL, 4096), config.get().ocr.lang);
     } catch (err) {
       send({ error: '本地 OCR 失败：' + (err && err.message ? err.message : err) });
       return { ok: false };
@@ -957,7 +985,7 @@ function registerIpc() {
   });
   ipcMain.handle(C.CAPTURE_WINDOW, () => doWindowCapture());
   ipcMain.handle(C.CAPTURE_TIMED, (_e, payload) => {
-    const delay = Math.max(0, ((payload && payload.delay) || 0)) * 1000;
+    const delay = Math.min(300, Math.max(0, ((payload && payload.delay) || 0))) * 1000; // P3-2：上限 300s，防 setTimeout 溢出
     const mode = (payload && payload.mode) || 'region';
     setTimeout(() => {
       if (mode === 'fullscreen') {
@@ -966,7 +994,11 @@ function registerIpc() {
             clipboard.writeImage(nativeImage.createFromDataURL(g.dataURL));
             autoSaveToHistory(g.dataURL, 'timed');
           })
-          .catch(() => {});
+          .catch((err) => {
+            // P3-4：不再静默吞错
+            console.error('[timed-capture] 失败：', err && err.message ? err.message : err);
+            dialog.showErrorBox('定时截图失败', (err && err.message) || String(err));
+          });
       } else {
         startCapture('region');
       }
@@ -1046,7 +1078,9 @@ function registerShortcuts() {
   bind(sc.longShot, () => startCapture('long'));
   bind(sc.record, () => startCapture('record'));
   bind(sc.pinClipboard, () => pinFromClipboard());
-  bind(sc.translate, () => { triggerGlobalTranslate().catch(() => {}); });
+  if (process.platform === 'darwin') {
+    bind(sc.translate, () => { triggerGlobalTranslate().catch(() => {}); });
+  }
 }
 
 function applyLoginItem() {
@@ -1083,7 +1117,9 @@ function buildTray() {
       { label: '长截图', accelerator: sc.longShot, click: () => startCapture('long') },
       { label: '区域录屏', accelerator: sc.record, click: () => startCapture('record') },
       { label: '把剪贴板图片贴到屏幕', accelerator: sc.pinClipboard, click: () => pinFromClipboard() },
-      { label: '划词翻译（选中文字后）', accelerator: sc.translate, click: () => { triggerGlobalTranslate().catch(() => {}); } },
+      ...(process.platform === 'darwin'
+        ? [{ label: '划词翻译（选中文字后）', accelerator: sc.translate, click: () => { triggerGlobalTranslate().catch(() => {}); } }]
+        : []),
       { type: 'separator' },
       { label: '设置…', click: () => windows.createMain('settings') },
       { label: '打开数据文件夹（历史/配置）', click: () => shell.openPath(app.getPath('userData')) },

@@ -78,6 +78,11 @@ function add(dataURL, type) {
     const size = img.getSize();
     width = size.width;
     height = size.height;
+    // P3-5(B14)：合法 base64 但解码为空图 → 拒绝入库，避免 0×0 脏记录污染索引
+    if (img.isEmpty() || !width || !height) {
+      console.error('[history] 跳过无法解码的图片（base64 合法但内容不是有效图片）。');
+      return null;
+    }
     fs.writeFileSync(path.join(imgDir, file), dataURLToBuffer(dataURL));
     // 生成缩略图（最长边 360）
     const maxw = width >= height ? 360 : Math.round((360 * width) / Math.max(1, height));

@@ -708,7 +708,7 @@
       paneDeepSeek.appendChild(
         h('div', { class: 'two-col' }, [
           stackField('DeepSeek · Base URL', inBaseUrl),
-          stackField('视觉模型 (visionModel)', inVision, '用于问图 / 图片翻译 / 视觉 OCR'),
+          stackField('视觉模型 (visionModel)', inVision, '占位字段：DeepSeek 不支持看图，实际直接看图走 MiniMax（勿依赖此字段）'),
         ])
       );
       paneDeepSeek.appendChild(stackField('文本模型 (textModel)', inText, '用于纯文本翻译 / 润色 / 对话'));

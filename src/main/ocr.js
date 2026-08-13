@@ -46,19 +46,40 @@ function buildWorkerOptions(language) {
   }
 }
 
-async function recognize(dataURL, lang) {
-  if (!Tesseract) Tesseract = require('tesseract.js');
-  const language = lang || 'chi_sim+eng';
-  const opts = buildWorkerOptions(language);
-  const worker = await Tesseract.createWorker(language, undefined, opts);
-  try {
-    const { data } = await worker.recognize(dataURL);
-    return (data && data.text ? data.text : '').trim();
-  } finally {
+// P2-7(B4)：worker 复用——tesseract.js 的 createWorker 每次都要加载 wasm+语言包（秒级），
+// 连续截图 OCR 时复用同一 worker，只在语言切换时重建。recognize 用串行队列互斥，
+// 避免两个并发识别共享同一 worker 导致状态错乱。
+let workerPromise = null;
+let workerLang = '';
+
+async function getWorker(language) {
+  if (workerPromise && workerLang === language) return workerPromise;
+  if (workerPromise) {
+    const old = workerPromise;
+    workerPromise = null;
     try {
-      await worker.terminate();
+      const w = await old;
+      await w.terminate();
     } catch (_) {}
   }
+  workerLang = language;
+  workerPromise = Tesseract.createWorker(language, undefined, buildWorkerOptions(language));
+  return workerPromise;
+}
+
+let ocrQueue = Promise.resolve();
+
+function recognize(dataURL, lang) {
+  if (!Tesseract) Tesseract = require('tesseract.js');
+  const language = lang || 'chi_sim+eng';
+  const run = async () => {
+    const worker = await getWorker(language);
+    const { data } = await worker.recognize(dataURL);
+    return (data && data.text ? data.text : '').trim();
+  };
+  const p = ocrQueue.then(run, run);
+  ocrQueue = p.then(() => {}, () => {}); // 队列继续前进，无论成败
+  return p;
 }
 
 module.exports = { recognize };
