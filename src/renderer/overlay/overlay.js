@@ -35,6 +35,9 @@
     qrData: null,
     ratioLock: 0, // 锁定宽高比(>0)；0=不锁
     rounded: false, // 圆角截图
+    axMode: false, // 智能 UI 元素识别
+    axFrame: null, // 当前高亮元素(显示器CSS坐标)
+    axBusy: false, axLast: 0, axErrShown: false,
     // 历史浏览 / 选区历史（PixPin 式 < > / R）
     histItems: null, // 历史列表缓存
     histIdx: -1, // -1=当前截图；>=0 表示正在看第几张历史
@@ -98,6 +101,8 @@
   var btnOcrClose = document.getElementById('btnOcrClose');
   var btnRatioLock = document.getElementById('btnRatioLock');
   var btnRounded = document.getElementById('btnRounded');
+  var btnAx = document.getElementById('btnAx');
+  var axHighlight = document.getElementById('axHighlight');
   var toolbar = document.getElementById('toolbar');
   var textInput = document.getElementById('textInput');
   var btnUndo = document.getElementById('btnUndo');
@@ -237,6 +242,28 @@
     // 点在工具栏 / 文字输入框上 → 不处理框选
     if (toolbar.contains(e.target) || e.target === textInput) return;
 
+    // 智能识别模式：有高亮元素时，点击 = 直接框选该元素
+    if (S.axMode && S.axFrame && !S.rect) {
+      var f = S.axFrame;
+      S.rect = { x: f.x, y: f.y, width: f.w, height: f.h };
+      S.shapes = [];
+      S.history = [];
+      S.redoStack = [];
+      S.selected = null;
+      S.numberSeq = 1;
+      S.axMode = false;
+      btnAx.classList.remove('active');
+      hideAx();
+      if (typeof clearInlineTranslate === 'function') clearInlineTranslate();
+      updateSelectionView();
+      showToolbar();
+      scanQr();
+      recordRecentRect();
+      showTip('已框选元素 ' + Math.round(f.w) + '×' + Math.round(f.h));
+      e.preventDefault();
+      return;
+    }
+
     // 已有选区时：判断是控制点/移动/标注
     if (S.rect) {
       // 控制点
@@ -295,6 +322,7 @@
     btnQR.hidden = true;
     hideQrPanel();
     hideOcrPanel();
+    hideAx();
     updateSelectionView();
     showMagnifier(e);
   }
@@ -412,6 +440,8 @@
     } else if (!S.selecting && !S.dragMode && !S.drawing && !S.shapeDrag) {
       hideMagnifier();
     }
+
+    probeAx(e);
   });
 
   function applyResize(e) {
@@ -2380,6 +2410,68 @@
       showMagnifier({ clientX: lm.x, clientY: lm.y, shiftKey: false });
     }
   }
+
+  // ================= 智能 UI 元素识别（P1-8，可选开关，PixPin 式悬停框选）=================
+  function hideAx() {
+    S.axFrame = null;
+    axHighlight.hidden = true;
+  }
+  function toggleAx() {
+    S.axMode = !S.axMode;
+    btnAx.classList.toggle('active', S.axMode);
+    if (!S.axMode) {
+      hideAx();
+    } else {
+      S.axErrShown = false;
+      hideAx();
+      showTip('UI识别已开：悬停高亮元素，点击框选（仅 macOS）');
+    }
+  }
+  function axCss(f) {
+    return {
+      x: f.x - S.displayBounds.x,
+      y: f.y - S.displayBounds.y,
+      w: f.w,
+      h: f.h,
+    };
+  }
+  async function probeAx(e) {
+    if (!S.axMode || S.axBusy || S.finished || S.aiOpen || S.rect || S.selecting || S.dragMode || S.drawing) return;
+    var now = Date.now();
+    if (now - S.axLast < 150) return; // 节流 150ms
+    S.axLast = now;
+    S.axBusy = true;
+    try {
+      var r = await kkapi.axAtPoint({ x: e.screenX, y: e.screenY });
+      S.axBusy = false;
+      if (!S.axMode || S.rect) return;
+      if (r && r.error) {
+        if (!S.axErrShown) {
+          S.axErrShown = true;
+          showTip('UI识别不可用：' + r.error);
+        }
+        return;
+      }
+      var f = r && r.frame;
+      if (f && f.w > 2 && f.h > 2) {
+        S.axFrame = axCss(f);
+        axHighlight.hidden = false;
+        axHighlight.style.left = S.axFrame.x + 'px';
+        axHighlight.style.top = S.axFrame.y + 'px';
+        axHighlight.style.width = S.axFrame.w + 'px';
+        axHighlight.style.height = S.axFrame.h + 'px';
+      } else {
+        hideAx();
+      }
+    } catch (err) {
+      S.axBusy = false;
+      if (!S.axErrShown) {
+        S.axErrShown = true;
+        showTip('UI识别失败：' + ((err && err.message) || err));
+      }
+    }
+  }
+  btnAx.addEventListener('click', toggleAx);
 
   // 比例锁定 / 圆角开关
   btnRatioLock.addEventListener('click', function () {

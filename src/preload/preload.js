@@ -43,6 +43,7 @@ const C = {
 
   // ---- OCR ----
   OCR_RUN: 'ocr:run',
+  AX_AT_POINT: 'ax:at-point', // ({x,y}) 查询屏幕坐标处 UI 元素（智能识别）
   OCR_BOXES: 'ocr:boxes',
   TRANSLATE_TEXT: 'ai:translate-text', // ({ dataURL, lang, engine }) => { text, error }
 
@@ -133,6 +134,7 @@ const api = {
   // ---- OCR ----
   runOCR: (payload) => ipcRenderer.invoke(C.OCR_RUN, payload),
   ocrBoxes: (payload) => ipcRenderer.invoke(C.OCR_BOXES, payload),
+  axAtPoint: (payload) => ipcRenderer.invoke(C.AX_AT_POINT, payload),
   translateLines: (payload) => ipcRenderer.invoke(C.TRANSLATE_TEXT, payload),
 
   // ---- DeepSeek ----

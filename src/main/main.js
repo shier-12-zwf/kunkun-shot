@@ -29,6 +29,7 @@ const media = require('./media');
 const windows = require('./windows');
 const history = require('./history');
 const { spawn } = require('child_process');
+const axprobe = require('./axprobe');
 const os = require('os');
 const { pathToFileURL } = require('url');
 
@@ -747,6 +748,25 @@ function registerIpc() {
       return { ok: true };
     } catch (err) {
       return { ok: false, error: (err && err.message) || String(err) };
+    }
+  });
+
+  // P1-8：智能 UI 元素识别——查询屏幕坐标处元素（悬停节流探测用）
+  let axPrompted = false;
+  ipcMain.handle(C.AX_AT_POINT, async (_e, { x, y } = {}) => {
+    if (process.platform !== 'darwin') return { error: '仅支持 macOS' };
+    if (!checkAccessibilityPermission(!axPrompted)) {
+      axPrompted = true;
+      return { error: '需要「辅助功能」权限（系统设置 → 隐私与安全性 → 辅助功能）' };
+    }
+    if (!isFinite(Number(x)) || !isFinite(Number(y))) return { error: '坐标无效' };
+    try {
+      const r = await axprobe.probeAtPoint(Number(x), Number(y), 700);
+      const f = r && r.frame;
+      if (f && !(f.w > 0) && !(f.h > 0)) return { frame: null };
+      return r;
+    } catch (e) {
+      return { error: (e && e.message) || String(e) };
     }
   });
 

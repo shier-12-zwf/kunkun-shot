@@ -40,6 +40,7 @@ module.exports = {
 
   // ---- OCR ----
   OCR_RUN: 'ocr:run',
+  AX_AT_POINT: 'ax:at-point', // ({x,y}) 查询屏幕坐标处 UI 元素（智能识别）
   OCR_BOXES: 'ocr:boxes',
   TRANSLATE_TEXT: 'ai:translate-text', // ({ dataURL, lang, engine }) => { text, error }
 

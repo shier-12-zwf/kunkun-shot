@@ -6,12 +6,10 @@
 // 可预先种入恶意 .swift，本应用下次识别时会以用户身份执行；固定目录名还可被符号链接劫持。
 // 现改为：每次识别新建「随机名 + 0700 权限」的临时目录，脚本/图片用随机名写入（0600），
 // 识别结束（无论成败）立即整体删除，不留任何可预测路径。
-const { execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-
-const SWIFT = '/usr/bin/swift';
+const swiftcache = require('./swiftcache');
 
 const SWIFT_SOURCE = [
   'import Foundation',
@@ -79,12 +77,6 @@ function dataURLToFile(dataURL, workDir) {
   return p;
 }
 
-function writeScript(workDir) {
-  const p = path.join(workDir, randomName('vision', 'swift'));
-  fs.writeFileSync(p, SWIFT_SOURCE, { encoding: 'utf8', mode: 0o600 });
-  return p;
-}
-
 // 删除整个工作目录（脚本 + 图片 + 目录本身），失败不抛。
 function cleanup(workDir) {
   if (!workDir) return;
@@ -99,48 +91,39 @@ function cleanup(workDir) {
 }
 
 // 返回 { lines: [{t,x,y,w,h}] } 或 { error: '...' }
-function runOCRBoxes(dataURL) {
-  return new Promise((resolve) => {
-    let workDir = null;
+async function runOCRBoxes(dataURL) {
+  let workDir = null;
+  try {
+    workDir = makeWorkDir();
+    const imgPath = dataURLToFile(dataURL, workDir);
+    // P2-7(B3)：swiftc 预编译缓存（userData/swift-bin，内容哈希命名），
+    // 首次约 10 秒编译，之后每回几十毫秒——原位翻译/贴图选字不再每次等数秒。
+    const bin = await swiftcache.ensureBinary({ name: 'vision-boxes', source: SWIFT_SOURCE });
+    const stdout = await swiftcache.runBinary(bin, [imgPath], 30000);
+    cleanup(workDir); // 无论成败，识别结束后立即清除临时图片
+    workDir = null;
     try {
-      workDir = makeWorkDir();
-      const imgPath = dataURLToFile(dataURL, workDir);
-      const script = writeScript(workDir);
-      execFile(
-        SWIFT,
-        [script, imgPath],
-        { timeout: 30000, maxBuffer: 1024 * 1024 * 16 },
-        (err, stdout, stderr) => {
-          cleanup(workDir); // 无论成败，识别结束后立即清除临时脚本与图片
-          if (err) {
-            resolve({ error: 'Vision OCR 失败：' + (stderr || (err && err.message) || '') });
-            return;
-          }
-          try {
-            const arr = JSON.parse(String(stdout || '[]').trim());
-            const lines = Array.isArray(arr)
-              ? arr
-                  .filter((it) => it && it.t && String(it.t).trim())
-                  .map((it) => ({
-                    t: String(it.t),
-                    x: Number(it.x),
-                    y: Number(it.y),
-                    w: Number(it.w),
-                    h: Number(it.h),
-                  }))
-                  .filter((it) => [it.x, it.y, it.w, it.h].every((n) => !isNaN(n)))
-              : [];
-            resolve({ lines: lines });
-          } catch (e) {
-            resolve({ error: '解析 Vision 结果失败：' + (e && e.message ? e.message : e) });
-          }
-        }
-      );
+      const arr = JSON.parse(String(stdout || '[]').trim());
+      const lines = Array.isArray(arr)
+        ? arr
+            .filter((it) => it && it.t && String(it.t).trim())
+            .map((it) => ({
+              t: String(it.t),
+              x: Number(it.x),
+              y: Number(it.y),
+              w: Number(it.w),
+              h: Number(it.h),
+            }))
+            .filter((it) => [it.x, it.y, it.w, it.h].every((n) => !isNaN(n)))
+        : [];
+      return { lines: lines };
     } catch (e) {
-      cleanup(workDir);
-      resolve({ error: 'Vision OCR 失败：' + (e && e.message ? e.message : e) });
+      return { error: '解析 Vision 结果失败：' + (e && e.message ? e.message : e) };
     }
-  });
+  } catch (e) {
+    cleanup(workDir);
+    return { error: 'Vision OCR 失败：' + (e && e.message ? e.message : e) };
+  }
 }
 
 module.exports = { runOCRBoxes };
