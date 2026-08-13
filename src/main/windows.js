@@ -20,6 +20,26 @@ const pins = new Set();
 // 录屏控制条
 let recorderWin = null;
 
+// ---- M1 修复：受信 webContents 登记表 ----
+// 只有经本窗口工厂创建的窗口，其 IPC 请求才被接受；窗口销毁即除名。
+// main.js 的 registerIpc 会统一拦截所有 ipcMain.handle 调用并校验 sender。
+const trustedWebContents = new Set();
+function trackWindow(win) {
+  if (!win || win.isDestroyed()) return;
+  const id = win.webContents.id;
+  trustedWebContents.add(id);
+  win.webContents.once('destroyed', () => trustedWebContents.delete(id));
+}
+function isTrustedSender(id) {
+  return trustedWebContents.has(id);
+}
+// 统一创建入口：所有窗口经此创建并自动登记为受信来源
+function newTrackedWindow(opts) {
+  const win = new BrowserWindow(opts);
+  trackWindow(win);
+  return win;
+}
+
 function baseWebPrefs() {
   return {
     preload: PRELOAD,
@@ -41,7 +61,7 @@ function whenLoaded(win, data) {
 function createOverlay(display, captureData) {
   closeOverlay();
   const b = display.bounds;
-  const win = new BrowserWindow({
+  const win = newTrackedWindow({
     x: b.x,
     y: b.y,
     width: b.width,
@@ -78,7 +98,7 @@ function closeOverlay() {
 
 // ---- 贴图窗口 ----
 function createPin({ dataURL, bounds }) {
-  const win = new BrowserWindow({
+  const win = newTrackedWindow({
     x: Math.round(bounds.x),
     y: Math.round(bounds.y),
     width: Math.max(40, Math.round(bounds.width)),
@@ -119,7 +139,7 @@ function openAIPanel(payload) {
     refs.ai.webContents.send(C.WINDOW_INIT, payload);
     return refs.ai;
   }
-  const win = new BrowserWindow({
+  const win = newTrackedWindow({
     width: 480,
     height: 600,
     minWidth: 360,
@@ -151,7 +171,7 @@ function createRecorder(initData) {
   // 越界则放到区域上方
   if (y + barH > db.y + db.height) y = Math.round(db.y + r.y - barH - 10);
   x = Math.max(db.x, Math.min(x, db.x + db.width - barW));
-  const win = new BrowserWindow({
+  const win = newTrackedWindow({
     x,
     y,
     width: barW,
@@ -193,7 +213,7 @@ function createLongShot(initData) {
   let y = Math.round(db.y + r.y + r.height + 10);
   if (y + barH > db.y + db.height) y = Math.round(db.y + r.y - barH - 10);
   x = Math.max(db.x, Math.min(x, db.x + db.width - barW));
-  const win = new BrowserWindow({
+  const win = newTrackedWindow({
     x,
     y,
     width: barW,
@@ -231,7 +251,7 @@ function createMain(page) {
     if (page) refs.main.webContents.send(C.MAIN_NAV, { page });
     return refs.main;
   }
-  const win = new BrowserWindow({
+  const win = newTrackedWindow({
     width: 1080,
     height: 720,
     minWidth: 920,
@@ -266,7 +286,7 @@ function togglePopover(trayBounds) {
     const wa = disp.workArea;
     x = Math.max(wa.x + 6, Math.min(x, wa.x + wa.width - w - 6));
   }
-  const win = new BrowserWindow({
+  const win = newTrackedWindow({
     x,
     y,
     width: w,
@@ -317,7 +337,7 @@ function createTranslatePopup(anchor) {
   let y = pt.y + 16;
   x = Math.max(wa.x + 6, Math.min(x, wa.x + wa.width - w - 6));
   y = Math.max(wa.y + 6, Math.min(y, wa.y + wa.height - h - 6));
-  const win = new BrowserWindow({
+  const win = newTrackedWindow({
     x,
     y,
     width: w,
@@ -388,6 +408,7 @@ module.exports = {
   closeTranslatePopup,
   broadcast,
   closeAll,
+  isTrustedSender,
   getOverlay: () => overlayWin,
   getMain: () => refs.main,
 };

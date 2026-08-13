@@ -10,6 +10,54 @@
   // 一、通用小工具（纯 DOM，无外部依赖）
   // ============================================================
 
+  // ---- H2 配套：API Key 掩码处理（主进程只回传掩码视图）----
+  function isMaskedKey(v) {
+    return typeof v === 'string' && v.indexOf('•') >= 0;
+  }
+  // 回填 Key 输入框：掩码 → 输入框留空 + 标记「已配置」（dataset.kkSet=1，留空=保持不变）；
+  // 空/明文（旧版缓存）→ 直接填入。
+  function fillKeyInput(input, stored, placeholder) {
+    if (isMaskedKey(stored)) {
+      input.value = '';
+      input.dataset.kkSet = '1';
+      input.placeholder = '已配置 · 留空保持不变';
+    } else {
+      input.value = stored || '';
+      input.dataset.kkSet = '0';
+      input.placeholder = placeholder || 'sk-…';
+    }
+  }
+  // 组装含 Key 的 patch：输入了新值 → 写新值；留空且已配置 → 删除该字段（绝不覆盖原 Key）；
+  // 留空且未配置 → 写空串（显式清空/无 Key）。
+  function keyInto(patch, provider, input, other) {
+    patch[provider] = Object.assign({}, other);
+    const v = (input.value || '').trim();
+    if (v) {
+      patch[provider].apiKey = v;
+    } else if (input.dataset.kkSet === '1') {
+      // 留空 = 保持原 Key，不携带该字段
+    } else {
+      patch[provider].apiKey = '';
+    }
+    return patch;
+  }
+  // Key 输入框旁的「清除」按钮：立即把对应 Key 置空
+  function makeKeyClearBtn(input, provider, api) {
+    const b = h('button', { class: 'icon-btn apikey-eye', type: 'button', title: '清除已保存的 Key' }, '✕');
+    b.addEventListener('click', function () {
+      input.value = '';
+      input.dataset.kkSet = '0';
+      input.placeholder = 'sk-…';
+      const p = {};
+      p[provider] = { apiKey: '' };
+      Promise.resolve(api.setConfig(p))
+        .then(function () { toast('已清除 ' + provider + ' Key', 'ok'); })
+        .catch(function () { toast('清除失败', 'err'); });
+    });
+    return b;
+  }
+
+
   // 创建元素：tag + 属性 + 子节点（子可为字符串/节点/数组）
   function h(tag, attrs, children) {
     const el = document.createElement(tag);
@@ -643,7 +691,7 @@
         eyeBtn.appendChild(ico(show ? ICONS.眼闭 : ICONS.眼, 'ico-sm'));
         eyeBtn.title = show ? '隐藏' : '显示';
       });
-      const apiKeyWrap = h('div', { class: 'apikey-wrap' }, [inApiKey, eyeBtn]);
+      const apiKeyWrap = h('div', { class: 'apikey-wrap' }, [inApiKey, eyeBtn, makeKeyClearBtn(inApiKey, 'deepseek', api)]);
       paneDeepSeek.appendChild(
         stackField('DeepSeek · API Key', apiKeyWrap, 'API Key 仅保存在本地配置中，不会上传到任何第三方服务器。')
       );
@@ -658,14 +706,11 @@
       );
       paneDeepSeek.appendChild(stackField('文本模型 (textModel)', inText, '用于纯文本翻译 / 润色 / 对话'));
       paneDeepSeek.appendChild(makeTestRow('deepseek', function () {
-        return {
-          deepseek: {
-            apiKey: inApiKey.value.trim(),
-            baseUrl: inBaseUrl.value.trim(),
-            visionModel: inVision.value.trim(),
-            textModel: inText.value.trim(),
-          },
-        };
+        return keyInto({}, 'deepseek', inApiKey, {
+          baseUrl: inBaseUrl.value.trim(),
+          visionModel: inVision.value.trim(),
+          textModel: inText.value.trim(),
+        });
       }));
       gAI.body.appendChild(paneDeepSeek);
 
@@ -686,7 +731,7 @@
         mmEye.appendChild(ico(show ? ICONS.眼闭 : ICONS.眼, 'ico-sm'));
         mmEye.title = show ? '隐藏' : '显示';
       });
-      const mmKeyWrap = h('div', { class: 'apikey-wrap' }, [inMmKey, mmEye]);
+      const mmKeyWrap = h('div', { class: 'apikey-wrap' }, [inMmKey, mmEye, makeKeyClearBtn(inMmKey, 'minimax', api)]);
       paneMiniMax.appendChild(
         stackField('MiniMax · API Key', mmKeyWrap, 'MiniMax 开放平台 Key（Bearer 鉴权，无需 GroupId），仅存本地')
       );
@@ -699,14 +744,11 @@
         ])
       );
       paneMiniMax.appendChild(makeTestRow('minimax', function () {
-        return {
-          minimax: {
-            apiKey: inMmKey.value.trim(),
-            baseUrl: inMmBase.value.trim(),
-            visionModel: inMmModel.value.trim(),
-            textModel: inMmModel.value.trim(),
-          },
-        };
+        return keyInto({}, 'minimax', inMmKey, {
+          baseUrl: inMmBase.value.trim(),
+          visionModel: inMmModel.value.trim(),
+          textModel: inMmModel.value.trim(),
+        });
       }));
       gAI.body.appendChild(paneMiniMax);
 
@@ -737,7 +779,7 @@
         oaEye.appendChild(ico(show ? ICONS.眼闭 : ICONS.眼, 'ico-sm'));
         oaEye.title = show ? '隐藏' : '显示';
       });
-      const oaKeyWrap = h('div', { class: 'apikey-wrap' }, [inOaKey, oaEye]);
+      const oaKeyWrap = h('div', { class: 'apikey-wrap' }, [inOaKey, oaEye, makeKeyClearBtn(inOaKey, 'openai', api)]);
 
       const inOaBase = h('input', { class: 'input', type: 'text', placeholder: 'https://api.siliconflow.cn/v1' });
 
@@ -814,14 +856,11 @@
       });
 
       function collectOpenAI() {
-        return {
-          openai: {
-            preset: oaState.preset,
-            apiKey: inOaKey.value.trim(),
-            baseUrl: inOaBase.value.trim(),
-            model: inOaModel.value.trim(),
-          },
-        };
+        return keyInto({}, 'openai', inOaKey, {
+          preset: oaState.preset,
+          baseUrl: inOaBase.value.trim(),
+          model: inOaModel.value.trim(),
+        });
       }
 
       paneOpenAI.appendChild(stackField('服务商预设', selOaPreset, '选平台自动填 Base URL 与默认模型；选「自定义」可填任意 OpenAI 兼容端点。'));
@@ -891,31 +930,26 @@
         btnSaveAI.disabled = true;
         setAiStatus('正在保存…', '');
         try {
-          const patch = {
-            ai: { provider: selProvider.value },
-            openai: {
-              preset: oaState.preset,
-              apiKey: inOaKey.value.trim(),
-              baseUrl: inOaBase.value.trim(),
-              model: inOaModel.value.trim(),
-            },
-            minimax: {
-              apiKey: inMmKey.value.trim(),
-              baseUrl: inMmBase.value.trim(),
-              visionModel: inMmModel.value.trim(),
-              textModel: inMmModel.value.trim(),
-            },
-            deepseek: {
-              apiKey: inApiKey.value.trim(),
-              baseUrl: inBaseUrl.value.trim(),
-              visionModel: inVision.value.trim(),
-              textModel: inText.value.trim(),
-              askImagePrompt: taAsk.value,
-              ocrPrompt: taOcr.value,
-              translatePrompt: taTranslate.value,
-              polishPrompt: taPolish.value,
-            },
-          };
+          const patch = { ai: { provider: selProvider.value } };
+          keyInto(patch, 'openai', inOaKey, {
+            preset: oaState.preset,
+            baseUrl: inOaBase.value.trim(),
+            model: inOaModel.value.trim(),
+          });
+          keyInto(patch, 'minimax', inMmKey, {
+            baseUrl: inMmBase.value.trim(),
+            visionModel: inMmModel.value.trim(),
+            textModel: inMmModel.value.trim(),
+          });
+          keyInto(patch, 'deepseek', inApiKey, {
+            baseUrl: inBaseUrl.value.trim(),
+            visionModel: inVision.value.trim(),
+            textModel: inText.value.trim(),
+            askImagePrompt: taAsk.value,
+            ocrPrompt: taOcr.value,
+            translatePrompt: taTranslate.value,
+            polishPrompt: taPolish.value,
+          });
           const merged = await api.setConfig(patch);
           if (merged && typeof merged === 'object') currentConfig = merged;
           setAiStatus('AI 配置已保存', 'ok');
@@ -1052,21 +1086,21 @@
         inLang.value = ocr.lang || '';
 
         // AI 模型
-        inApiKey.value = ds.apiKey || '';
+        fillKeyInput(inApiKey, ds.apiKey);
         inBaseUrl.value = ds.baseUrl || '';
         inVision.value = ds.visionModel || '';
         inText.value = ds.textModel || '';
         // 通用 OpenAI 兼容服务商回填（先按预设铺底，再用已存值覆盖）
         const oa = cfg.openai || {};
         applyPreset(oa.preset || 'siliconflow', false);
-        inOaKey.value = oa.apiKey || '';
+        fillKeyInput(inOaKey, oa.apiKey);
         inOaBase.value = oa.baseUrl || (OPENAI_PRESETS[oaState.preset] || {}).baseUrl || '';
         inOaModel.value = oa.model || (OPENAI_PRESETS[oaState.preset] || {}).defaultModel || '';
 
         // AI 提供方 + MiniMax
         const mm = cfg.minimax || {};
         setProvider((cfg.ai && cfg.ai.provider) || 'deepseek', false);
-        inMmKey.value = mm.apiKey || '';
+        fillKeyInput(inMmKey, mm.apiKey);
         inMmBase.value = mm.baseUrl || '';
         inMmModel.value = mm.visionModel || mm.textModel || '';
         taAsk.value = ds.askImagePrompt || '';

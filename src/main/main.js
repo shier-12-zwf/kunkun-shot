@@ -439,7 +439,21 @@ async function saveImageWithDialog(dataURL, suggestName) {
 
 // ---------- IPC ----------
 function registerIpc() {
-  ipcMain.handle(C.CONFIG_GET, () => config.get());
+  // M1 修复：统一拦截所有 ipcMain.handle——只接受本应用窗口工厂创建的 webContents 发来的请求。
+  // 被导航/注入的窗口、外部 webContents 一律拿不到任何能力（截图/剪贴板/配置/AI 请求等）。
+  if (!ipcMain.__kkGuarded) {
+    ipcMain.__kkGuarded = true;
+    const origHandle = ipcMain.handle.bind(ipcMain);
+    ipcMain.handle = (channel, listener) =>
+      origHandle(channel, (event, ...args) => {
+        if (!event || !event.sender || !windows.isTrustedSender(event.sender.id)) {
+          return undefined; // invoke 端收到 undefined，静默失败（不抛错、不给信息）
+        }
+        return listener(event, ...args);
+      });
+  }
+
+  ipcMain.handle(C.CONFIG_GET, () => config.publicView()); // H2：渲染层只拿掩码视图，Key 不出主进程
   ipcMain.handle(C.CONFIG_SET, (_e, patch) => {
     const merged = config.set(patch);
     registerShortcuts();
@@ -796,9 +810,23 @@ function registerIpc() {
   });
 
   // 在线拉取模型清单（GET {baseUrl}/models）。设置页「刷新模型列表」用。
+  // H2 配套：渲染层拿不到明文 Key（只有掩码），payload.apiKey 为空时按 baseUrl 匹配主进程里存储的真实 Key。
   ipcMain.handle(C.AI_FETCH_MODELS, async (_e, { baseUrl, apiKey } = {}) => {
     try {
-      const models = await deepseek.fetchModels({ baseUrl, apiKey });
+      let url = String(baseUrl || '');
+      let key = typeof apiKey === 'string' ? apiKey : '';
+      if (!key) {
+        const norm = url.replace(/\/+$/, '');
+        const cfg = config.get();
+        const hit = [cfg.openai, cfg.deepseek, cfg.minimax].find(
+          (p) => p && p.baseUrl && String(p.baseUrl).replace(/\/+$/, '') === norm
+        );
+        if (hit) {
+          key = hit.apiKey || '';
+          if (!url) url = hit.baseUrl || '';
+        }
+      }
+      const models = await deepseek.fetchModels({ baseUrl: url, apiKey: key });
       return { ok: true, models };
     } catch (err) {
       return { ok: false, error: (err && err.message) || String(err) };

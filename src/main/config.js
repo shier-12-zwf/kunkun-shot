@@ -143,6 +143,19 @@ function get() {
   return load();
 }
 
+// H2 修复：供渲染层读取的公开视图。API Key 一律替换为掩码，绝不把明文 Key 送进任何渲染进程；
+// 其余字段照常返回（深拷贝，渲染层拿不到主进程内存里的引用）。渲染层判断「是否已配置」用 truthy 即可。
+const KEY_MASK = '••••••••••••';
+function publicView() {
+  const out = deepMerge({}, load());
+  for (const [a, b] of SECRET_PATHS) {
+    if (out[a] && typeof out[a][b] === 'string' && out[a][b]) {
+      out[a] = { ...out[a], [b]: KEY_MASK };
+    }
+  }
+  return out;
+}
+
 function set(patch) {
   const merged = deepMerge(load(), patch || {});
   cache = merged; // 内存中保持明文
@@ -155,4 +168,4 @@ function set(patch) {
   return merged;
 }
 
-module.exports = { get, set };
+module.exports = { get, set, publicView };
