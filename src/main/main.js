@@ -274,7 +274,25 @@ function pinFromClipboard() {
     });
     return;
   }
-  dialog.showMessageBox({ type: 'info', message: '剪贴板里没有图片或文字', detail: '先复制一张图片、一段文字或一个颜色值，再使用此功能。' });
+  // P1-15 之三：剪贴板里有文件（Finder 里复制文件）→ 文件贴图
+  try {
+    const buf = clipboard.read('public.file-url');
+    if (buf && buf.length) {
+      const raw = String(buf.toString('utf8') || '').trim();
+      const m = raw.match(/^([^\n\r]+)/);
+
+      if (m) {
+        let fp = decodeURIComponent(m[1]);
+        if (fp.startsWith('file://')) fp = decodeURIComponent(fp.slice(7));
+        if (fp && fs.existsSync(fp) && fs.statSync(fp).isFile()) {
+          windows.createPin({ file: fp, bounds: { x: point.x, y: point.y, width: 280, height: 120 } });
+          return;
+        }
+      }
+    }
+  } catch (_) {}
+
+  dialog.showMessageBox({ type: 'info', message: '剪贴板里没有图片、文字、颜色或文件', detail: '先复制一张图片、一段文字、一个颜色值或一个文件（Finder 里 Cmd+C），再使用此功能。' });
 }
 
 // ---------- 全局划词翻译（纯 Electron：快捷键 + 剪贴板兜底）----------
@@ -976,7 +994,13 @@ function registerIpc() {
     return { ok: true };
   });
 
-  ipcMain.handle(C.RECORD_SAVE, async (_e, { buffer, mime, toGif, fps }) => {
+  ipcMain.handle(C.RECORD_SAVE, async (_e, { buffer, mime, toGif, fps, trimStart, trimEnd }) => {
+    // P2-4 剪辑：起止秒（0=不裁）
+    const ss = Math.max(0, Number(trimStart) || 0);
+    const te = Math.max(0, Number(trimEnd) || 0);
+    const trimArgs = [];
+    if (ss > 0) trimArgs.push('-ss', String(ss));
+    if (te > 0 && te > ss) trimArgs.push('-t', String(te - ss));
     // P1-4(B13)：限制录屏数据大小，防止超长录制或异常 payload 打满内存/磁盘。
     const byteLen = buffer ? (buffer.byteLength != null ? buffer.byteLength : buffer.length) : 0;
     const MAX_REC_BYTES = 2 * 1024 * 1024 * 1024; // 2GB 上限（约 12fps webm 数小时的量级，正常录屏远达不到）
@@ -1004,10 +1028,12 @@ function registerIpc() {
     }
     try {
       if (wantGif) {
-        await media.convertToGif(tmp, filePath, fps || cfg.recording.fps);
+        await media.convertToGif(tmp, filePath, fps || cfg.recording.fps, trimArgs);
       } else if (path.extname(filePath || '').toLowerCase() === '.mp4') {
         // P2-4：webm → mp4 快速转封装（-c copy 不重编码，秒级完成）
-        await media.convertImage(tmp, filePath, ['-c', 'copy', '-movflags', '+faststart']);
+        await media.convertImage(tmp, filePath, trimArgs.concat(['-c', 'copy', '-movflags', '+faststart']));
+      } else if (trimArgs.length) {
+        await media.convertImage(tmp, filePath, trimArgs.concat(['-c', 'copy']));
       } else {
         fs.copyFileSync(tmp, filePath);
       }
@@ -1021,6 +1047,44 @@ function registerIpc() {
   });
 
   // ---- 主窗口 / 菜单栏弹窗 ----
+  // 本地文件打开：绝对路径 + 存在性校验，防任意路径
+  ipcMain.handle(C.OPEN_PATH, (_e, p) => {
+    if (typeof p === 'string' && path.isAbsolute(p) && fs.existsSync(p)) {
+      shell.openPath(p).catch(() => {});
+    }
+    return true;
+  });
+
+  // 贴图拖出：把贴图内容写成临时文件，交给系统拖拽（拖进 Finder/微信/其它 App）
+  ipcMain.handle(C.PIN_START_DRAG, (e) => {
+    const w = BrowserWindow.fromWebContents(e.sender);
+    if (!w || w.isDestroyed()) return { ok: false };
+    const payload = windows.getPinPayload(e.sender.id) || {};
+    try {
+      let file = null;
+      let icon = nativeImage.createEmpty();
+      if (payload.dataURL) {
+        file = path.join(os.tmpdir(), `kkshot-drag-${Date.now()}.png`);
+        media.saveImageFile(payload.dataURL, file);
+        icon = nativeImage.createFromDataURL(payload.dataURL).resize({ width: 64, height: 64 });
+      } else if (payload.text) {
+        file = path.join(os.tmpdir(), `kkshot-drag-${Date.now()}.txt`);
+        fs.writeFileSync(file, payload.text, 'utf-8');
+      } else if (payload.color) {
+        file = path.join(os.tmpdir(), `kkshot-drag-${Date.now()}.txt`);
+        fs.writeFileSync(file, payload.color, 'utf-8');
+      } else if (payload.file) {
+        file = payload.file; // 文件贴图：直接拖原文件
+      }
+      if (file && fs.existsSync(file)) {
+        e.sender.startDrag({ file, icon });
+      }
+    } catch (err) {
+      console.error('[pin-drag]', err);
+    }
+    return { ok: true };
+  });
+
   // 外链打开：只放行 http(s)，其它协议一律拒绝（防 file:// 等被利用）
   ipcMain.handle(C.OPEN_EXTERNAL, (_e, url) => {
     if (typeof url === 'string' && /^https?:\/\//i.test(url)) {

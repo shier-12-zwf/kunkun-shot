@@ -40,12 +40,13 @@ function writeTempRecording(buffer, ext) {
 }
 
 // webm/mp4 -> gif，使用 palettegen/paletteuse 提升质量
-function convertToGif(inputPath, outputPath, fps) {
+// preArgs：可选前置参数（剪辑用 ['-ss','3','-t','5']）
+function convertToGif(inputPath, outputPath, fps, preArgs) {
   return new Promise((resolve, reject) => {
     const ffmpeg = resolveFfmpeg();
     const rate = fps || 12;
     const vf = `fps=${rate},scale=iw:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse`;
-    const args = ['-y', '-i', inputPath, '-vf', vf, '-loop', '0', outputPath];
+    const args = ['-y'].concat(preArgs || []).concat(['-i', inputPath, '-vf', vf, '-loop', '0', outputPath]);
     const proc = spawn(ffmpeg, args);
     let stderr = '';
     proc.stderr.on('data', (d) => (stderr += d.toString()));

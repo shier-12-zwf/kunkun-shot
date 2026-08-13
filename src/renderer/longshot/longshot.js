@@ -19,6 +19,7 @@
   let timer = null; // setInterval 句柄
   let capturing = false; // 是否处于捕获中
   let busy = false; // 完成/单帧处理中，避免并发
+  let horizontal = false; // 横向滚动模式（帧转置复用纵向拼接）
   let frameCount = 0; // 已捕获帧数（含首帧）
 
   // ====== 算法参数 ======
@@ -45,6 +46,7 @@
   const $cropBottom = document.getElementById('cropBottom');
   const $cropTopVal = document.getElementById('cropTopVal');
   const $cropBottomVal = document.getElementById('cropBottomVal');
+  const $btnDir = document.getElementById('btnDir');
   const $btnCancel = document.getElementById('btnCancel');
 
   // ====== 工具：把 dataURL 画到一个临时 canvas，拿到 ctx + 尺寸 ======
@@ -72,7 +74,19 @@
       scaleFactor: SCALE,
     });
     if (!dataURL) throw new Error('captureRegion 返回空');
-    return loadDataURL(dataURL);
+    const f = loadDataURL(dataURL);
+    if (horizontal) {
+      // 横向模式：帧顺时针转 90° 后复用纵向拼接管线，导出时再转回来
+      const rot = document.createElement('canvas');
+      rot.width = f.height;
+      rot.height = f.width;
+      const rctx = rot.getContext('2d', { willReadFrequently: true });
+      rctx.translate(f.height / 2, f.width / 2);
+      rctx.rotate(Math.PI / 2);
+      rctx.drawImage(f.canvas, -f.width / 2, -f.height / 2);
+      return { canvas: rot, width: f.height, height: f.width };
+    }
+    return f;
   }
 
   // ====== 创建/初始化拼接 canvas（首帧）======
@@ -356,6 +370,18 @@
         exportCanvas = out2;
       }
 
+      // 横向模式：把拼接结果逆时针转 90° 还原
+      if (horizontal) {
+        const rot = document.createElement('canvas');
+        rot.width = exportCanvas.height;
+        rot.height = exportCanvas.width;
+        const rctx = rot.getContext('2d');
+        rctx.translate(rot.width / 2, rot.height / 2);
+        rctx.rotate(-Math.PI / 2);
+        rctx.drawImage(exportCanvas, -exportCanvas.width / 2, -exportCanvas.height / 2);
+        exportCanvas = rot;
+      }
+
       const dataURL = exportCanvas.toDataURL('image/png');
       if (!dataURL || dataURL.length < 32 || dataURL === 'data:,') {
         throw new Error('导出失败：拼接图过大或为空，无法生成 PNG');
@@ -380,6 +406,13 @@
   }
 
   // ====== 绑定 UI ======
+  $btnDir.addEventListener('click', () => {
+    if (busy) return;
+    horizontal = !horizontal;
+    $btnDir.querySelector('.label').textContent = horizontal ? '横向' : '纵向';
+    $btnDir.title = '切换滚动方向（当前：' + (horizontal ? '横向' : '纵向') + '）';
+    $hint.textContent = horizontal ? '水平滚动页面会自动拼接' : '滚动页面会自动拼接';
+  });
   $btnStart.addEventListener('click', startCapture);
   $cropTop.addEventListener('input', () => { $cropTopVal.textContent = $cropTop.value + 'px'; });
   $cropBottom.addEventListener('input', () => { $cropBottomVal.textContent = $cropBottom.value + 'px'; });

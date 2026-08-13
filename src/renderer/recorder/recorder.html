@@ -19,6 +19,10 @@
     <div class="status" id="status">
       <span class="live-dot" id="liveDot"></span>
       <span class="timer" id="timer">00:00</span>
+      <span class="trim-box" title="剪辑：起止秒（0=不裁）">
+        起<input type="number" id="trimStart" class="trim-input" min="0" step="1" value="0" placeholder="0">s
+        止<input type="number" id="trimEnd" class="trim-input" min="0" step="1" value="0" placeholder="全">s
+      </span>
     </div>
 
     <!-- 停止录制：方块图标 -->

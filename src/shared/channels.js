@@ -37,6 +37,7 @@ module.exports = {
   PIN_CREATE: 'pin:create', // ({ dataURL, bounds }) 在屏幕上钉一张图
   PIN_SET_STATE: 'pin:set-state', // ({ onTop?, ignoreMouse? }) 置顶切换/鼠标穿透（作用当前贴图窗）
   PIN_CMD: 'pin:cmd', // (main->pin) { cmd: 'thumb'|'passthrough-off'|'save', on? } 贴图批量指令
+  PIN_START_DRAG: 'pin:start-drag', // (pin->main) 把贴图内容拖出窗口到其它应用
 
   // ---- OCR ----
   OCR_RUN: 'ocr:run',
@@ -61,6 +62,7 @@ module.exports = {
 
   // ---- 外部链接 ----
   OPEN_EXTERNAL: 'shell:open-external', // (url) 仅允许 http(s)，走系统浏览器
+  OPEN_PATH: 'shell:open-path', // (p) 打开本地文件（绝对路径存在性校验）
 
   // ---- 主窗口 / 菜单栏弹窗 ----
   OPEN_MAIN: 'window:open-main', // (page?) 打开桌面主窗口，可指定默认页

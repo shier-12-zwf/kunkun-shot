@@ -469,6 +469,7 @@ module.exports = {
   pinAllDestroy,
   restoreLastPin,
   pinCount,
+  getPinPayload: (id) => pinPayloads.get(id) || null,
   getOverlay: () => overlayWin,
   getMain: () => refs.main,
 };

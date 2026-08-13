@@ -335,7 +335,7 @@
         mime: 'video/webm',
         toGif: !!init.toGif,
         fps: init.fps && init.fps > 0 ? init.fps : 15,
-      });
+        trimStart: parseInt(document.getElementById('trimStart').value, 10) || 0, trimEnd: parseInt(document.getElementById('trimEnd').value, 10) || 0 });
 
       // 保存完成关闭窗口（无论 saved 真假都关，结果由主进程处理）
       if (res && res.saved === false) {

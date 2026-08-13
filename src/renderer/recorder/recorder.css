@@ -196,3 +196,7 @@ body {
   animation: none;
   opacity: 1;
 }
+
+/* ===== 剪辑输入 ===== */
+.trim-box { display: inline-flex; align-items: center; gap: 2px; font-size: 11px; color: #666; }
+.trim-input { width: 38px; border: 1px solid var(--border, #e5e7eb); border-radius: 4px; padding: 1px 3px; font-size: 11px; }

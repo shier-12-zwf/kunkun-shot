@@ -22,9 +22,10 @@
     selectMode: false, // 选字模式：点击文字块复制文字
     ocrLines: null, // OCR 行级坐标缓存（切换模式复用，不重复识别）
     ocrBusy: false, // 识别中，防连点重复请求
-    kind: 'image', // image | text | color
+    kind: 'image', // image | text | color | file
     text: '',
     color: '',
+    file: '',
     locked: false, // 锁定：禁止拖动/缩放/调透明度
     onTop: true, // 置顶
     passthrough: false, // 鼠标穿透
@@ -61,6 +62,12 @@
     if (state.kind === 'color') {
       Promise.resolve(k.copyText(state.color))
         .then(function () { toast('已复制颜色 ' + state.color, 'ok'); })
+        .catch(function () { toast('复制失败', 'err'); });
+      return;
+    }
+    if (state.kind === 'file') {
+      Promise.resolve(k.copyText(state.file))
+        .then(function () { toast('已复制文件路径', 'ok'); })
         .catch(function () { toast('复制失败', 'err'); });
       return;
     }
@@ -278,6 +285,17 @@
       });
     }
   }
+  function bindFileClick() {
+    var f = document.getElementById('pinFile');
+    if (!f) return;
+    f.addEventListener('click', function () {
+      if (state.kind !== 'file' || !state.file) return;
+      var k = api();
+      if (k && typeof k.openPath === 'function') {
+        Promise.resolve(k.openPath(state.file)).catch(function () { toast('打开失败', 'err'); });
+      }
+    });
+  }
   function bindOcrLayer() {
     var layer = document.getElementById('pinOcrLayer');
     if (!layer) return;
@@ -426,10 +444,22 @@
     var dragging = false;
     var lastX = 0;
     var lastY = 0;
+    var dragOutArmed = false; // Ctrl+拖拽 = 把内容拖出窗口（拖到其它应用）
+    var dragOutFired = false;
+    var downX = 0;
+    var downY = 0;
     wrapEl.addEventListener('mousedown', function (e) {
       if (e.button !== 0) return; // 仅左键
       // 锁定 / 选字模式下点击不触发窗口拖动
       if (state.locked || state.selectMode) return;
+      // Ctrl+左键：准备拖出内容
+      if (e.ctrlKey || e.metaKey) {
+        dragOutArmed = true;
+        dragOutFired = false;
+        downX = e.screenX;
+        downY = e.screenY;
+        return;
+      }
       // 工具栏 / 右键菜单上的点击不触发拖动
       if ((toolbarEl && toolbarEl.contains(e.target)) || (ctxMenu && ctxMenu.contains(e.target))) return;
       dragging = true;
@@ -438,6 +468,19 @@
       e.preventDefault();
     });
     window.addEventListener('mousemove', function (e) {
+      if (dragOutArmed) {
+        var odx = e.screenX - downX;
+        var ody = e.screenY - downY;
+        if (odx * odx + ody * ody > 64 && !dragOutFired) {
+          dragOutFired = true;
+          var k2 = api();
+          if (k2 && typeof k2.pinStartDrag === 'function') {
+            try { k2.pinStartDrag(); } catch (_) {}
+          }
+          toast('已开始拖出（松手即投放）');
+        }
+        return;
+      }
       if (!dragging) return;
       var dx = e.screenX - lastX;
       var dy = e.screenY - lastY;
@@ -449,6 +492,8 @@
     });
     window.addEventListener('mouseup', function () {
       dragging = false;
+      dragOutArmed = false;
+      dragOutFired = false;
     });
   }
 
@@ -604,6 +649,17 @@
       }
       imgEl.hidden = true;
     }
+    if (payload.file) {
+      state.kind = 'file';
+      state.file = payload.file;
+      const f = document.getElementById('pinFile');
+      const fn = document.getElementById('pinFileName');
+      if (f && fn) {
+        fn.textContent = payload.file.split('/').pop() || payload.file;
+        f.hidden = false;
+      }
+      imgEl.hidden = true;
+    }
     if (payload.dataURL) {
       if (state.dataURL && state.dataURL !== payload.dataURL) {
         // 换了新图：退出选字模式并清空 OCR 缓存，避免旧坐标/旧文字张冠李戴
@@ -633,6 +689,7 @@
     bindContextMenu();
     bindOcrLayer();
     bindPinCmd();
+    bindFileClick();
 
     var k = api();
     if (k && typeof k.onInit === 'function') {
