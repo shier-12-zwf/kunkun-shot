@@ -32,6 +32,7 @@
     // 取色（PixPin 式放大镜取色）：记录鼠标位置与当前像素颜色，C 键复制
     lastMouse: { x: 0, y: 0 },
     curColor: null, // {r,g,b} 或 null
+    qrData: null, // 当前选区识别出的二维码内容
 
     // 选区拖动 / 缩放
     dragMode: null, // null | 'move' | 'resize'
@@ -76,6 +77,12 @@
   var magCtx = magCanvas.getContext('2d');
   var magInfo = document.getElementById('magInfo');
   var magColor = document.getElementById('magColor');
+  var qrPanel = document.getElementById('qrPanel');
+  var qrText = document.getElementById('qrText');
+  var btnQR = document.getElementById('btnQR');
+  var btnQrCopy = document.getElementById('btnQrCopy');
+  var btnQrOpen = document.getElementById('btnQrOpen');
+  var btnQrClose = document.getElementById('btnQrClose');
   var toolbar = document.getElementById('toolbar');
   var textInput = document.getElementById('textInput');
   var btnUndo = document.getElementById('btnUndo');
@@ -267,6 +274,9 @@
     selectionEl.classList.remove('annotating');
     toolbar.hidden = true;
     hint.hidden = true;
+    S.qrData = null;
+    btnQR.hidden = true;
+    hideQrPanel();
     updateSelectionView();
     showMagnifier(e);
   }
@@ -419,6 +429,7 @@
       // `if (toolbar.hidden) return` 守卫，故必须先复位 hidden 再定位，否则工具栏拖动后永久消失。
       if (S.rect) toolbar.hidden = false;
       positionToolbar();
+      scanQr();
       return;
     }
     if (S.shapeDrag) {
@@ -442,6 +453,7 @@
     }
     updateSelectionView();
     showToolbar();
+    scanQr();
   }
 
   // ================= 工具栏 =================
@@ -536,6 +548,8 @@
       var action = actBtn.getAttribute('data-action');
       if (action === 'cancel') {
         doCancel();
+      } else if (action === 'qr') {
+        showQrPanel();
       } else if (action === 'ask' || action === 'translate' || action === 'polish') {
         // 翻译 / 问 AI / 润色：在截图层内就地完成，不另开窗口
         openInlineAI(action);
@@ -635,7 +649,7 @@
       return;
     }
     S.drawing = true;
-    if (S.tool === 'pen' || S.tool === 'mosaic') {
+    if (S.tool === 'pen' || S.tool === 'mosaic' || S.tool === 'highlight') {
       S.cur = { type: S.tool, points: [{ x: p.x, y: p.y }], color: S.color, width: S.width };
     } else {
       // rect / ellipse / arrow
@@ -649,7 +663,7 @@
     var p = evtToAnno(e);
     p.x = clamp(p.x, 0, annoCanvas.width);
     p.y = clamp(p.y, 0, annoCanvas.height);
-    if (S.cur.type === 'pen' || S.cur.type === 'mosaic') {
+    if (S.cur.type === 'pen' || S.cur.type === 'mosaic' || S.cur.type === 'highlight') {
       S.cur.points.push({ x: p.x, y: p.y });
     } else {
       S.cur.x2 = p.x;
@@ -664,7 +678,7 @@
     var c = S.cur;
     S.cur = null;
     // 丢弃过小的图形
-    if (c.type === 'pen' || c.type === 'mosaic') {
+    if (c.type === 'pen' || c.type === 'mosaic' || c.type === 'highlight') {
       if (c.points.length < 2) {
         redrawAnno();
         return;
@@ -690,9 +704,9 @@
   function shiftShapeList(shapes, dx, dy) {
     for (var i = 0; i < shapes.length; i++) {
       var s = shapes[i];
-      if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'arrow') {
+      if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'arrow' || s.type === 'line') {
         s.x1 += dx; s.y1 += dy; s.x2 += dx; s.y2 += dy;
-      } else if (s.type === 'pen' || s.type === 'mosaic') {
+      } else if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight') {
         for (var j = 0; j < s.points.length; j++) { s.points[j].x += dx; s.points[j].y += dy; }
       } else { // text / number
         s.x += dx; s.y += dy;
@@ -727,10 +741,10 @@
 
   // ---- 包围盒 ----
   function getBBox(s) {
-    if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'arrow') {
+    if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'arrow' || s.type === 'line') {
       return { x: Math.min(s.x1, s.x2), y: Math.min(s.y1, s.y2), w: Math.abs(s.x2 - s.x1), h: Math.abs(s.y2 - s.y1) };
     }
-    if (s.type === 'pen' || s.type === 'mosaic') {
+    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight') {
       var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (var i = 0; i < s.points.length; i++) {
         var p = s.points[i];
@@ -792,7 +806,7 @@
   // ---- 变换（基于原始快照计算，避免累积误差）----
   function translateShape(src, dx, dy) {
     var s = JSON.parse(JSON.stringify(src));
-    if (s.type === 'pen' || s.type === 'mosaic') {
+    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight') {
       for (var i = 0; i < s.points.length; i++) {
         s.points[i].x += dx;
         s.points[i].y += dy;
@@ -813,7 +827,7 @@
     var s = JSON.parse(JSON.stringify(src));
     function rx(x) { return remap(x, ob.x, ob.w, nb.x, nb.w); }
     function ry(y) { return remap(y, ob.y, ob.h, nb.y, nb.h); }
-    if (s.type === 'pen' || s.type === 'mosaic') {
+    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight') {
       for (var i = 0; i < s.points.length; i++) {
         s.points[i].x = rx(s.points[i].x);
         s.points[i].y = ry(s.points[i].y);
@@ -1133,6 +1147,23 @@
       ctx.stroke();
     } else if (s.type === 'arrow') {
       drawArrow(ctx, s.x1 * scale, s.y1 * scale, s.x2 * scale, s.y2 * scale, lw, s.color);
+    } else if (s.type === 'line') {
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      ctx.moveTo(s.x1 * scale, s.y1 * scale);
+      ctx.lineTo(s.x2 * scale, s.y2 * scale);
+      ctx.stroke();
+    } else if (s.type === 'highlight') {
+      // 荧光笔：加粗 + 半透明，盖在文字上仍可读
+      ctx.globalAlpha = 0.42;
+      ctx.lineWidth = Math.max(10, lw * 2.6);
+      ctx.beginPath();
+      var hpts = s.points;
+      ctx.moveTo(hpts[0].x * scale, hpts[0].y * scale);
+      for (var hi = 1; hi < hpts.length; hi++) {
+        ctx.lineTo(hpts[hi].x * scale, hpts[hi].y * scale);
+      }
+      ctx.stroke();
     } else if (s.type === 'pen') {
       ctx.lineWidth = lw;
       ctx.beginPath();
@@ -1362,6 +1393,70 @@
 
   // 轻提示（复制颜色等短暂反馈，仿 pin 的 toast）
   var tipTimer = null;
+  // ================= 二维码识别（PixPin 式：框选后自动检测）=================
+  function scanQr() {
+    if (!S.rect || !S.bgReady || !S.bgImage) return;
+    if (typeof jsQR !== 'function') return;
+    var phys = dpr();
+    var r = S.rect;
+    var w = Math.round(r.width * phys);
+    var h = Math.round(r.height * phys);
+    if (w < 40 || h < 40) {
+      S.qrData = null;
+      btnQR.hidden = true;
+      return;
+    }
+    // 长边超过 1024 时降采样，避免大选区全分辨率扫描卡顿
+    var MAX = 1024;
+    var sc = Math.min(1, MAX / Math.max(w, h));
+    var cw = Math.max(1, Math.round(w * sc));
+    var ch = Math.max(1, Math.round(h * sc));
+    var tmp = document.createElement('canvas');
+    tmp.width = cw;
+    tmp.height = ch;
+    var tctx = tmp.getContext('2d');
+    try {
+      tctx.drawImage(bgCanvas, Math.round(r.x * phys), Math.round(r.y * phys), w, h, 0, 0, cw, ch);
+    } catch (_) {
+      return;
+    }
+    var img = tctx.getImageData(0, 0, cw, ch);
+    var code = null;
+    try {
+      code = jsQR(img.data, cw, ch, { inversionAttempts: 'dontInvert' });
+    } catch (_) {}
+    if (!code) {
+      try {
+        code = jsQR(img.data, cw, ch, { inversionAttempts: 'attemptBoth' });
+      } catch (_) {}
+    }
+    S.qrData = code ? String(code.data) : null;
+    btnQR.hidden = !S.qrData;
+  }
+  function showQrPanel() {
+    if (!S.qrData) return;
+    qrText.textContent = S.qrData;
+    btnQrOpen.hidden = !/^https?:\/\//i.test(S.qrData);
+    qrPanel.hidden = false;
+  }
+  function hideQrPanel() {
+    qrPanel.hidden = true;
+  }
+  function bindQrPanel() {
+    btnQrCopy.addEventListener('click', function () {
+      if (!S.qrData) return;
+      Promise.resolve(kkapi.copyText(S.qrData))
+        .then(function () { showTip('已复制二维码内容'); })
+        .catch(function () { showTip('复制失败'); });
+    });
+    btnQrOpen.addEventListener('click', function () {
+      if (!S.qrData || !/^https?:\/\//i.test(S.qrData)) return;
+      Promise.resolve(kkapi.openExternal(S.qrData))
+        .then(function () { hideQrPanel(); })
+        .catch(function () { showTip('打开失败'); });
+    });
+    btnQrClose.addEventListener('click', hideQrPanel);
+  }
   function showTip(msg) {
     var t = document.getElementById('kkTip');
     if (!t) return;
@@ -1497,6 +1592,9 @@
   }
 
   function doCancel() {
+    hideQrPanel();
+    S.qrData = null;
+    btnQR.hidden = true;
     if (S.finished) return;
     S.finished = true;
     try {
@@ -2052,12 +2150,15 @@
     }
     updateSelectionView();
     positionToolbar();
+    scanQr();
     // 键盘微调后可立即用 C 取色：把放大镜刷到当前位置
     var lm = S.lastMouse;
     if ((!S.tool || S.tool === 'select') && S.bgImage && !toolbar.hidden) {
       showMagnifier({ clientX: lm.x, clientY: lm.y, shiftKey: false });
     }
   }
+
+  bindQrPanel();
 
   // 右键 → 取消
   document.addEventListener('contextmenu', function (e) {

@@ -56,6 +56,9 @@ module.exports = {
   // ---- 录屏 ----
   RECORD_SAVE: 'record:save', // ({ buffer, mime, toGif, fps }) => { saved, path }
 
+  // ---- 外部链接 ----
+  OPEN_EXTERNAL: 'shell:open-external', // (url) 仅允许 http(s)，走系统浏览器
+
   // ---- 主窗口 / 菜单栏弹窗 ----
   OPEN_MAIN: 'window:open-main', // (page?) 打开桌面主窗口，可指定默认页
   MAIN_NAV: 'main:nav', // (main->renderer) 让主窗口切到某页 { page }

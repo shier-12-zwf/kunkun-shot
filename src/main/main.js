@@ -893,6 +893,14 @@ function registerIpc() {
   });
 
   // ---- 主窗口 / 菜单栏弹窗 ----
+  // 外链打开：只放行 http(s)，其它协议一律拒绝（防 file:// 等被利用）
+  ipcMain.handle(C.OPEN_EXTERNAL, (_e, url) => {
+    if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
+      shell.openExternal(url).catch(() => {});
+    }
+    return true;
+  });
+
   ipcMain.handle(C.OPEN_MAIN, (_e, page) => {
     windows.hidePopover();
     windows.createMain(page);

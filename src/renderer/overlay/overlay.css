@@ -553,3 +553,59 @@ body {
   -webkit-user-select: text;
   user-select: text;
 }
+
+/* ===== 二维码结果面板 ===== */
+.qr-panel {
+  position: fixed;
+  left: 50%;
+  top: 14px;
+  transform: translateX(-50%);
+  z-index: 95;
+  width: 320px;
+  max-width: 80vw;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+.qr-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  margin-bottom: 6px;
+}
+.qr-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  word-break: break-all;
+  max-height: 120px;
+  overflow: auto;
+  background: var(--panel-2, #f5f6f8);
+  border-radius: 6px;
+  padding: 6px 8px;
+  user-select: text;
+  cursor: text;
+}
+.qr-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  justify-content: flex-end;
+}
+.qr-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.qr-btn:hover {
+  background: var(--panel-2, #f5f6f8);
+}
+.qr-btn-close {
+  margin-left: auto;
+}

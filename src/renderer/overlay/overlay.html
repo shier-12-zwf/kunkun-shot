@@ -66,8 +66,14 @@
       <button class="tool-btn" data-tool="arrow" title="箭头">
         <svg viewBox="0 0 24 24"><path d="M5 19 L19 5 M19 5 L11 5 M19 5 L19 13"/></svg>
       </button>
+      <button class="tool-btn" data-tool="line" title="直线">
+        <svg viewBox="0 0 24 24"><path d="M5 19 L19 5"/></svg>
+      </button>
       <button class="tool-btn" data-tool="pen" title="画笔">
         <svg viewBox="0 0 24 24"><path d="M4 20 C8 12 10 10 14 8 C16 7 18 6 20 4"/></svg>
+      </button>
+      <button class="tool-btn" data-tool="highlight" title="荧光笔（半透明高亮）">
+        <svg viewBox="0 0 24 24"><path d="M4 20 C8 12 10 10 14 8 C16 7 18 6 20 4" stroke-width="3" opacity="0.7"/><path d="M4 18 L10 12"/></svg>
       </button>
       <button class="tool-btn" data-tool="text" title="文字">
         <svg viewBox="0 0 24 24"><path d="M5 6 H19 M12 6 V19 M9 19 H15"/></svg>
@@ -121,6 +127,10 @@
         <svg viewBox="0 0 24 24"><path d="M4 8V5h3 M20 8V5h-3 M4 16v3h3 M20 16v3h-3 M8 12h8"/></svg>
         <span>OCR</span>
       </button>
+      <button class="action-btn" id="btnQR" data-action="qr" title="识别到二维码后出现" hidden>
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3z M20 14h1 M14 20h1 M18 18h3v3h-3"/></svg>
+        <span>二维码</span>
+      </button>
       <button class="action-btn" data-action="ask" title="问 AI">
         <svg viewBox="0 0 24 24"><path d="M12 4a8 8 0 0 0-8 8c0 1.6.5 3 1.3 4.2L4 20l4-1.2A8 8 0 1 0 12 4z"/><path d="M9.5 10a2.5 2.5 0 1 1 3.4 2.3c-.6.3-.9.7-.9 1.4"/><circle cx="12" cy="16.5" r=".6"/></svg>
         <span>问AI</span>
@@ -164,6 +174,18 @@
   <!-- 文字输入框（编辑文字标注时浮现） -->
   <textarea id="textInput" class="text-input" hidden spellcheck="false"></textarea>
 
+  <!-- 二维码结果面板（识别到二维码后点击工具栏按钮出现） -->
+  <div id="qrPanel" class="qr-panel" hidden>
+    <div class="qr-title">二维码内容</div>
+    <div id="qrText" class="qr-text"></div>
+    <div class="qr-actions">
+      <button class="qr-btn" id="btnQrCopy" type="button">复制</button>
+      <button class="qr-btn" id="btnQrOpen" type="button">打开链接</button>
+      <button class="qr-btn qr-btn-close" id="btnQrClose" type="button">关闭</button>
+    </div>
+  </div>
+
+  <script src="./vendor/jsQR.js"></script>
   <script src="./overlay.js"></script>
 </body>
 </html>
