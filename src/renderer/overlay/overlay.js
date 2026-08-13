@@ -32,7 +32,9 @@
     // 取色（PixPin 式放大镜取色）：记录鼠标位置与当前像素颜色，C 键复制
     lastMouse: { x: 0, y: 0 },
     curColor: null, // {r,g,b} 或 null
-    qrData: null, // 当前选区识别出的二维码内容
+    qrData: null,
+    ratioLock: 0, // 锁定宽高比(>0)；0=不锁
+    rounded: false, // 圆角截图 // 当前选区识别出的二维码内容
 
     // 选区拖动 / 缩放
     dragMode: null, // null | 'move' | 'resize'
@@ -83,6 +85,8 @@
   var btnQrCopy = document.getElementById('btnQrCopy');
   var btnQrOpen = document.getElementById('btnQrOpen');
   var btnQrClose = document.getElementById('btnQrClose');
+  var btnRatioLock = document.getElementById('btnRatioLock');
+  var btnRounded = document.getElementById('btnRounded');
   var toolbar = document.getElementById('toolbar');
   var textInput = document.getElementById('textInput');
   var btnUndo = document.getElementById('btnUndo');
@@ -170,6 +174,7 @@
       return;
     }
     selectionEl.hidden = false;
+    selectionEl.style.borderRadius = S.rounded ? '12px' : '0px';
     selectionEl.style.left = r.x + 'px';
     selectionEl.style.top = r.y + 'px';
     selectionEl.style.width = r.width + 'px';
@@ -325,6 +330,14 @@
       var y = Math.min(sy, e.clientY);
       var w = Math.abs(e.clientX - sx);
       var h = Math.abs(e.clientY - sy);
+      if (e.shiftKey) {
+        // Shift 固定 1:1：以较大边为准，并沿拖拽方向收缩
+        var side = Math.max(w, h);
+        w = side;
+        h = side;
+        if (e.clientX < sx) x = sx - side;
+        if (e.clientY < sy) y = sy - side;
+      }
       // 限制在显示器范围内
       x = clamp(x, 0, S.displayCssW);
       y = clamp(y, 0, S.displayCssH);
@@ -408,6 +421,27 @@
     var ny = Math.min(top, bottom);
     var nw = Math.abs(right - left);
     var nh = Math.abs(bottom - top);
+    if (S.ratioLock > 0) {
+      // 锁定比例：仅左右边 → 高度跟随；仅上下边 → 宽度跟随；角点 → 取更大者
+      var ratio = S.ratioLock;
+      var hEdge = pos.indexOf('n') !== -1 || pos.indexOf('s') !== -1;
+      var wEdge = pos.indexOf('w') !== -1 || pos.indexOf('e') !== -1;
+      if (wEdge && !hEdge) {
+        nh = nw / ratio;
+      } else if (hEdge && !wEdge) {
+        nw = nh * ratio;
+      } else {
+        nw = Math.max(nw, nh * ratio);
+        nh = nw / ratio;
+      }
+      if (pos.indexOf('n') !== -1) top = bottom - nh;
+      else bottom = top + nh;
+      if (pos.indexOf('w') !== -1) left = right - nw;
+      else right = left + nw;
+      // 比例调整可能改变了左/上边，重算原点
+      nx = Math.min(left, right);
+      ny = Math.min(top, bottom);
+    }
     S.rect = { x: nx, y: ny, width: nw, height: nh };
   }
 
@@ -1483,6 +1517,29 @@
     out.height = outH;
     var ctx = out.getContext('2d');
 
+    // 圆角截图：先把整张导出图裁剪成圆角（背景+标注+译文都在圆角内）
+    if (S.rounded) {
+      var rad = Math.round((S.roundedRadius || 12) * phys);
+      try {
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(0, 0, outW, outH, rad);
+        else {
+          // 兜底手动圆角路径
+          ctx.moveTo(rad, 0);
+          ctx.lineTo(outW - rad, 0);
+          ctx.quadraticCurveTo(outW, 0, outW, rad);
+          ctx.lineTo(outW, outH - rad);
+          ctx.quadraticCurveTo(outW, outH, outW - rad, outH);
+          ctx.lineTo(rad, outH);
+          ctx.quadraticCurveTo(0, outH, 0, outH - rad);
+          ctx.lineTo(0, rad);
+          ctx.quadraticCurveTo(0, 0, rad, 0);
+        }
+        ctx.closePath();
+        ctx.clip();
+      } catch (_) {}
+    }
+
     // 1) 从背景物理像素裁剪选区
     if (S.bgImage) {
       var srcX = Math.round(r.x * phys);
@@ -2158,6 +2215,20 @@
     }
   }
 
+  // 比例锁定 / 圆角开关
+  btnRatioLock.addEventListener('click', function () {
+    if (S.ratioLock) {
+      S.ratioLock = 0;
+    } else {
+      S.ratioLock = S.rect && S.rect.height > 0 ? S.rect.width / S.rect.height : 1;
+    }
+    btnRatioLock.classList.toggle('active', !!S.ratioLock);
+  });
+  btnRounded.addEventListener('click', function () {
+    S.rounded = !S.rounded;
+    btnRounded.classList.toggle('active', S.rounded);
+    updateSelectionView(); // 选区预览同步圆角
+  });
   bindQrPanel();
 
   // 右键 → 取消

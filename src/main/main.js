@@ -18,6 +18,7 @@ const {
   systemPreferences,
   protocol,
   net,
+  Notification,
 } = require('electron');
 
 const C = require('../shared/channels');
@@ -430,11 +431,29 @@ async function saveImageWithDialog(dataURL, suggestName) {
   const { canceled, filePath } = await dialog.showSaveDialog({
     title: '保存图片',
     defaultPath: path.join(dir, name),
-    filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+    filters: [
+      { name: 'PNG 图片（无损，支持透明）', extensions: ['png'] },
+      { name: 'JPEG 图片（更小，不支持透明）', extensions: ['jpg', 'jpeg'] },
+      { name: 'WebP 图片（体积小）', extensions: ['webp'] },
+    ],
   });
   if (canceled || !filePath) return { saved: false };
-  media.saveImageFile(dataURL, filePath);
-  return { saved: true, path: filePath };
+  const ext = path.extname(filePath || '').toLowerCase();
+  try {
+    if (ext === '.jpg' || ext === '.jpeg' || ext === '.webp') {
+      // 先写临时 PNG（原始质量），再用 ffmpeg 转目标格式
+      const tmp = path.join(os.tmpdir(), `kkshot-${Date.now()}-${Math.floor(Math.random() * 1e6)}.png`);
+      media.saveImageFile(dataURL, tmp);
+      await media.convertImage(tmp, filePath, ext === '.webp' ? ['-quality', '86'] : ['-q:v', '3']);
+      try { fs.unlinkSync(tmp); } catch (_) {}
+    } else {
+      media.saveImageFile(dataURL, filePath);
+    }
+    return { saved: true, path: filePath };
+  } catch (err) {
+    dialog.showErrorBox('保存图片失败', (err && err.message) || String(err));
+    return { saved: false, error: (err && err.message) || String(err) };
+  }
 }
 
 // ---------- IPC ----------
@@ -556,6 +575,23 @@ function registerIpc() {
       case 'save': {
         const r = await saveImageWithDialog(imageDataURL);
         if (r && r.saved) { saveToHistory(imageDataURL, 'region'); savedToHistory = true; } // 主动保存到本地 → 入历史
+        break;
+      }
+      case 'quickSave': {
+        // 快速保存：免对话框直接存到保存目录，并弹系统通知
+        const dir = cfg.general.saveDir || app.getPath('pictures');
+        const file = path.join(dir, `困困截图-${Date.now()}.png`);
+        try {
+          media.saveImageFile(imageDataURL, file);
+          saveToHistory(imageDataURL, 'region');
+          savedToHistory = true;
+          if (Notification.isSupported()) {
+            new Notification({ title: '困困截图', body: '已快速保存：' + file }).show();
+          }
+        } catch (err) {
+          console.error('[quick-save] 失败：', err);
+          dialog.showErrorBox('快速保存失败', (err && err.message) || String(err));
+        }
         break;
       }
       case 'pin':

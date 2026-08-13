@@ -106,6 +106,18 @@
 
     <span class="divider"></span>
 
+    <!-- 选框形态：比例锁定 / 圆角（PixPin 式） -->
+    <div class="tool-group">
+      <button class="tool-btn" id="btnRatioLock" title="锁定宽高比（按当前比例调整选框）">
+        <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+      </button>
+      <button class="tool-btn" id="btnRounded" title="圆角截图">
+        <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="5"/></svg>
+      </button>
+    </div>
+
+    <span class="divider"></span>
+
     <!-- 撤销 / 重做 -->
     <div class="tool-group">
       <button class="tool-btn" id="btnUndo" title="撤销 (Ctrl/Cmd+Z)">
@@ -160,6 +172,10 @@
       <button class="action-btn" data-action="save" title="保存到文件">
         <svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z M8 4v5h7V4 M8 14h8v6H8z"/></svg>
         <span>保存</span>
+      </button>
+      <button class="action-btn" data-action="quickSave" title="快速保存（免对话框，直接存到保存目录）">
+        <svg viewBox="0 0 24 24"><path d="M13 2L4.5 13.5H11L9.5 22 19 10h-6.5z"/></svg>
+        <span>快存</span>
       </button>
       <button class="action-btn primary" data-action="copy" title="复制到剪贴板 (Enter)">
         <svg viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="12" rx="1"/><path d="M5 16V4h11"/></svg>

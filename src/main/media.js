@@ -57,4 +57,21 @@ function convertToGif(inputPath, outputPath, fps) {
   });
 }
 
-module.exports = { dataURLToBuffer, saveImageFile, writeTempRecording, convertToGif, resolveFfmpeg };
+// 图片格式转换（PNG 源 → JPG/WebP 等）：ffmpeg 按输出扩展名推断编码。
+// extraArgs：质量参数（如 ['-q:v','3'] 或 ['-quality','85']），由调用方按格式给。
+function convertImage(inputPath, outputPath, extraArgs) {
+  return new Promise((resolve, reject) => {
+    const ffmpeg = resolveFfmpeg();
+    const args = ['-y', '-i', inputPath].concat(extraArgs || []).concat([outputPath]);
+    const proc = spawn(ffmpeg, args);
+    let stderr = '';
+    proc.stderr.on('data', (d) => (stderr += d.toString()));
+    proc.on('error', (e) => reject(new Error(`ffmpeg 启动失败：${e.message}`)));
+    proc.on('close', (code) => {
+      if (code === 0) resolve(outputPath);
+      else reject(new Error(`图片转换失败（ffmpeg 退出码 ${code}）：${stderr.slice(-300)}`));
+    });
+  });
+}
+
+module.exports = { dataURLToBuffer, saveImageFile, writeTempRecording, convertToGif, convertImage, resolveFfmpeg };
