@@ -34,7 +34,12 @@
     curColor: null, // {r,g,b} 或 null
     qrData: null,
     ratioLock: 0, // 锁定宽高比(>0)；0=不锁
-    rounded: false, // 圆角截图 // 当前选区识别出的二维码内容
+    rounded: false, // 圆角截图
+    // 历史浏览 / 选区历史（PixPin 式 < > / R）
+    histItems: null, // 历史列表缓存
+    histIdx: -1, // -1=当前截图；>=0 表示正在看第几张历史
+    recentRects: [], // 本会话最近 10 个选区
+    rectHistIdx: -1, // 选区历史游标 // 当前选区识别出的二维码内容
 
     // 选区拖动 / 缩放
     dragMode: null, // null | 'move' | 'resize'
@@ -488,6 +493,7 @@
     updateSelectionView();
     showToolbar();
     scanQr();
+    recordRecentRect();
   }
 
   // ================= 工具栏 =================
@@ -1391,7 +1397,7 @@
     magCtx.clearRect(0, 0, magCanvas.width, magCanvas.height);
     try {
       magCtx.drawImage(
-        S.bgImage,
+        bgCanvas,
         sx,
         sy,
         srcW * phys,
@@ -1541,11 +1547,11 @@
     }
 
     // 1) 从背景物理像素裁剪选区
-    if (S.bgImage) {
+    if (S.bgImage && bgCanvas.width > 0) {
       var srcX = Math.round(r.x * phys);
       var srcY = Math.round(r.y * phys);
       try {
-        ctx.drawImage(S.bgImage, srcX, srcY, outW, outH, 0, 0, outW, outH);
+        ctx.drawImage(bgCanvas, srcX, srcY, outW, outH, 0, 0, outW, outH);
       } catch (err) {
         /* 忽略 */
       }
@@ -2147,6 +2153,26 @@
       return;
     }
 
+    // < > ：浏览截图历史；R / Shift+R：载入最近选区（PixPin 式）
+    if (!meta && (e.key === '<' || (e.key === ',' && e.shiftKey))) {
+      if (S.aiOpen) return;
+      e.preventDefault();
+      browseHistory(-1);
+      return;
+    }
+    if (!meta && (e.key === '>' || (e.key === '.' && e.shiftKey))) {
+      if (S.aiOpen) return;
+      e.preventDefault();
+      browseHistory(1);
+      return;
+    }
+    if (!meta && (e.key === 'r' || e.key === 'R')) {
+      if (S.aiOpen || S.selecting || S.dragMode || S.drawing) return;
+      e.preventDefault();
+      applyRecentRect(e.shiftKey ? 1 : -1);
+      return;
+    }
+
     // 方向键：选框 1px 微调（PixPin 式）
     //   方向键            → 整体移动 1px
     //   Shift + 方向键    → 对应边收缩 1px
@@ -2229,6 +2255,118 @@
     btnRounded.classList.toggle('active', S.rounded);
     updateSelectionView(); // 选区预览同步圆角
   });
+  // ================= 截图历史浏览 / 选区历史（PixPin 式 < > / R）=================
+  function resetForHistoryImage(notice) {
+    S.rect = null;
+    S.shapes = [];
+    S.history = [];
+    S.redoStack = [];
+    S.selected = null;
+    S.numberSeq = 1;
+    toolbar.hidden = true;
+    S.qrData = null;
+    btnQR.hidden = true;
+    hideQrPanel();
+    updateSelectionView();
+    hint.hidden = false;
+    hint.textContent = notice;
+  }
+  function loadHistoryImage(dataURL, notice) {
+    var img = new Image();
+    img.onload = function () {
+      // 历史截图多为区域裁剪图：等比 contain 居中铺到全屏画布上，四周留黑边，
+      // 这样选区/裁剪/放大镜/取色的坐标系全部保持不变。
+      var phys = dpr();
+      var W = Math.round(S.displayCssW * phys);
+      var H = Math.round(S.displayCssH * phys);
+      bgCanvas.width = W;
+      bgCanvas.height = H;
+      bgCtx.fillStyle = '#000';
+      bgCtx.fillRect(0, 0, W, H);
+      var iw = img.naturalWidth || 1;
+      var ih = img.naturalHeight || 1;
+      var r = Math.min(W / iw, H / ih);
+      var dw = Math.max(1, Math.round(iw * r));
+      var dh = Math.max(1, Math.round(ih * r));
+      bgCtx.drawImage(img, Math.round((W - dw) / 2), Math.round((H - dh) / 2), dw, dh);
+      S.bgImage = img;
+      S.bgReady = true;
+      resetForHistoryImage(notice);
+    };
+    img.onerror = function () {
+      hint.hidden = false;
+      hint.textContent = '历史图片加载失败';
+    };
+    img.src = dataURL;
+  }
+  async function browseHistory(dir) {
+    if (S.aiOpen || S.selecting || S.dragMode || S.drawing) return;
+    try {
+      if (!S.histItems) {
+        S.histItems = await kkapi.historyList();
+        if (!Array.isArray(S.histItems)) S.histItems = [];
+        S.histIdx = -1;
+      }
+      var n = S.histItems.length;
+      if (!n) {
+        showTip('暂无历史截图');
+        return;
+      }
+      var next = S.histIdx + dir;
+      if (next >= n) {
+        showTip('已是最后一张');
+        return;
+      }
+      if (next < -1) {
+        showTip('已回到当前截图');
+        return;
+      }
+      S.histIdx = next;
+      if (next === -1) {
+        // 回到当前截图：重新铺当前底图
+        if (S.payload && S.payload.dataURL) {
+          loadHistoryImage(S.payload.dataURL, '已回到当前截图 · < > 切换历史');
+        }
+        return;
+      }
+      var got = await kkapi.historyGet(S.histItems[next].id);
+      if (!got || !got.dataURL) {
+        showTip('这张历史图不可用');
+        return;
+      }
+      loadHistoryImage(got.dataURL, '历史截图 ' + (next + 1) + '/' + n + ' · < > 切换 · Esc 返回');
+    } catch (err) {
+      showTip('历史浏览失败：' + ((err && err.message) || err));
+    }
+  }
+  function recordRecentRect() {
+    if (!S.rect) return;
+    S.recentRects.push({ x: S.rect.x, y: S.rect.y, width: S.rect.width, height: S.rect.height });
+    if (S.recentRects.length > 10) S.recentRects.shift();
+    S.rectHistIdx = -1;
+  }
+  function applyRecentRect(step) {
+    if (!S.recentRects.length) {
+      showTip('暂无选区历史');
+      return;
+    }
+    var idx = S.rectHistIdx + step;
+    if (idx >= S.recentRects.length) idx = 0;
+    if (idx < 0) idx = S.recentRects.length - 1;
+    S.rectHistIdx = idx;
+    var r = S.recentRects[idx];
+    S.rect = { x: r.x, y: r.y, width: r.width, height: r.height };
+    S.shapes = [];
+    S.history = [];
+    S.redoStack = [];
+    S.selected = null;
+    if (typeof clearInlineTranslate === 'function') clearInlineTranslate();
+    updateSelectionView();
+    toolbar.hidden = false;
+    positionToolbar();
+    scanQr();
+    showTip('载入选区 ' + (idx + 1) + '/' + S.recentRects.length);
+  }
   bindQrPanel();
 
   // 右键 → 取消
