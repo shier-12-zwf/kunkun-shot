@@ -244,21 +244,30 @@ async function startCapture(mode) {
 }
 
 function pinFromClipboard() {
+  const point = screen.getCursorScreenPoint();
   const img = clipboard.readImage();
-  if (img.isEmpty()) {
-    dialog.showMessageBox({ type: 'info', message: '剪贴板里没有图片', detail: '先复制一张图片再使用此功能。' });
+  if (!img.isEmpty()) {
+    const display = screen.getDisplayNearestPoint(point);
+    const sf = display.scaleFactor || 1;
+    const size = img.getSize();
+    const w = Math.round(size.width / sf);
+    const h = Math.round(size.height / sf);
+    windows.createPin({
+      dataURL: img.toDataURL(),
+      bounds: { x: point.x, y: point.y, width: w, height: h },
+    });
     return;
   }
-  const point = screen.getCursorScreenPoint();
-  const display = screen.getDisplayNearestPoint(point);
-  const sf = display.scaleFactor || 1;
-  const size = img.getSize();
-  const w = Math.round(size.width / sf);
-  const h = Math.round(size.height / sf);
-  windows.createPin({
-    dataURL: img.toDataURL(),
-    bounds: { x: point.x, y: point.y, width: w, height: h },
-  });
+  // P1-15：剪贴板没图但有文字 → 文本贴图（PixPin 式五类贴图之二）
+  const text = clipboard.readText();
+  if (text && text.trim()) {
+    windows.createPin({
+      text: text.trim(),
+      bounds: { x: point.x, y: point.y, width: 320, height: 120 },
+    });
+    return;
+  }
+  dialog.showMessageBox({ type: 'info', message: '剪贴板里没有图片或文字', detail: '先复制一张图片或一段文字，再使用此功能。' });
 }
 
 // ---------- 全局划词翻译（纯 Electron：快捷键 + 剪贴板兜底）----------
@@ -711,6 +720,22 @@ function registerIpc() {
   });
 
   ipcMain.handle(C.PIN_CREATE, (_e, { dataURL, bounds }) => windows.createPin({ dataURL, bounds }));
+  // 贴图窗状态：置顶切换 / 鼠标穿透（作用调用方自己的窗口；主进程按 sender 定位）
+  ipcMain.handle(C.PIN_SET_STATE, (e, flags) => {
+    const w = BrowserWindow.fromWebContents(e.sender);
+    if (!w || w.isDestroyed()) return { ok: false };
+    try {
+      if (typeof flags.onTop === 'boolean') {
+        w.setAlwaysOnTop(flags.onTop, 'floating');
+      }
+      if (typeof flags.ignoreMouse === 'boolean') {
+        w.setIgnoreMouseEvents(flags.ignoreMouse, { forward: true });
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+  });
 
   ipcMain.handle(C.OCR_RUN, async (_e, payload) => {
     const cfg = config.get();

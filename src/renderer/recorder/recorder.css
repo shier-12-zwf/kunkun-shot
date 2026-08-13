@@ -184,3 +184,15 @@ body {
 .toast[hidden] {
   display: none;
 }
+
+/* ===== 暂停按钮（P2-4） ===== */
+.btn-pause {
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text, #1f2329);
+}
+.bar.paused .live-dot {
+  background: #f59e0b;
+  animation: none;
+  opacity: 1;
+}

@@ -97,7 +97,9 @@ function closeOverlay() {
 }
 
 // ---- 贴图窗口 ----
-function createPin({ dataURL, bounds }) {
+function createPin(payload) {
+  const dataURL = payload && payload.dataURL;
+  const bounds = payload && payload.bounds;
   const win = newTrackedWindow({
     x: Math.round(bounds.x),
     y: Math.round(bounds.y),
@@ -116,7 +118,7 @@ function createPin({ dataURL, bounds }) {
   });
   win.setAlwaysOnTop(true, 'floating');
   win.loadFile(rfile('pin', 'pin.html'));
-  whenLoaded(win, { dataURL, bounds });
+  whenLoaded(win, payload);
   pins.add(win);
   win.on('closed', () => pins.delete(win));
   return win;

@@ -35,6 +35,7 @@ module.exports = {
 
   // ---- 贴图 ----
   PIN_CREATE: 'pin:create', // ({ dataURL, bounds }) 在屏幕上钉一张图
+  PIN_SET_STATE: 'pin:set-state', // ({ onTop?, ignoreMouse? }) 置顶切换/鼠标穿透（作用当前贴图窗）
 
   // ---- OCR ----
   OCR_RUN: 'ocr:run',

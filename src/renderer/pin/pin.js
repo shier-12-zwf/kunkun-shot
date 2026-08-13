@@ -22,6 +22,10 @@
     selectMode: false, // 选字模式：点击文字块复制文字
     ocrLines: null, // OCR 行级坐标缓存（切换模式复用，不重复识别）
     ocrBusy: false, // 识别中，防连点重复请求
+    kind: 'image', // image | text
+    text: '',
+    locked: false, // 锁定：禁止拖动/缩放/调透明度
+    onTop: true, // 置顶
   };
 
   // ---- 轻提示 ----
@@ -44,7 +48,14 @@
   // ====== 五个核心动作 ======
   function doCopy() {
     var k = api();
-    if (!k || !state.dataURL) return;
+    if (!k) return;
+    if (state.kind === 'text') {
+      Promise.resolve(k.copyText(state.text))
+        .then(function () { toast('已复制文字', 'ok'); })
+        .catch(function () { toast('复制失败', 'err'); });
+      return;
+    }
+    if (!state.dataURL) return;
     Promise.resolve(k.copyImage(state.dataURL))
       .then(function () {
         toast('已复制图片', 'ok');
@@ -137,6 +148,19 @@
     if (btn) btn.classList.remove('active');
   }
 
+  function toggleLock() {
+    state.locked = !state.locked;
+    document.body.classList.toggle('locked', state.locked);
+    toast(state.locked ? '已锁定（L 解锁）' : '已解锁', state.locked ? '' : 'ok');
+  }
+  function toggleOnTop() {
+    state.onTop = !state.onTop;
+    var k = api();
+    if (k && typeof k.setPinState === 'function') {
+      Promise.resolve(k.setPinState({ onTop: state.onTop })).catch(function () {});
+    }
+    toast(state.onTop ? '已置顶' : '已取消置顶');
+  }
   function toggleTextSelect() {
     if (state.selectMode) {
       exitTextSelect();
@@ -161,7 +185,7 @@
     if (state.ocrLines) {
       // 已有缓存：直接重建文字块
       buildOcrSpans(state.ocrLines);
-      toast(state.ocrLines.length ? '点击文字即可复制 · T 退出' : '未识别到文字', state.ocrLines.length ? 'ok' : 'err');
+      toast(state.ocrLines.length ? '点击文字即可复制 · S 退出' : '未识别到文字', state.ocrLines.length ? 'ok' : 'err');
       return;
     }
     if (state.ocrBusy) return;
@@ -173,7 +197,7 @@
         var lines = res && Array.isArray(res.lines) ? res.lines : [];
         state.ocrLines = lines;
         buildOcrSpans(lines);
-        toast(lines.length ? '点击文字即可复制 · T 退出' : '未识别到文字', lines.length ? 'ok' : 'err');
+        toast(lines.length ? '点击文字即可复制 · S 退出' : '未识别到文字', lines.length ? 'ok' : 'err');
       })
       .catch(function (err) {
         state.ocrBusy = false;
@@ -212,6 +236,8 @@
     save: doSave,
     ocr: doOcr,
     ask: doAsk,
+    lock: toggleLock,
+    topToggle: toggleOnTop,
     textSel: toggleTextSelect,
     zoomIn: zoomIn,
     zoomOut: zoomOut,
@@ -263,6 +289,7 @@
       'wheel',
       function (e) {
         e.preventDefault();
+        if (state.locked) return; // 锁定：不缩放不调透明度
         if (e.ctrlKey) {
           doPinchZoom(e);
         } else {
@@ -326,8 +353,8 @@
     var lastY = 0;
     wrapEl.addEventListener('mousedown', function (e) {
       if (e.button !== 0) return; // 仅左键
-      // 选字模式下点击是复制文字，不触发窗口拖动
-      if (state.selectMode) return;
+      // 锁定 / 选字模式下点击不触发窗口拖动
+      if (state.locked || state.selectMode) return;
       // 工具栏 / 右键菜单上的点击不触发拖动
       if ((toolbarEl && toolbarEl.contains(e.target)) || (ctxMenu && ctxMenu.contains(e.target))) return;
       dragging = true;
@@ -376,7 +403,17 @@
         doClose();
         return;
       }
+      if (e.key === 'l' || e.key === 'L') {
+        e.preventDefault();
+        toggleLock();
+        return;
+      }
       if (e.key === 't' || e.key === 'T') {
+        e.preventDefault();
+        toggleOnTop();
+        return;
+      }
+      if (e.key === 's' || e.key === 'S') {
         e.preventDefault();
         toggleTextSelect();
         return;
@@ -442,6 +479,16 @@
   // ====== 接收初始化 payload ======
   function applyInit(payload) {
     if (!payload) return;
+    if (payload.text) {
+      state.kind = 'text';
+      state.text = payload.text;
+      const t = document.getElementById('pinText');
+      if (t) {
+        t.textContent = payload.text;
+        t.hidden = false;
+      }
+      imgEl.hidden = true;
+    }
     if (payload.dataURL) {
       if (state.dataURL && state.dataURL !== payload.dataURL) {
         // 换了新图：退出选字模式并清空 OCR 缓存，避免旧坐标/旧文字张冠李戴

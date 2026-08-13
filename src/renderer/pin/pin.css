@@ -232,3 +232,29 @@ body.ocr-mode .pin-wrap {
 .pin-toast.err {
   background: rgba(239, 68, 68, 0.95);
 }
+
+/* ===== 文本贴图内容 ===== */
+.pin-text {
+  position: absolute;
+  inset: 0;
+  padding: 14px 16px;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: hidden;
+  user-select: text;
+  cursor: text;
+  z-index: 10;
+}
+
+/* ===== 贴图状态色（PixPin 式：激活蓝 / 普通灰 / 锁定橙） ===== */
+body.hovering .pin-wrap {
+  border-color: #2563eb;
+  box-shadow: 0 8px 30px rgba(37, 99, 235, 0.32);
+}
+body.locked .pin-wrap {
+  border-color: #f59e0b;
+  box-shadow: 0 8px 30px rgba(245, 158, 11, 0.35);
+}

@@ -8,6 +8,7 @@
   const elBar = document.getElementById('bar');
   const elBtnStart = document.getElementById('btnStart');
   const elBtnStop = document.getElementById('btnStop');
+  const elBtnPause = document.getElementById('btnPause');
   const elBtnCancel = document.getElementById('btnCancel');
   const elStatus = document.getElementById('status');
   const elTimer = document.getElementById('timer');
@@ -34,7 +35,8 @@
   let chunks = []; // 录制数据块
   let timerInterval = null; // 计时器句柄
   let startedAt = 0; // 录制开始时间戳
-  let isRecording = false; // 是否正在录制
+  let isRecording = false;
+  let isPaused = false; // 是否正在录制
   let isFinishing = false; // 是否正在停止保存（防重复触发）
   let toastTimer = null;
 
@@ -291,9 +293,13 @@
 
       // 6. 进入录制状态，更新 UI + 计时
       isRecording = true;
+      isPaused = false;
       elBar.classList.add('recording');
       hideToast();
       elBtnStart.hidden = true;
+      elBtnPause.hidden = false;
+      elBtnPause.textContent = '⏸';
+      elBtnPause.title = '暂停录制';
       elBtnStop.hidden = false;
       elBtnStop.disabled = false;
       startTimer();
@@ -346,12 +352,43 @@
   }
 
   // ====== 停止并保存 ======
+  // ====== 暂停 / 继续（P2-4：录制中间暂停，最终仍导出一段连续视频）======
+  function togglePause() {
+    if (!isRecording || isFinishing || !recorder) return;
+    if (recorder.state !== 'recording' && recorder.state !== 'paused') return;
+    try {
+      if (isPaused) {
+        recorder.resume();
+        isPaused = false;
+        elBar.classList.remove('paused');
+        elBtnPause.textContent = '⏸';
+        elBtnPause.title = '暂停录制';
+        startTimer();
+        showToast('继续录制', false);
+      } else {
+        recorder.pause();
+        isPaused = true;
+        elBar.classList.add('paused');
+        elBtnPause.textContent = '▶';
+        elBtnPause.title = '继续录制';
+        stopTimer();
+        showToast('已暂停（点 ▶ 继续）', false);
+      }
+    } catch (e) {
+      showToast('暂停/继续失败：' + (e && e.message ? e.message : e), true);
+    }
+  }
+  elBtnPause.addEventListener('click', togglePause);
+
   function stopRecording() {
     if (!isRecording || isFinishing) return;
     isFinishing = true;
     isRecording = false;
+    isPaused = false;
     elBar.classList.remove('recording');
+    elBar.classList.remove('paused');
     elBtnStop.disabled = true;
+    elBtnPause.hidden = true;
     stopTimer();
 
     // 先停绘制，再停 recorder（其 onstop 会触发保存）

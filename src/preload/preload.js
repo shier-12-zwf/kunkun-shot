@@ -38,6 +38,7 @@ const C = {
 
   // ---- 贴图 ----
   PIN_CREATE: 'pin:create', // ({ dataURL, bounds }) 在屏幕上钉一张图
+  PIN_SET_STATE: 'pin:set-state', // ({ onTop?, ignoreMouse? }) 置顶切换/鼠标穿透（作用当前贴图窗）
 
   // ---- OCR ----
   OCR_RUN: 'ocr:run',
@@ -125,6 +126,7 @@ const api = {
 
   // ---- 贴图 ----
   createPin: (dataURL, bounds) => ipcRenderer.invoke(C.PIN_CREATE, { dataURL, bounds }),
+  setPinState: (flags) => ipcRenderer.invoke(C.PIN_SET_STATE, flags),
 
   // ---- OCR ----
   runOCR: (payload) => ipcRenderer.invoke(C.OCR_RUN, payload),
