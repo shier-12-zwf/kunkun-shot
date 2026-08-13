@@ -124,8 +124,28 @@
     return Math.round(v * dpr());
   }
 
+  // ---------- 内置快捷键（设置页可自定义；字母统一小写比较）----------
+  var KEYS = { cancel: 'Escape', confirm: 'Enter', toolSelect: 'v', pickColor: 'c', histPrev: '<', histNext: '>', rectPrev: 'r' };
+  function keyMatches(e, want) {
+    if (!want) return false;
+    if (want === '<') return e.key === '<' || (e.key === ',' && e.shiftKey);
+    if (want === '>') return e.key === '>' || (e.key === '.' && e.shiftKey);
+    if (/^[a-z]$/i.test(want)) return String(e.key || '').toLowerCase() === want.toLowerCase();
+    return e.key === want;
+  }
+
   // ---------- 初始化 ----------
   var off = kkapi.onInit(function (payload) {
+    // 载入自定义内置快捷键
+    Promise.resolve(kkapi.getConfig())
+      .then(function (cfg) {
+        if (cfg && cfg.builtinKeys) {
+          Object.keys(KEYS).forEach(function (k) {
+            if (cfg.builtinKeys[k]) KEYS[k] = String(cfg.builtinKeys[k]);
+          });
+        }
+      })
+      .catch(function () {});
     if (!payload) return;
     S.payload = payload;
     S.scaleFactor = payload.scaleFactor || 1;
@@ -2276,7 +2296,7 @@
       return;
     }
 
-    if (e.key === 'Escape') {
+    if (keyMatches(e, KEYS.cancel)) {
       e.preventDefault();
       // 折线绘制中：Esc 先取消当前折线
       if (S.cur && S.cur.type === 'polyline') {
@@ -2302,7 +2322,7 @@
       doCancel();
       return;
     }
-    if (e.key === 'Enter') {
+    if (keyMatches(e, KEYS.confirm)) {
       e.preventDefault();
       // 折线绘制中：Enter 完成折线
       if (S.cur && S.cur.type === 'polyline') {
@@ -2329,15 +2349,15 @@
       redo();
       return;
     }
-    // V：切换选择/移动工具
-    if (!meta && (e.key === 'v' || e.key === 'V') && !toolbar.hidden) {
+    // 选择/移动工具
+    if (!meta && keyMatches(e, KEYS.toolSelect) && !toolbar.hidden) {
       e.preventDefault();
       selectTool('select');
       return;
     }
 
-    // C：复制光标下像素颜色（Shift 按住取 HEX，否则 RGB）——PixPin 式取色
-    if (!meta && (e.key === 'c' || e.key === 'C')) {
+    // 取色：复制光标下像素颜色（Shift 按住取 HEX，否则 RGB）——PixPin 式取色
+    if (!meta && keyMatches(e, KEYS.pickColor)) {
       if (S.aiOpen || S.finished) return;
       if (!S.bgReady || !S.bgImage) return;
       e.preventDefault();
@@ -2357,20 +2377,20 @@
       return;
     }
 
-    // < > ：浏览截图历史；R / Shift+R：载入最近选区（PixPin 式）
-    if (!meta && (e.key === '<' || (e.key === ',' && e.shiftKey))) {
+    // < > ：浏览截图历史；载入最近选区（PixPin 式，键可自定义）
+    if (!meta && keyMatches(e, KEYS.histPrev)) {
       if (S.aiOpen) return;
       e.preventDefault();
       browseHistory(-1);
       return;
     }
-    if (!meta && (e.key === '>' || (e.key === '.' && e.shiftKey))) {
+    if (!meta && keyMatches(e, KEYS.histNext)) {
       if (S.aiOpen) return;
       e.preventDefault();
       browseHistory(1);
       return;
     }
-    if (!meta && (e.key === 'r' || e.key === 'R')) {
+    if (!meta && keyMatches(e, KEYS.rectPrev)) {
       if (S.aiOpen || S.selecting || S.dragMode || S.drawing) return;
       e.preventDefault();
       applyRecentRect(e.shiftKey ? 1 : -1);

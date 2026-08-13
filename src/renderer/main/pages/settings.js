@@ -425,6 +425,88 @@
 
       grid.appendChild(gKeys.card);
 
+      // —— 内置快捷键（截图界面 / 贴图内的单键，可自定义）——
+      const gBuiltin = groupCard('键盘', '内置快捷键', '截图界面与贴图内的单键操作（按单个键即可，无修饰键要求）。');
+      const BUILTIN_KEYS = [
+        { key: 'cancel', label: '截图 · 取消/关闭' },
+        { key: 'confirm', label: '截图 · 确认（默认动作）' },
+        { key: 'toolSelect', label: '截图 · 选择/移动工具' },
+        { key: 'pickColor', label: '截图 · 取色' },
+        { key: 'histPrev', label: '截图 · 上一张历史' },
+        { key: 'histNext', label: '截图 · 下一张历史' },
+        { key: 'rectPrev', label: '截图 · 载入最近选区' },
+        { key: 'pinLock', label: '贴图 · 锁定' },
+        { key: 'pinTop', label: '贴图 · 置顶切换' },
+        { key: 'pinSelect', label: '贴图 · 选择文字' },
+        { key: 'pinPass', label: '贴图 · 鼠标穿透' },
+        { key: 'pinThumb', label: '贴图 · 缩略图模式' },
+      ];
+      const builtinInputs = {};
+      BUILTIN_KEYS.forEach(function (sc) {
+        const input = h('input', {
+          class: 'input shortcut-input', type: 'text',
+          readonly: true, placeholder: '按下单个键',
+          title: '点击后按下单个按键即可录入（Esc 取消，⌫ 清除）',
+        });
+        builtinInputs[sc.key] = input;
+        bindBuiltinCapture(input, sc.key, sc.label);
+        gBuiltin.body.appendChild(
+          h('div', { class: 'shortcut-row' }, [
+            h('div', { class: 'shortcut-name' }, sc.label),
+            input,
+          ])
+        );
+      });
+      gBuiltin.body.appendChild(
+        h('div', { class: 'hint' }, '说明：只录入单键（字母/数字/功能键/方向键）。特殊键 < > 可按住 Shift 再按 , 或 . 录入。')
+      );
+      grid.appendChild(gBuiltin.card);
+
+      // 内置快捷键的单键录入器
+      function bindBuiltinCapture(input, bkKey, bkLabel) {
+        input.addEventListener('focus', function () {
+          input.dataset.prev = input.value;
+          input.dataset.cleared = '';
+          input.value = '';
+          input.placeholder = '请按下单键…（Esc 取消，⌫ 清除）';
+          input.classList.add('recording');
+        });
+        input.addEventListener('blur', function () {
+          input.classList.remove('recording');
+          input.placeholder = '按下单个键';
+          if (input.value === '' && input.dataset.cleared !== '1') {
+            input.value = input.dataset.prev || '';
+          }
+          input.dataset.cleared = '';
+        });
+        input.addEventListener('keydown', function (e) {
+          if (!input.classList.contains('recording')) return;
+          e.preventDefault();
+          e.stopPropagation();
+          const code = e.code || '';
+          if (code === 'Escape') {
+            input.value = input.dataset.prev || '';
+            input.blur();
+            return;
+          }
+          if (code === 'Backspace' || code === 'Delete') {
+            input.value = '';
+            input.dataset.cleared = '1';
+            input.blur();
+            autoSave({ builtinKeys: { [bkKey]: '' } }, '已清除「' + bkLabel + '」快捷键');
+            return;
+          }
+          // 纯修饰键忽略，等主键
+          if (isModifierCode(code)) return;
+          let key = e.key;
+          if (!key) return;
+          if (/^[a-z]$/i.test(key)) key = key.toLowerCase(); // 字母统一小写
+          input.value = key;
+          input.blur();
+          autoSave({ builtinKeys: { [bkKey]: key } }, '「' + bkLabel + '」已设为 ' + key);
+        });
+      }
+
       // 绑定单个快捷键输入的「按下即录入」逻辑
       function bindShortcutCapture(input, scKey, scLabel) {
         input.addEventListener('focus', function () {
@@ -1085,6 +1167,12 @@
         // 快捷键
         SHORTCUTS.forEach(function (item) {
           shortcutInputs[item.key].value = sc[item.key] || '';
+        });
+
+        // 内置快捷键回填
+        const bk = cfg.builtinKeys || {};
+        BUILTIN_KEYS.forEach(function (item) {
+          builtinInputs[item.key].value = bk[item.key] || '';
         });
 
         // 截图

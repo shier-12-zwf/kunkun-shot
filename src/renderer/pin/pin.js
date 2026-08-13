@@ -44,6 +44,13 @@
     }, 1600);
   }
 
+  // ---- 内置快捷键（设置页可自定义）----
+  var PKEYS = { lock: 'l', top: 't', select: 's', pass: 'p', thumb: 'r' };
+  function pinKeyMatches(e, want) {
+    if (!want) return false;
+    return String(e.key || '').toLowerCase() === String(want).toLowerCase();
+  }
+
   // ---- 安全调用 kkapi（防止某接口缺失导致整页报错）----
   function api() {
     return window.kkapi || null;
@@ -529,27 +536,27 @@
         doClose();
         return;
       }
-      if (e.key === 'l' || e.key === 'L') {
+      if (pinKeyMatches(e, PKEYS.lock)) {
         e.preventDefault();
         toggleLock();
         return;
       }
-      if (e.key === 't' || e.key === 'T') {
+      if (pinKeyMatches(e, PKEYS.top)) {
         e.preventDefault();
         toggleOnTop();
         return;
       }
-      if (e.key === 's' || e.key === 'S') {
+      if (pinKeyMatches(e, PKEYS.select)) {
         e.preventDefault();
         toggleTextSelect();
         return;
       }
-      if (e.key === 'p' || e.key === 'P') {
+      if (pinKeyMatches(e, PKEYS.pass)) {
         e.preventDefault();
         togglePassthrough();
         return;
       }
-      if (e.key === 'r' || e.key === 'R') {
+      if (pinKeyMatches(e, PKEYS.thumb)) {
         e.preventDefault();
         toggleThumb();
         return;
@@ -692,6 +699,17 @@
     bindFileClick();
 
     var k = api();
+    if (k && typeof k.getConfig === 'function') {
+      Promise.resolve(k.getConfig())
+        .then(function (cfg) {
+          if (cfg && cfg.builtinKeys) {
+            Object.keys(PKEYS).forEach(function (key) {
+              if (cfg.builtinKeys[key]) PKEYS[key] = String(cfg.builtinKeys[key]);
+            });
+          }
+        })
+        .catch(function () {});
+    }
     if (k && typeof k.onInit === 'function') {
       // 主进程窗口加载完成后会推送 { dataURL, bounds }
       k.onInit(function (payload) {

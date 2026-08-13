@@ -52,6 +52,21 @@ const DEFAULT_CONFIG = {
   translate: {
     target: '中文', // 中文 | 英语 | 日语 | 韩语 | 法语 | 德语 | 西班牙语 | 俄语
   },
+  // 内置快捷键（截图界面 / 贴图内的单键操作，可自定义；字母统一存小写）
+  builtinKeys: {
+    cancel: 'Escape', // 截图：取消/关闭（面板先关）
+    confirm: 'Enter', // 截图：执行默认动作
+    toolSelect: 'v', // 截图：选择/移动工具
+    pickColor: 'c', // 截图：取色
+    histPrev: '<', // 截图：上一张历史截图
+    histNext: '>', // 截图：下一张历史截图
+    rectPrev: 'r', // 截图：载入最近选区（Shift+该键=再上一个）
+    pinLock: 'l', // 贴图：锁定
+    pinTop: 't', // 贴图：置顶切换
+    pinSelect: 's', // 贴图：选择文字
+    pinPass: 'p', // 贴图：鼠标穿透
+    pinThumb: 'r', // 贴图：缩略图模式
+  },
   capture: {
     copyAfterCapture: false, // 截完图自动复制到剪贴板
     autoPin: false,
