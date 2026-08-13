@@ -99,10 +99,12 @@ function toDiskForm(cfg) {
 }
 
 // 仅对「纯对象」做递归合并，数组与标量直接覆盖。
+// P1-6：过滤 __proto__/constructor/prototype 键，杜绝渲染层 patch 造成的原型污染。
 function deepMerge(base, patch) {
   const out = Array.isArray(base) ? [...base] : { ...base };
   if (!patch || typeof patch !== 'object') return out;
   for (const key of Object.keys(patch)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
     const pv = patch[key];
     const bv = out[key];
     if (pv && typeof pv === 'object' && !Array.isArray(pv) && bv && typeof bv === 'object' && !Array.isArray(bv)) {

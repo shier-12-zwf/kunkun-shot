@@ -455,6 +455,21 @@ function registerIpc() {
 
   ipcMain.handle(C.CONFIG_GET, () => config.publicView()); // H2：渲染层只拿掩码视图，Key 不出主进程
   ipcMain.handle(C.CONFIG_SET, (_e, patch) => {
+    // P1-2(M3)：禁止把 API 端点配成明文 http://（Key 会明文传输）；本机回环地址除外（自建 LLM / Ollama）。
+    const badBase = ['deepseek', 'minimax', 'openai']
+      .map((k) => ({ k, url: patch && patch[k] && typeof patch[k].baseUrl === 'string' ? patch[k].baseUrl.trim() : '' }))
+      .filter((x) => x.url && /^http:\/\//i.test(x.url))
+      .filter(
+        (x) =>
+          !/^http:\/\/localhost([:/]|$)/i.test(x.url) &&
+          !/^http:\/\/127\.0\.0\.1([:/]|$)/i.test(x.url) &&
+          !/^http:\/\/\[?::1\]?([:/]|$)/i.test(x.url)
+      );
+    if (badBase.length) {
+      throw new Error(
+        '「' + badBase[0].k + '」的 Base URL 不允许使用 http:// 明文端点（API Key 会明文传输）。请改用 https://，或本机回环地址（如 http://localhost:11434/v1）。'
+      );
+    }
     const merged = config.set(patch);
     registerShortcuts();
     applyLoginItem();
@@ -840,6 +855,12 @@ function registerIpc() {
   });
 
   ipcMain.handle(C.RECORD_SAVE, async (_e, { buffer, mime, toGif, fps }) => {
+    // P1-4(B13)：限制录屏数据大小，防止超长录制或异常 payload 打满内存/磁盘。
+    const byteLen = buffer ? (buffer.byteLength != null ? buffer.byteLength : buffer.length) : 0;
+    const MAX_REC_BYTES = 2 * 1024 * 1024 * 1024; // 2GB 上限（约 12fps webm 数小时的量级，正常录屏远达不到）
+    if (!(byteLen > 0) || byteLen > MAX_REC_BYTES) {
+      return { saved: false, error: '录制数据为空或超过 2GB 上限，无法保存。' };
+    }
     const cfg = config.get();
     const tmp = media.writeTempRecording(buffer, 'webm');
     const wantGif = toGif !== undefined ? toGif : cfg.recording.toGif;
@@ -1021,7 +1042,7 @@ function buildTray() {
       { label: '划词翻译（选中文字后）', accelerator: sc.translate, click: () => { triggerGlobalTranslate().catch(() => {}); } },
       { type: 'separator' },
       { label: '设置…', click: () => windows.createMain('settings') },
-      { label: '打开配置文件目录', click: () => shell.openPath(app.getPath('userData')) },
+      { label: '打开数据文件夹（历史/配置）', click: () => shell.openPath(app.getPath('userData')) },
       { type: 'separator' },
       { label: '退出困困截屏助手', click: () => app.quit() },
     ]);
@@ -1056,13 +1077,17 @@ if (!gotLock) {
     });
     // 安全：统一拦截所有窗口的「新窗口打开」与「页内导航」——外链走系统浏览器，禁止导航到非本地(file://)页面，
     // 即使渲染层被注入也无法把窗口导到外部 URL。须在创建任何窗口前注册。
+    // P1-1(M4) 收紧：file:// 也只允许导航到应用自身渲染层目录（防被注入后把窗口导到本机任意本地文件渲染）。
+    const RENDERER_ROOT = path.join(__dirname, '..', 'renderer');
+    const ALLOWED_FILE_PREFIX = pathToFileURL(RENDERER_ROOT + path.sep).toString();
     app.on('web-contents-created', (_e, contents) => {
       contents.setWindowOpenHandler(({ url }) => {
         if (/^https?:/i.test(url)) shell.openExternal(url).catch(() => {});
         return { action: 'deny' };
       });
       contents.on('will-navigate', (ev, url) => {
-        if (!/^file:/i.test(url)) {
+        const okLocal = url.startsWith('file:') && url.startsWith(ALLOWED_FILE_PREFIX);
+        if (!okLocal) {
           ev.preventDefault();
           if (/^https?:/i.test(url)) shell.openExternal(url).catch(() => {});
         }

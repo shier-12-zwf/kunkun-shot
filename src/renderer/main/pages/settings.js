@@ -601,6 +601,13 @@
       // 6) AI 模型（敏感配置：底部操作栏统一保存）
       // ==========================================================
       const gAI = groupCard('AI', 'AI 模型', '选择 AI 提供方，并配置 DeepSeek / MiniMax。');
+      // P1-3(M5) 隐私提示：AI 类功能会把内容发给第三方服务商
+      gAI.body.appendChild(
+        h('div', { class: 'status warn ai-risk' }, [
+          ico(ICONS.叹, 'ico-sm'),
+          h('span', null, '隐私提示：问 AI / 翻译 / 划词翻译等 AI 功能，会把截图或选中文字发送到你所配置的第三方服务商（DeepSeek / MiniMax / 硅基流动等）。OCR 默认走本地识别，不上传。'),
+        ])
+      );
 
       // —— AI 提供方：分段卡片（点哪个就只配哪个，两者互不干扰）——
       const selProvider = { value: 'deepseek' }; // 逻辑状态（保存/回填用），不是 DOM 元素
