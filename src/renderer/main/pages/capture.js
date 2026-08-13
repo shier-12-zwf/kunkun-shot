@@ -206,13 +206,36 @@
         c.addEventListener('click', (ev) => {
           ev.stopPropagation();
           if (countdownTimer) return; // 倒计时进行中不允许改秒数
-          delaySec = sec;
-          delayPicker.querySelectorAll('.cap-delay-chip').forEach((x) => {
-            x.classList.toggle('active', Number(x.dataset.sec) === delaySec);
-          });
+          setDelay(sec);
         });
         delayPicker.appendChild(c);
       });
+      // P2-8：自定义秒数输入（1~300s）
+      const cCustom = document.createElement('input');
+      cCustom.type = 'text';
+      cCustom.className = 'chip cap-delay-chip cap-delay-custom';
+      cCustom.placeholder = '自定义s';
+      cCustom.title = '自定义延时秒数（1~300，回车生效）';
+      cCustom.addEventListener('click', (ev) => ev.stopPropagation());
+      cCustom.addEventListener('keydown', (ev) => {
+        ev.stopPropagation();
+        if (ev.key === 'Enter') {
+          const v = parseInt(cCustom.value, 10);
+          if (!isNaN(v) && v >= 1 && v <= 300) {
+            setDelay(v);
+            cCustom.value = '';
+          } else {
+            cCustom.value = '';
+          }
+        }
+      });
+      delayPicker.appendChild(cCustom);
+      function setDelay(sec) {
+        delaySec = sec;
+        delayPicker.querySelectorAll('.cap-delay-chip').forEach((x) => {
+          x.classList.toggle('active', Number(x.dataset.sec) === delaySec);
+        });
+      }
       // 把选择器插到延时卡的按钮和小字之间
       aTimed.wrap.insertBefore(delayPicker, aTimed.hint);
 

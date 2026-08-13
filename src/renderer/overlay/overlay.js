@@ -268,6 +268,7 @@
   function beginSelect(e) {
     // 提交未完成的文字
     commitText();
+    if (S.cur && S.cur.type === 'polyline') cancelPolyline();
     S.selecting = true;
     S.startPt = evtPt(e);
     S.rect = { x: e.clientX, y: e.clientY, width: 0, height: 0 };
@@ -602,6 +603,7 @@
 
   function selectTool(tool) {
     commitText();
+    if (S.cur && S.cur.type === 'polyline') cancelPolyline(); // 换工具时丢弃未完成的折线
     if (S.tool === tool) {
       // 再次点击同一工具 → 取消激活（回到选区移动模式）
       S.tool = null;
@@ -688,6 +690,17 @@
       });
       return;
     }
+    if (S.tool === 'polyline') {
+      // 折线：单击加点（双击/Enter 完成，Esc 取消），不进入拖拽绘制流
+      if (!S.cur) {
+        S.drawing = true;
+        S.cur = { type: 'polyline', points: [{ x: p.x, y: p.y }], color: S.color, width: S.width };
+      } else if (S.cur.type === 'polyline') {
+        S.cur.points.push({ x: p.x, y: p.y });
+      }
+      redrawAnno();
+      return;
+    }
     S.drawing = true;
     if (S.tool === 'pen' || S.tool === 'mosaic' || S.tool === 'highlight') {
       S.cur = { type: S.tool, points: [{ x: p.x, y: p.y }], color: S.color, width: S.width };
@@ -700,6 +713,13 @@
 
   function continueAnnotate(e) {
     if (!S.cur) return;
+    if (S.cur.type === 'polyline') {
+      // 折线：仅更新「最后一点 → 鼠标」的预览线段
+      var pp = evtToAnno(e);
+      S.cur.preview = { x: clamp(pp.x, 0, annoCanvas.width), y: clamp(pp.y, 0, annoCanvas.height) };
+      redrawAnno();
+      return;
+    }
     var p = evtToAnno(e);
     p.x = clamp(p.x, 0, annoCanvas.width);
     p.y = clamp(p.y, 0, annoCanvas.height);
@@ -715,6 +735,7 @@
   function endAnnotate(e) {
     S.drawing = false;
     if (!S.cur) return;
+    if (S.cur.type === 'polyline') return; // 折线由双击/Enter 收尾，Esc 取消
     var c = S.cur;
     S.cur = null;
     // 丢弃过小的图形
@@ -746,7 +767,7 @@
       var s = shapes[i];
       if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'arrow' || s.type === 'line') {
         s.x1 += dx; s.y1 += dy; s.x2 += dx; s.y2 += dy;
-      } else if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight') {
+      } else if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight' || s.type === 'polyline') {
         for (var j = 0; j < s.points.length; j++) { s.points[j].x += dx; s.points[j].y += dy; }
       } else { // text / number
         s.x += dx; s.y += dy;
@@ -761,6 +782,22 @@
     shiftShapeList(S.shapes, dx, dy);
     for (var h = 0; h < S.history.length; h++) shiftShapeList(S.history[h].shapes, dx, dy);
     for (var k = 0; k < S.redoStack.length; k++) shiftShapeList(S.redoStack[k].shapes, dx, dy);
+  }
+
+  function finalizePolyline() {
+    if (!S.cur || S.cur.type !== 'polyline') return;
+    var c = S.cur;
+    S.cur = null;
+    S.drawing = false;
+    if (c.points.length >= 2) pushShape(c);
+    else redrawAnno();
+  }
+  function cancelPolyline() {
+    if (S.cur && S.cur.type === 'polyline') {
+      S.cur = null;
+      S.drawing = false;
+      redrawAnno();
+    }
   }
 
   // ================= 标注选择 / 再编辑 =================
@@ -784,7 +821,7 @@
     if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'arrow' || s.type === 'line') {
       return { x: Math.min(s.x1, s.x2), y: Math.min(s.y1, s.y2), w: Math.abs(s.x2 - s.x1), h: Math.abs(s.y2 - s.y1) };
     }
-    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight') {
+    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight' || s.type === 'polyline') {
       var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (var i = 0; i < s.points.length; i++) {
         var p = s.points[i];
@@ -846,7 +883,7 @@
   // ---- 变换（基于原始快照计算，避免累积误差）----
   function translateShape(src, dx, dy) {
     var s = JSON.parse(JSON.stringify(src));
-    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight') {
+    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight' || s.type === 'polyline') {
       for (var i = 0; i < s.points.length; i++) {
         s.points[i].x += dx;
         s.points[i].y += dy;
@@ -867,7 +904,7 @@
     var s = JSON.parse(JSON.stringify(src));
     function rx(x) { return remap(x, ob.x, ob.w, nb.x, nb.w); }
     function ry(y) { return remap(y, ob.y, ob.h, nb.y, nb.h); }
-    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight') {
+    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight' || s.type === 'polyline') {
       for (var i = 0; i < s.points.length; i++) {
         s.points[i].x = rx(s.points[i].x);
         s.points[i].y = ry(s.points[i].y);
@@ -1045,6 +1082,11 @@
   document.addEventListener('dblclick', function (e) {
     if (S.finished || !S.rect) return;
     if (toolbar.contains(e.target) || e.target === textInput) return;
+    if (S.tool === 'polyline' && S.cur) {
+      e.preventDefault();
+      finalizePolyline();
+      return;
+    }
     if (S.tool !== 'select') return;
     var hit = hitTestShapes(evtToAnno(e));
     if (hit && hit.type === 'text') {
@@ -1202,6 +1244,26 @@
       ctx.moveTo(hpts[0].x * scale, hpts[0].y * scale);
       for (var hi = 1; hi < hpts.length; hi++) {
         ctx.lineTo(hpts[hi].x * scale, hpts[hi].y * scale);
+      }
+      ctx.stroke();
+    } else if (s.type === 'polyline') {
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      var plpts = s.points;
+      ctx.moveTo(plpts[0].x * scale, plpts[0].y * scale);
+      for (var pli = 1; pli < plpts.length; pli++) {
+        ctx.lineTo(plpts[pli].x * scale, plpts[pli].y * scale);
+      }
+      if (s.preview && plpts.length) {
+        // 橡皮筋预览（虚线）
+        ctx.save();
+        ctx.setLineDash([4, 3]);
+        ctx.lineTo(s.preview.x * scale, s.preview.y * scale);
+        ctx.stroke();
+        ctx.restore();
+        ctx.beginPath();
+        ctx.moveTo(plpts[plpts.length - 1].x * scale, plpts[plpts.length - 1].y * scale);
+        ctx.lineTo(plpts[plpts.length - 1].x * scale, plpts[plpts.length - 1].y * scale);
       }
       ctx.stroke();
     } else if (s.type === 'pen') {
@@ -2091,6 +2153,11 @@
 
     if (e.key === 'Escape') {
       e.preventDefault();
+      // 折线绘制中：Esc 先取消当前折线
+      if (S.cur && S.cur.type === 'polyline') {
+        cancelPolyline();
+        return;
+      }
       // 内联 AI 面板打开时，Esc 先关面板（不关整个截图）
       if (S.aiOpen) {
         closeAIPanel();
@@ -2106,6 +2173,11 @@
     }
     if (e.key === 'Enter') {
       e.preventDefault();
+      // 折线绘制中：Enter 完成折线
+      if (S.cur && S.cur.type === 'polyline') {
+        finalizePolyline();
+        return;
+      }
       if (S.rect && !toolbar.hidden) {
         var da = S.defaultAction || 'copy';
         if (da === 'ask' || da === 'translate' || da === 'polish') openInlineAI(da);

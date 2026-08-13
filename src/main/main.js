@@ -960,7 +960,10 @@ function registerIpc() {
       defaultPath: path.join(dir, `困困录屏-${Date.now()}.${ext}`),
       filters: wantGif
         ? [{ name: 'GIF 动图', extensions: ['gif'] }]
-        : [{ name: 'WebM 视频', extensions: ['webm'] }],
+        : [
+            { name: 'WebM 视频', extensions: ['webm'] },
+            { name: 'MP4 视频（快速转封装，无需重编码）', extensions: ['mp4'] },
+          ],
     });
     if (canceled || !filePath) {
       try { fs.unlinkSync(tmp); } catch (_) {}
@@ -969,6 +972,9 @@ function registerIpc() {
     try {
       if (wantGif) {
         await media.convertToGif(tmp, filePath, fps || cfg.recording.fps);
+      } else if (path.extname(filePath || '').toLowerCase() === '.mp4') {
+        // P2-4：webm → mp4 快速转封装（-c copy 不重编码，秒级完成）
+        await media.convertImage(tmp, filePath, ['-c', 'copy', '-movflags', '+faststart']);
       } else {
         fs.copyFileSync(tmp, filePath);
       }
