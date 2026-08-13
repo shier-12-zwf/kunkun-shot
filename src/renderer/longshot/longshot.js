@@ -27,7 +27,7 @@
   const SEARCH_ROWS = 8; // 用于匹配的「行块」高度（采样多少行做指纹）
   const STEP = 2; // offset 搜索步长（先粗搜，命中后细化）
   const MATCH_TOL = 18; // 单通道像素差阈值，低于视为相同
-  const MAX_CANVAS_H = 30000; // 拼接 canvas 最大高度，超过则停止追加，防止崩溃
+  const MAX_CANVAS_H = 120000; // 拼接 canvas 最大高度（P2-3：30k→120k 像素，向 PixPin 超长截图靠拢；仍受内存兜底）
   const GROW_STEP = 4000; // canvas 扩容步长（一次性多给一些，减少复制次数）
 
   // 上一帧的 ImageData，用于「行像素匹配」时取已拼接底部的像素来源。

@@ -46,7 +46,7 @@
       "target": [
         "dmg"
       ],
-      "identity": "KUN Translator Local Signing",
+      "identity": "A99DC43611DA8D6FDBD2FBCB6281B6DF6580B296",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",

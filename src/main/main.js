@@ -1208,9 +1208,9 @@ if (!gotLock) {
     buildTray();
     registerShortcuts();
     applyLoginItem();
-    // 启动即打开桌面主窗口（快捷截图首页）。
+    // 启动即打开桌面主窗口（快捷截图首页）——可在设置里关闭（纯托盘驻留）。
     // （KK_SMOKE 自检模式下由自检流程自行开窗，这里跳过避免重复）
-    if (!process.env.KK_SMOKE) windows.createMain('capture');
+    if (!process.env.KK_SMOKE && config.get().general.openMainAtLaunch !== false) windows.createMain('capture');
 
     // macOS：屏幕录制权限——启动只做无打扰检测；真正未授权时，用户触发截图会在 startCapture 弹原生引导
     if (process.platform === 'darwin' && !process.env.KK_SMOKE) {

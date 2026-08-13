@@ -62,6 +62,7 @@ const DEFAULT_CONFIG = {
   },
   general: {
     launchAtLogin: false,
+    openMainAtLaunch: true, // 启动时打开桌面主窗口（关闭则纯托盘驻留）
     saveDir: '', // 留空则默认存到「图片」目录
     theme: 'light', // light | dark（设置页 UI 用）
   },

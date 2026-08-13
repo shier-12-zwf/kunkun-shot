@@ -11,7 +11,7 @@
 # 前置：钥匙串「登录」里需有名为 "KUN Translator Local Signing" 的自签名代码签名证书。
 set -e
 
-CERT="KUN Translator Local Signing"
+CERT="A99DC43611DA8D6FDBD2FBCB6281B6DF6580B296" # KUN Translator Local Signing（钥匙串存在两张同名证书，用哈希消歧）
 APP="${1:-dist/mac-arm64/困困截图工具.app}"
 
 if [ ! -d "$APP" ]; then

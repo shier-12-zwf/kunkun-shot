@@ -325,6 +325,14 @@
         rowField('开机自启动', '登录系统后自动在后台运行困困截屏助手', tgLaunch)
       );
 
+      // P3-11：启动时打开主窗口（托盘型工具可选纯后台启动）
+      const tgOpenMain = toggle(true, function (v) {
+        autoSave({ general: { openMainAtLaunch: v } }, v ? '启动时将打开主窗口' : '启动时仅驻留菜单栏');
+      });
+      gGeneral.body.appendChild(
+        rowField('启动时打开主窗口', '关闭后启动只驻留菜单栏，需要时点托盘图标打开', tgOpenMain)
+      );
+
       // saveDir
       const inSaveDir = h('input', {
         class: 'input', type: 'text',
@@ -1068,6 +1076,7 @@
 
         // 通用
         tgLaunch.querySelector('.kk-toggle-input').checked = !!gen.launchAtLogin;
+        tgOpenMain.querySelector('.kk-toggle-input').checked = gen.openMainAtLaunch !== false;
         inSaveDir.value = gen.saveDir || '';
         selTheme.value = gen.theme === 'dark' ? 'dark' : 'light';
         applyTheme(selTheme.value);
