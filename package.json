@@ -46,7 +46,7 @@
       "target": [
         "dmg"
       ],
-      "identity": "KunKun Shot Codesign",
+      "identity": "KUN Translator Local Signing",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",

@@ -8,10 +8,10 @@
 #   bash scripts/resign-mac.sh                                   # 重签 dist 里打包好的 app
 #   bash scripts/resign-mac.sh "/Applications/困困截图工具.app"   # 重签已安装的 app
 #
-# 前置：钥匙串「登录」里需有名为 "KunKun Shot Codesign" 的自签名代码签名证书。
+# 前置：钥匙串「登录」里需有名为 "KUN Translator Local Signing" 的自签名代码签名证书。
 set -e
 
-CERT="KunKun Shot Codesign"
+CERT="KUN Translator Local Signing"
 APP="${1:-dist/mac-arm64/困困截图工具.app}"
 
 if [ ! -d "$APP" ]; then
