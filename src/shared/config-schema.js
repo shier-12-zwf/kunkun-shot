@@ -3,6 +3,7 @@ const DEFAULT_CONFIG = {
   shortcuts: {
     capture: 'CommandOrControl+Shift+A', // 区域截图
     pinClipboard: 'CommandOrControl+Shift+P', // 把剪贴板里的图贴到屏幕
+    pinRestore: 'CommandOrControl+3', // 恢复最近关闭的贴图
     record: 'CommandOrControl+Shift+R', // 区域录屏
     longShot: 'CommandOrControl+Shift+L', // 长截图
     ocr: 'CommandOrControl+Shift+O', // 截图并 OCR

@@ -258,16 +258,22 @@ function pinFromClipboard() {
     });
     return;
   }
-  // P1-15：剪贴板没图但有文字 → 文本贴图（PixPin 式五类贴图之二）
+  // P1-15：剪贴板没图但有文字 → 文本/颜色贴图（PixPin 式贴图类型之二、三）
   const text = clipboard.readText();
   if (text && text.trim()) {
+    const t = text.trim();
+    const color = parseColorText(t);
+    if (color) {
+      windows.createPin({ color, bounds: { x: point.x, y: point.y, width: 160, height: 100 } });
+      return;
+    }
     windows.createPin({
-      text: text.trim(),
+      text: t,
       bounds: { x: point.x, y: point.y, width: 320, height: 120 },
     });
     return;
   }
-  dialog.showMessageBox({ type: 'info', message: '剪贴板里没有图片或文字', detail: '先复制一张图片或一段文字，再使用此功能。' });
+  dialog.showMessageBox({ type: 'info', message: '剪贴板里没有图片或文字', detail: '先复制一张图片、一段文字或一个颜色值，再使用此功能。' });
 }
 
 // ---------- 全局划词翻译（纯 Electron：快捷键 + 剪贴板兜底）----------
@@ -730,6 +736,13 @@ function registerIpc() {
       }
       if (typeof flags.ignoreMouse === 'boolean') {
         w.setIgnoreMouseEvents(flags.ignoreMouse, { forward: true });
+        if (flags.ignoreMouse) {
+          passthroughPins.add(w.webContents.id);
+          ensurePassthroughShortcut();
+        } else {
+          passthroughPins.delete(w.webContents.id);
+          if (!passthroughPins.size) clearPassthroughShortcut();
+        }
       }
       return { ok: true };
     } catch (err) {
@@ -1089,6 +1102,80 @@ function boundsToDisplay(displayId) {
   return { bounds: d.bounds, scaleFactor: d.scaleFactor || 1 };
 }
 
+// ---------- 贴图鼠标穿透兜底（穿透后窗口收不到键盘，用临时全局快捷键恢复）----------
+let passthroughShortcut = false;
+const passthroughPins = new Set();
+function ensurePassthroughShortcut() {
+  if (passthroughShortcut) return;
+  try {
+    passthroughShortcut = globalShortcut.register('CommandOrControl+Alt+P', () => {
+      windows.pinSnapshots().forEach(({ win }) => {
+        try {
+          win.setIgnoreMouseEvents(false, { forward: true });
+          win.webContents.send(C.PIN_CMD, { cmd: 'passthrough-off' });
+        } catch (_) {}
+      });
+      passthroughPins.clear();
+      clearPassthroughShortcut();
+    });
+  } catch (_) {}
+}
+function clearPassthroughShortcut() {
+  if (!passthroughShortcut) return;
+  try {
+    globalShortcut.unregister('CommandOrControl+Alt+P');
+  } catch (_) {}
+  passthroughShortcut = false;
+}
+
+// 全部贴图保存为一个目录
+async function pinSaveAll() {
+  const snaps = windows.pinSnapshots();
+  if (!snaps.length) return;
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    title: '选择目录保存全部贴图',
+    properties: ['openDirectory', 'createDirectory'],
+    defaultPath: config.get().general.saveDir || app.getPath('pictures'),
+  });
+  if (canceled || !filePaths[0]) return;
+  const dir = filePaths[0];
+  let n = 0;
+  snaps.forEach(({ payload }, i) => {
+    try {
+      if (payload && payload.dataURL) {
+        media.saveImageFile(payload.dataURL, path.join(dir, `贴图-${Date.now()}-${i}.png`));
+        n++;
+      } else if (payload && payload.text) {
+        fs.writeFileSync(path.join(dir, `贴图文本-${Date.now()}-${i}.txt`), payload.text, 'utf-8');
+        n++;
+      } else if (payload && payload.color) {
+        fs.writeFileSync(path.join(dir, `贴图颜色-${Date.now()}-${i}.txt`), payload.color, 'utf-8');
+        n++;
+      }
+    } catch (err) {
+      console.error('[pin-save-all]', err);
+    }
+  });
+  if (Notification.isSupported()) {
+    new Notification({ title: '困困截图', body: `已保存 ${n} 张贴图到 ${dir}` }).show();
+  }
+}
+
+// 从剪贴板文本里识别颜色（#hex / rgb()），用于颜色贴图
+function parseColorText(t) {
+  const hex = t.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (hex) {
+    const raw = hex[1];
+    return '#' + (raw.length === 3 ? raw.split('').map((c) => c + c).join('') : raw).toUpperCase();
+  }
+  const rgb = t.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/i);
+  if (rgb) {
+    const h = (v) => Math.max(0, Math.min(255, +v)).toString(16).padStart(2, '0');
+    return ('#' + h(rgb[1]) + h(rgb[2]) + h(rgb[3])).toUpperCase();
+  }
+  return null;
+}
+
 // ---------- 全局快捷键 ----------
 function registerShortcuts() {
   globalShortcut.unregisterAll();
@@ -1109,6 +1196,11 @@ function registerShortcuts() {
   bind(sc.longShot, () => startCapture('long'));
   bind(sc.record, () => startCapture('record'));
   bind(sc.pinClipboard, () => pinFromClipboard());
+  bind(sc.pinRestore, () => {
+    if (!windows.restoreLastPin()) {
+      dialog.showMessageBox({ type: 'info', message: '没有可恢复的贴图', detail: '关闭过的贴图会保留最近 10 条，可用此快捷键恢复。' });
+    }
+  });
   if (process.platform === 'darwin') {
     bind(sc.translate, () => { triggerGlobalTranslate().catch(() => {}); });
   }
@@ -1147,7 +1239,18 @@ function buildTray() {
       { label: '截图 OCR', accelerator: sc.ocr, click: () => startCapture('ocr') },
       { label: '长截图', accelerator: sc.longShot, click: () => startCapture('long') },
       { label: '区域录屏', accelerator: sc.record, click: () => startCapture('record') },
-      { label: '把剪贴板图片贴到屏幕', accelerator: sc.pinClipboard, click: () => pinFromClipboard() },
+      { label: '把剪贴板图片/文字/颜色贴到屏幕', accelerator: sc.pinClipboard, click: () => pinFromClipboard() },
+      { label: '恢复最近关闭的贴图', accelerator: sc.pinRestore, click: () => { if (!windows.restoreLastPin()) dialog.showMessageBox({ type: 'info', message: '没有可恢复的贴图' }); } },
+      {
+        label: '贴图管理（当前 ' + windows.pinCount() + ' 张）',
+        submenu: [
+          { label: '全部缩略图化', click: () => windows.pinAllThumbnail(true) },
+          { label: '取消所有缩略图', click: () => windows.pinAllThumbnail(false) },
+          { label: '全部保存为…', click: () => { pinSaveAll().catch(() => {}); } },
+          { label: '全部关闭', click: () => windows.pinAllClose() },
+          { label: '全部销毁（不进历史）', click: () => windows.pinAllDestroy() },
+        ],
+      },
       ...(process.platform === 'darwin'
         ? [{ label: '划词翻译（选中文字后）', accelerator: sc.translate, click: () => { triggerGlobalTranslate().catch(() => {}); } }]
         : []),

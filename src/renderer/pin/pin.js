@@ -22,10 +22,13 @@
     selectMode: false, // 选字模式：点击文字块复制文字
     ocrLines: null, // OCR 行级坐标缓存（切换模式复用，不重复识别）
     ocrBusy: false, // 识别中，防连点重复请求
-    kind: 'image', // image | text
+    kind: 'image', // image | text | color
     text: '',
+    color: '',
     locked: false, // 锁定：禁止拖动/缩放/调透明度
     onTop: true, // 置顶
+    passthrough: false, // 鼠标穿透
+    thumbScale: null, // 缩略图模式前的缩放（R 恢复用）
   };
 
   // ---- 轻提示 ----
@@ -52,6 +55,12 @@
     if (state.kind === 'text') {
       Promise.resolve(k.copyText(state.text))
         .then(function () { toast('已复制文字', 'ok'); })
+        .catch(function () { toast('复制失败', 'err'); });
+      return;
+    }
+    if (state.kind === 'color') {
+      Promise.resolve(k.copyText(state.color))
+        .then(function () { toast('已复制颜色 ' + state.color, 'ok'); })
         .catch(function () { toast('复制失败', 'err'); });
       return;
     }
@@ -148,6 +157,46 @@
     if (btn) btn.classList.remove('active');
   }
 
+  function togglePassthrough() {
+    state.passthrough = !state.passthrough;
+    document.body.classList.toggle('passthrough', state.passthrough);
+    var k = api();
+    if (k && typeof k.setPinState === 'function') {
+      Promise.resolve(k.setPinState({ ignoreMouse: state.passthrough })).catch(function () {});
+    }
+    toast(state.passthrough ? '已穿透：点下面窗口 · 按 Cmd+Alt+P 恢复' : '已恢复', '');
+  }
+  function toggleThumb() {
+    // 缩略图模式（简化版）：R 缩到 35%，再按 R 还原原缩放
+    if (state.thumbScale == null) {
+      state.thumbScale = state.scale;
+      setScale(0.35);
+      toast('缩略图模式 · 按 R 还原', 'ok');
+    } else {
+      const back = state.thumbScale;
+      state.thumbScale = null;
+      setScale(back);
+      toast('已还原大小', 'ok');
+    }
+  }
+  function promptTitle() {
+    const input = document.getElementById('pinTitleInput');
+    if (!input) return;
+    input.hidden = false;
+    input.value = '';
+    input.focus();
+  }
+  function commitTitle() {
+    const input = document.getElementById('pinTitleInput');
+    const bar = document.getElementById('pinTitle');
+    if (!input || !bar) return;
+    const v = input.value.trim();
+    input.hidden = true;
+    if (v) {
+      bar.textContent = v;
+      bar.hidden = false;
+    }
+  }
   function toggleLock() {
     state.locked = !state.locked;
     document.body.classList.toggle('locked', state.locked);
@@ -205,6 +254,30 @@
       });
   }
 
+  function bindPinCmd() {
+    var k = api();
+    if (k && typeof k.onPinCmd === 'function') {
+      k.onPinCmd(function (msg) {
+        if (!msg) return;
+        if (msg.cmd === 'passthrough-off') {
+          state.passthrough = false;
+          document.body.classList.remove('passthrough');
+          toast('已退出穿透', 'ok');
+        } else if (msg.cmd === 'thumb') {
+          if (msg.on && state.thumbScale == null) {
+            state.thumbScale = state.scale;
+            setScale(0.35);
+          } else if (!msg.on && state.thumbScale != null) {
+            const back = state.thumbScale;
+            state.thumbScale = null;
+            setScale(back);
+          }
+        } else if (msg.cmd === 'save') {
+          doSave();
+        }
+      });
+    }
+  }
   function bindOcrLayer() {
     var layer = document.getElementById('pinOcrLayer');
     if (!layer) return;
@@ -238,6 +311,8 @@
     ask: doAsk,
     lock: toggleLock,
     topToggle: toggleOnTop,
+    passthrough: togglePassthrough,
+    title: promptTitle,
     textSel: toggleTextSelect,
     zoomIn: zoomIn,
     zoomOut: zoomOut,
@@ -391,6 +466,12 @@
     // 键盘：Esc 关闭（选字模式先退出选字），T 切换选字，+/- 缩放，0 还原
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') {
+        // 标题输入框开着时先关它
+        var ti0 = document.getElementById('pinTitleInput');
+        if (ti0 && !ti0.hidden) {
+          ti0.hidden = true;
+          return;
+        }
         // 若右键菜单开着，先关菜单
         if (ctxMenu.classList.contains('show')) {
           hideCtxMenu();
@@ -417,6 +498,29 @@
         e.preventDefault();
         toggleTextSelect();
         return;
+      }
+      if (e.key === 'p' || e.key === 'P') {
+        e.preventDefault();
+        togglePassthrough();
+        return;
+      }
+      if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault();
+        toggleThumb();
+        return;
+      }
+      if (e.key === 'F2') {
+        e.preventDefault();
+        promptTitle();
+        return;
+      }
+      if (e.key === 'Enter') {
+        var ti = document.getElementById('pinTitleInput');
+        if (ti && !ti.hidden) {
+          e.preventDefault();
+          commitTitle();
+          return;
+        }
       }
       if (e.key === '+' || e.key === '=') {
         e.preventDefault();
@@ -489,6 +593,17 @@
       }
       imgEl.hidden = true;
     }
+    if (payload.color) {
+      state.kind = 'color';
+      state.color = payload.color;
+      const c = document.getElementById('pinColor');
+      if (c) {
+        c.style.background = payload.color;
+        c.setAttribute('data-hex', payload.color);
+        c.hidden = false;
+      }
+      imgEl.hidden = true;
+    }
     if (payload.dataURL) {
       if (state.dataURL && state.dataURL !== payload.dataURL) {
         // 换了新图：退出选字模式并清空 OCR 缓存，避免旧坐标/旧文字张冠李戴
@@ -517,6 +632,7 @@
     bindCloseGestures();
     bindContextMenu();
     bindOcrLayer();
+    bindPinCmd();
 
     var k = api();
     if (k && typeof k.onInit === 'function') {

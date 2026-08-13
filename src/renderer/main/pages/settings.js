@@ -396,6 +396,7 @@
         { key: 'longShot', label: '滚动长截图' },
         { key: 'record', label: '录屏' },
         { key: 'pinClipboard', label: '贴图剪贴板' },
+        { key: 'pinRestore', label: '恢复最近关闭的贴图' },
         { key: 'translate', label: '划词翻译' },
       ];
       const shortcutInputs = {}; // key -> input

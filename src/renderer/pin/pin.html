@@ -14,6 +14,12 @@
 
     <!-- 文本贴图内容（剪贴板文字贴图时显示） -->
     <div class="pin-text" id="pinText" hidden></div>
+    <!-- 颜色贴图内容（剪贴板颜色值贴图时显示） -->
+    <div class="pin-color" id="pinColor" hidden></div>
+
+    <!-- 贴图标题栏（F2 设置后显示在底部） -->
+    <div class="pin-title" id="pinTitle" hidden></div>
+    <input class="pin-title-input" id="pinTitleInput" type="text" placeholder="输入贴图标题，Enter 确认" hidden />
 
     <!-- 选字层：OCR 行级坐标映射出的可点击文字块（S 键切换，平时隐藏） -->
     <div class="pin-ocr-layer" id="pinOcrLayer" hidden></div>
@@ -76,6 +82,8 @@
     <div class="ctx-item" data-act="lock" role="menuitem">锁定 / 解锁　L</div>
     <div class="ctx-item" data-act="topToggle" role="menuitem">置顶 / 取消置顶　T</div>
     <div class="ctx-item" data-act="textSel" role="menuitem">选择文字　S</div>
+    <div class="ctx-item" data-act="passthrough" role="menuitem">鼠标穿透　P</div>
+    <div class="ctx-item" data-act="title" role="menuitem">设置标题　F2</div>
     <div class="ctx-item" data-act="ask" role="menuitem">问 AI</div>
     <div class="ctx-sep" aria-hidden="true"></div>
     <div class="ctx-item" data-act="zoomIn" role="menuitem">放大　＋</div>

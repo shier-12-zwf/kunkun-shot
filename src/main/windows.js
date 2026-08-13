@@ -17,6 +17,10 @@ let popoverWin = null;
 let overlayWin = null;
 // 贴图窗口可以有多个
 const pins = new Set();
+// 贴图内容登记：webContents.id -> 原始 payload（批量保存 / 历史恢复用）
+const pinPayloads = new Map();
+// 最近关闭的贴图（Ctrl+3 / 托盘「恢复最近关闭的贴图」）
+const pinHistory = [];
 // 录屏控制条
 let recorderWin = null;
 
@@ -120,7 +124,14 @@ function createPin(payload) {
   win.loadFile(rfile('pin', 'pin.html'));
   whenLoaded(win, payload);
   pins.add(win);
-  win.on('closed', () => pins.delete(win));
+  pinPayloads.set(win.webContents.id, payload || {});
+  win.on('closed', () => {
+    pins.delete(win);
+    pinPayloads.delete(win.webContents.id);
+    // 关闭的贴图进历史（最多保留 10 条），供 Ctrl+3 恢复
+    pinHistory.push(payload || {});
+    if (pinHistory.length > 10) pinHistory.shift();
+  });
   return win;
 }
 
@@ -383,6 +394,46 @@ function broadcast(channel, payload) {
   });
 }
 
+// ---- 贴图批量操作（托盘菜单用）----
+function pinSnapshots() {
+  const out = [];
+  pins.forEach((w) => {
+    if (!w.isDestroyed()) out.push({ win: w, payload: pinPayloads.get(w.webContents.id) || {} });
+  });
+  return out;
+}
+function pinBroadcast(cmd) {
+  pins.forEach((w) => {
+    if (!w.isDestroyed()) w.webContents.send(C.PIN_CMD, cmd);
+  });
+}
+function pinAllThumbnail(on) {
+  pinBroadcast({ cmd: 'thumb', on: !!on });
+}
+function pinAllClose() {
+  pinSnapshots().forEach(({ win }) => win.close());
+}
+function pinAllDestroy() {
+  // 销毁：不进历史
+  pinSnapshots().forEach(({ win }) => {
+    pinPayloads.delete(win.webContents.id);
+    win.destroy();
+  });
+}
+function restoreLastPin() {
+  while (pinHistory.length) {
+    const p = pinHistory.pop();
+    if (p && (p.dataURL || p.text || p.color)) {
+      createPin(p);
+      return true;
+    }
+  }
+  return false;
+}
+function pinCount() {
+  return pins.size;
+}
+
 function closeAll() {
   closeOverlay();
   closeRecorder();
@@ -411,6 +462,13 @@ module.exports = {
   broadcast,
   closeAll,
   isTrustedSender,
+  pinSnapshots,
+  pinBroadcast,
+  pinAllThumbnail,
+  pinAllClose,
+  pinAllDestroy,
+  restoreLastPin,
+  pinCount,
   getOverlay: () => overlayWin,
   getMain: () => refs.main,
 };
