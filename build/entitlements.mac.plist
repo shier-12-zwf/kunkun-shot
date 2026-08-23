@@ -11,8 +11,5 @@
   <true/>
   <key>com.apple.security.cs.allow-dyld-environment-variables</key>
   <true/>
-  <!-- 录屏可能采集音频时需要（屏幕录制本身由 TCC + Info.plist 用途文案控制，无需此处声明） -->
-  <key>com.apple.security.device.audio-input</key>
-  <true/>
 </dict>
 </plist>

@@ -1,0 +1,192 @@
+ObjC.import('AppKit');
+ObjC.import('Foundation');
+
+function pasteboardChangeCount(pasteboard) {
+  const value = Number(pasteboard.changeCount);
+  if (!isFinite(value) || Math.floor(value) !== value) throw new Error('无法读取剪贴板代际');
+  return value;
+}
+
+function parseChangeCount(value) {
+  const parsed = Number(value);
+  if (!isFinite(parsed) || Math.floor(parsed) !== parsed) throw new Error('剪贴板代际无效');
+  return parsed;
+}
+
+function encodePasteboard(pasteboard) {
+  const output = [];
+  const items = pasteboard.pasteboardItems ? pasteboard.pasteboardItems.js : [];
+  items.forEach(function (item) {
+    const encoded = [];
+    const types = item.types ? item.types.js : [];
+    types.forEach(function (type) {
+      const data = item.dataForType(type);
+      if (!data) return;
+      encoded.push({
+        type: ObjC.unwrap(type),
+        data: ObjC.unwrap(data.base64EncodedStringWithOptions(0)),
+      });
+    });
+    output.push(encoded);
+  });
+  return output;
+}
+
+function makeSnapshot(pasteboard) {
+  const before = pasteboardChangeCount(pasteboard);
+  const items = encodePasteboard(pasteboard);
+  const after = pasteboardChangeCount(pasteboard);
+  if (after !== before) throw new Error('剪贴板在快照期间发生变化');
+  return { version: 1, changeCount: after, items: items };
+}
+
+function decodePasteboardItems(encodedItems) {
+  const items = [];
+  (encodedItems || []).forEach(function (encoded) {
+    const item = $.NSPasteboardItem.alloc.init;
+    let representations = 0;
+    (encoded || []).forEach(function (entry) {
+      if (!entry || typeof entry.type !== 'string' || typeof entry.data !== 'string') return;
+      const data = $.NSData.alloc.initWithBase64EncodedStringOptions($(entry.data), 0);
+      if (!data) return;
+      if (item.setDataForType(data, $(entry.type))) representations += 1;
+    });
+    if (representations > 0) items.push(item);
+  });
+  return items;
+}
+
+function requireWriteObjectsSucceeded(result) {
+  if (!result) throw new Error('无法写入剪贴板对象');
+}
+
+function replacePasteboard(pasteboard, encodedItems) {
+  // 先把全部对象解码完成，避免在发现损坏数据前就清空当前剪贴板。
+  const items = decodePasteboardItems(encodedItems);
+  pasteboard.clearContents;
+  if (items.length > 0) requireWriteObjectsSucceeded(pasteboard.writeObjects($(items)));
+  return pasteboardChangeCount(pasteboard);
+}
+
+function clearIfCurrent(pasteboard, expectedChangeCount) {
+  const current = pasteboardChangeCount(pasteboard);
+  if (current !== expectedChangeCount) return { started: false, changeCount: current };
+  pasteboard.clearContents;
+  return { started: true, changeCount: pasteboardChangeCount(pasteboard) };
+}
+
+function restorePasteboard(pasteboard, encodedItems, expectedChangeCount) {
+  const current = pasteboardChangeCount(pasteboard);
+  if (current !== expectedChangeCount) return { restored: false, changeCount: current };
+  return { restored: true, changeCount: replacePasteboard(pasteboard, encodedItems) };
+}
+
+function writeJSON(file, value) {
+  const data = $(JSON.stringify(value)).dataUsingEncoding($.NSUTF8StringEncoding);
+  if (!data.writeToFileAtomically($(file), true)) throw new Error('无法写入剪贴板快照');
+}
+
+function readJSON(file) {
+  const data = $.NSData.dataWithContentsOfFile($(file));
+  if (!data) throw new Error('无法读取剪贴板快照');
+  const text = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
+  return JSON.parse(ObjC.unwrap(text));
+}
+
+function snapshotItems(snapshot) {
+  // 兼容同一进程升级前刚创建的数组格式快照；新快照始终使用带代际的对象格式。
+  if (Array.isArray(snapshot)) return snapshot;
+  if (snapshot && Array.isArray(snapshot.items)) return snapshot.items;
+  throw new Error('剪贴板快照格式无效');
+}
+
+function writeText(pasteboard, text) {
+  const item = $.NSPasteboardItem.alloc.init;
+  if (!item.setStringForType($(text), $('public.utf8-plain-text'))) throw new Error('无法构造测试剪贴板对象');
+  pasteboard.clearContents;
+  requireWriteObjectsSucceeded(pasteboard.writeObjects($([item])));
+  return pasteboardChangeCount(pasteboard);
+}
+
+function selfTest() {
+  const pasteboard = $.NSPasteboard.pasteboardWithUniqueName;
+  pasteboard.clearContents;
+  const first = $.NSPasteboardItem.alloc.init;
+  first.setStringForType($('hello'), $('public.utf8-plain-text'));
+  first.setDataForType($('custom').dataUsingEncoding($.NSUTF8StringEncoding), $('com.kunkun.custom'));
+  const second = $.NSPasteboardItem.alloc.init;
+  second.setStringForType($('<b>world</b>'), $('public.html'));
+  requireWriteObjectsSucceeded(pasteboard.writeObjects($([first, second])));
+
+  const snapshot = encodePasteboard(pasteboard);
+  pasteboard.clearContents;
+  const restoredResult = restorePasteboard(pasteboard, snapshot, pasteboardChangeCount(pasteboard));
+  const restored = encodePasteboard(pasteboard);
+  const ok = restoredResult.restored && JSON.stringify(snapshot) === JSON.stringify(restored);
+  return JSON.stringify({
+    ok: ok,
+    itemCount: restored.length,
+    typeCount: restored.reduce(function (n, item) { return n + item.length; }, 0),
+  });
+}
+
+function selfTestCAS() {
+  const pasteboard = $.NSPasteboard.pasteboardWithUniqueName;
+
+  writeText(pasteboard, 'original');
+  const firstSnapshot = makeSnapshot(pasteboard);
+  const firstBegin = clearIfCurrent(pasteboard, firstSnapshot.changeCount);
+  writeText(pasteboard, 'temporary');
+  const temporaryGeneration = pasteboardChangeCount(pasteboard);
+  const matchingRestore = restorePasteboard(pasteboard, firstSnapshot.items, temporaryGeneration);
+
+  const secondSnapshot = makeSnapshot(pasteboard);
+  clearIfCurrent(pasteboard, secondSnapshot.changeCount);
+  writeText(pasteboard, 'temporary-again');
+  const expectedGeneration = pasteboardChangeCount(pasteboard);
+  writeText(pasteboard, 'newer-user-copy');
+  const skippedRestore = restorePasteboard(pasteboard, secondSnapshot.items, expectedGeneration);
+  const currentText = pasteboard.stringForType($('public.utf8-plain-text'));
+
+  let writeFailureDetected = false;
+  try {
+    requireWriteObjectsSucceeded(false);
+  } catch (_) {
+    writeFailureDetected = true;
+  }
+
+  return JSON.stringify({
+    restoredWhenCurrent: firstBegin.started && matchingRestore.restored,
+    skippedWhenChanged: !skippedRestore.restored,
+    newerContentPreserved: currentText && ObjC.unwrap(currentText) === 'newer-user-copy',
+    writeFailureDetected: writeFailureDetected,
+  });
+}
+
+function run(argv) {
+  const action = argv[0] || '';
+  const file = argv[1] || '';
+  if (action === 'selftest') return selfTest();
+  if (action === 'selftest-cas') return selfTestCAS();
+
+  const pasteboard = $.NSPasteboard.generalPasteboard;
+  if (action === 'snapshot') {
+    if (!file) throw new Error('缺少快照路径');
+    const snapshot = makeSnapshot(pasteboard);
+    writeJSON(file, snapshot);
+    return JSON.stringify({ changeCount: snapshot.changeCount });
+  }
+  if (action === 'clear-if-current') {
+    return JSON.stringify(clearIfCurrent(pasteboard, parseChangeCount(file)));
+  }
+  if (action === 'change-count') {
+    return JSON.stringify({ changeCount: pasteboardChangeCount(pasteboard) });
+  }
+  if (action === 'restore') {
+    if (!file) throw new Error('缺少快照路径');
+    const snapshot = readJSON(file);
+    const expectedChangeCount = parseChangeCount(argv[2]);
+    return JSON.stringify(restorePasteboard(pasteboard, snapshotItems(snapshot), expectedChangeCount));
+  }
+  throw new Error('未知操作');
+}

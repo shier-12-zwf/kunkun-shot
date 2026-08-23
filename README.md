@@ -1,164 +1,141 @@
 # 困困截图工具
 
-一个仿 [PixPin](https://pixpin.cn/) 的跨平台桌面截图工具，基于 Electron 构建。浅色干净的 UI，常驻菜单栏 / 系统托盘，一套全局快捷键随手唤起。除了基础的区域截图与标注，还内置了 **DeepSeek AI**：截一张图直接问 AI，OCR 出来的文字一键翻译 / 润色。
+简体中文 | [English](README_EN.md)
 
-> 平台：macOS / Windows / Linux（核心功能跨平台；屏幕录制权限说明见下文，主要针对 macOS）。
-> 当前版本：`0.1.0`（早期版本，长截图与录屏为基础实现，详见「已知局限」）。
+一款以 macOS 为首要平台的开源 Electron 截图工具：区域截图与标注、贴图钉屏、OCR、二维码识别、实验性长截图、区域录屏，以及可选的 AI 问图、翻译和润色。
 
----
+> 当前状态：早期预览版。源码和自动测试可用不等于所有真机流程已经验收。项目不声称支持 Windows/Linux，也不声称公开构建已经完成 Apple 签名或公证。发布前的真实状态以 [发布检查清单](docs/RELEASE_CHECKLIST.md) 为准。
 
-## 功能列表
+![困困截图工具操作演示](docs/assets/demo.gif)
 
-- **区域截图 + 标注**：拖拽框选任意区域，截图层内可进行标注后，复制、保存、贴到屏幕、送去 OCR 或直接问 AI。
-- **贴图钉屏（Pin）**：把截图或剪贴板里的图片钉在屏幕最上层，方便对照参考；支持多个贴图窗口同时存在。
-- **长截图**：框选区域后进入长截图模式，用于滚动页面的拼接采集（基础版）。
-- **OCR 文字识别**：两种引擎可选——
-  - `local`：本地 [tesseract.js](https://github.com/naptha/tesseract.js)，离线可用（首次需联网下载语言包）。
-  - `deepseek`：走 DeepSeek 多模态视觉模型识别，效果更好但需联网与 API Key。
-- **录屏（WebM / GIF）**：框选区域录制屏幕，保存为 `.webm`，或经 ffmpeg 转码导出为 `.gif`（基础版）。
-- **内置 DeepSeek AI**：
-  - **截图问 AI**：把截图连同提示词发给视觉模型（默认 `deepseek-v4-pro`），流式返回解题 / 报错分析 / 内容说明。
-  - **文字翻译**：中英互译，使用纯文本模型（默认 `deepseek-v4-flash`）。
-  - **文字润色**：让一段文字更通顺、专业、自然，保持原意。
-- **菜单栏 / 托盘常驻**：所有功能都可从托盘菜单触发，macOS 上默认隐藏 Dock 图标。
-- **全局快捷键**：在任意应用前台都能唤起截图、录屏、长截图、OCR、贴剪贴板图片。
+> 演示素材由真实 Electron 渲染界面在隔离会话中生成；背景、历史记录和 AI 回复均为本地合成，不含真实用户数据，也不会发起网络请求。
 
----
+| 主窗口 | 截图标注 | AI 工作台 |
+| --- | --- | --- |
+| ![主窗口](docs/assets/screenshot-main.png) | ![截图标注](docs/assets/screenshot-overlay.png) | ![AI 工作台](docs/assets/screenshot-ai.png) |
 
-## 安装与运行
+## 能做什么
 
-环境要求：[Node.js](https://nodejs.org/)（建议 18 及以上）。本机已在 Node 24、Electron 42 上验证。
+- 区域、窗口、全屏和延时截图；区域截图支持选区调整与多显示器捕获。
+- 矩形、椭圆、箭头、直线、画笔、荧光笔、折线、文字、马赛克和序号等标注，并支持撤销/重做。
+- 将图片、文字、颜色或 Finder 文件贴到屏幕；贴图支持置顶、锁定、鼠标穿透、缩略和恢复最近关闭项。
+- 本地 OCR 默认使用 Tesseract.js 与仓库内的中英文语言数据；macOS 还包含基于系统 Vision 的文字框识别流程。
+- 识别选区中的二维码并复制内容。
+- 截图历史保存在 Electron 用户数据目录的 `history/`。自动入历史默认关闭，但成功执行“保存”或“快速保存”时仍会在历史库中另存一份；清空历史只删除历史库副本，不会删除用户另存到其他目录的文件。历史支持搜索、筛选、复制、导出和批量删除。
+- 区域录屏可保存 WebM，或通过 FFmpeg 转换为 H.264 MP4/GIF。
+- AI 工作台支持 OCR 后问答、翻译、总结和润色；视觉模型可直接接收用户选中的截图。
+- 长截图已经提供基础流程，但仍属于实验性能力，复杂页面可能无法正确拼接。
+
+## 快速开始
+
+需要：
+
+- macOS（当前主要开发与支持平台）
+- Node.js 22.12 或更高版本
+- npm
+- 首次安装依赖时可访问 npm 与 `ffmpeg-static` 的二进制下载来源
 
 ```bash
-# 1. 安装依赖
-npm install
-
-# 2. 启动应用
+git clone https://github.com/duangjaiignacy-blip/kunkun-shot.git
+cd kunkun-shot
+npm ci
+npm test
 npm start
 ```
 
-其他脚本：
+默认会打开主窗口，同时提供菜单栏入口。若全局快捷键已被系统或其他应用占用，请在设置页修改。
+
+### macOS 屏幕录制权限
+
+截图、长截图和录屏需要 **系统设置 → 隐私与安全性 → 屏幕录制** 权限。开发模式可能显示为 Electron 或启动应用的终端。
+
+1. 启动一次应用并触发截图。
+2. 在系统设置中授予对应进程权限。
+3. 完全退出 Electron/应用，再重新执行 `npm start`。
+
+没有权限时可能只能捕获桌面壁纸、黑屏或空白画面。授权变化通常要重启进程才会生效。
+
+## 默认快捷键（macOS）
+
+| 功能 | 快捷键 |
+| --- | --- |
+| 区域截图 | `⌘ ⇧ A` |
+| 截图并 OCR | `⌘ ⇧ O` |
+| 长截图 | `⌘ ⇧ L` |
+| 区域录屏 | `⌘ ⇧ R` |
+| 贴出剪贴板内容 | `⌘ ⇧ P` |
+| 恢复最近关闭的贴图 | `⌘ 3` |
+| 划词翻译 | `⌘ ⇧ T` |
+
+快捷键可在设置页修改。截图界面和贴图窗口中的单键操作也有独立配置。
+
+## AI 与数据边界
+
+AI 功能不是截图本身的必需条件。仅使用本地截图、标注、贴图和本地 OCR 时，不需要填写 API Key。
+
+启用 AI 前请理解以下数据流：
+
+- 文本任务会把提示词、用户输入或 OCR 得到的文字发送到当前配置的服务商 Base URL。
+- 视觉任务会把用户主动选择的截图发送给支持图片输入的服务商。当前路由中，MiniMax 用于直接看图；纯文本提供商会先在本地 OCR，再发送识别出的文字。
+- “智能分流”采用固定路由：纯文本任务只发往 DeepSeek，看图任务只发往 MiniMax，必须同时配置两者。缺少本次任务对应的配置时请求会明确停止，不会利用其他服务商的残留 Key 改投端点。
+- 测试连接和拉取模型列表也会向配置的服务端发起网络请求。
+- 本地 OCR 优先读取仓库/应用资源中的 `tessdata`。所需语言数据缺失时，Tesseract.js 可能回退到其网络加载行为，因此离线使用前应确认语言文件齐全。
+- API Key 仅在 Electron `safeStorage` 成功加密后才会落盘；系统安全存储不可用或加密失败时，保存会明确报错，绝不会以明文落盘或误报成功。
+
+不要把含个人信息、商业秘密或第三方受限内容的截图发送给不受信任的模型服务。使用服务商即同时受其隐私政策、数据保留规则和计费条款约束。
+
+## 项目结构
+
+```text
+src/
+├── main/       Electron 主进程：捕获编排、配置、历史、OCR、媒体与 AI 请求
+├── preload/    contextBridge 白名单 API
+├── renderer/   无框架 HTML/CSS/JavaScript 界面
+└── shared/     IPC 通道与默认配置
+test/           Node 回归测试
+tessdata/       本地 OCR 语言数据
+docs/           产品说明与发布检查资料
+```
+
+渲染层不开启 Node 集成，只通过 preload 暴露的 `window.kkapi` 与主进程通信。项目没有前端打包步骤，Electron 直接加载本地 HTML/CSS/JavaScript。
+
+## 开发与验证
 
 ```bash
-npm run dev        # 以 --dev 模式启动（开发调试）
-npm run dist       # 用 electron-builder 打包当前平台
-npm run dist:mac   # 仅打包 macOS（dmg）
+npm test
+npm audit --omit=dev
+npm ls --depth=0
 ```
 
-> ⚠️ **打包前需准备本地 OCR 语言包**：`tessdata/` 目录未随仓库入库（体积较大），但 `electron-builder` 的 `extraResources` 会把它打进安装包。首次 clone 后若要打包，请从
-> [tesseract-ocr/tessdata](https://github.com/tesseract-ocr/tessdata) 下载 `chi_sim.traineddata`
-> 与 `eng.traineddata` 放入项目根的 `tessdata/`，否则打包会因资源缺失失败。
+用真实渲染层和隔离的本地演示数据重新生成上方素材：
 
-启动后应用不会弹出主窗口，而是常驻在 **菜单栏 / 系统托盘**（图标为 📸）。从托盘菜单或快捷键即可使用全部功能。
-
----
-
-## macOS「屏幕录制」权限说明
-
-在 macOS 上，截图与录屏都依赖系统的 **屏幕录制（Screen Recording）** 权限。否则截到的会是空白或纯桌面壁纸。
-
-1. 打开 **系统设置 → 隐私与安全性 → 屏幕录制**。
-2. 在列表里找到 **困困截图工具**（开发模式下可能显示为 **Electron** / 终端），打开开关授权。
-3. **完全退出并重新启动应用**（macOS 对该权限的变更需要重启进程才生效）。
-
-首次截图时若未授权，系统会自动弹出授权请求；应用也会在截图失败时给出指向上述路径的提示弹窗。
-
----
-
-## DeepSeek AI 配置步骤
-
-AI 相关功能（问图、翻译、润色、DeepSeek OCR）需要一个 DeepSeek API Key。
-
-1. 到 [DeepSeek 开放平台](https://platform.deepseek.com/) 注册并创建 API Key。
-2. 启动应用 → 托盘菜单 → **设置…**，打开设置页。
-3. 在 **DeepSeek** 区域填写：
-   - **API Key**：粘贴你的密钥。
-   - **Base URL**：默认 `https://api.deepseek.com/v1`（OpenAI 兼容端点，实际请求 `{baseUrl}/chat/completions`）。
-   - **图片识别模型（visionModel）**：默认 `deepseek-v4-pro`，用于「截图问 AI」和「DeepSeek OCR」。
-   - **文本模型（textModel）**：默认 `deepseek-v4-flash`，用于「翻译 / 润色」。
-   - 各类提示词（问图 / OCR / 翻译 / 润色）均可自定义。
-4. 在设置页点击 **测试连接**，验证 Key 是否可用（成功会返回模型的简短回复）。
-
-> 说明：图片多模态识别请使用 `deepseek-v4-pro`。旧的 `deepseek-chat` / `deepseek-reasoner` 已被官方标注弃用且不支持图片输入，因此默认不再使用。
-
----
-
-## 默认快捷键
-
-| 功能 | 默认快捷键（macOS） | 默认快捷键（Windows / Linux） |
-| --- | --- | --- |
-| 区域截图 | `⌘ + ⇧ + A` | `Ctrl + Shift + A` |
-| 截图并 OCR | `⌘ + ⇧ + O` | `Ctrl + Shift + O` |
-| 长截图（滚动拼接） | `⌘ + ⇧ + L` | `Ctrl + Shift + L` |
-| 区域录屏 | `⌘ + ⇧ + R` | `Ctrl + Shift + R` |
-| 把剪贴板图片贴到屏幕 | `⌘ + ⇧ + P` | `Ctrl + Shift + P` |
-
-> 快捷键使用 Electron 的 accelerator 字符串配置（如 `CommandOrControl+Shift+A`），可在设置页自行修改；修改后立即重新注册，无需重启。
-
----
-
-## 项目架构
-
-纯无打包结构：主进程为 CommonJS Node 代码，渲染层为纯 HTML/CSS/JS（无框架、无构建步骤），以 `file://` 加载。主进程与渲染层之间通过 `preload` 注入的、经 `contextBridge` 隔离的 `window.kkapi` 通信，渲染层不直接接触任何 Node / Electron 模块。
-
-```
-src/
-├── main/                 # 主进程（Node / Electron）
-│   ├── main.js           # 入口：单实例锁、托盘菜单、全局快捷键、屏幕捕获编排、全部 IPC 处理
-│   ├── windows.js        # 窗口工厂：截图层 / 贴图 / 设置 / AI 面板 / 录屏控制条
-│   ├── config.js         # 配置读写（深合并默认值，持久化到 userData 目录）
-│   ├── deepseek.js       # DeepSeek 客户端（OpenAI 兼容，fetch + SSE 流式解析）
-│   ├── ocr.js            # 本地 OCR（tesseract.js）
-│   └── media.js          # 图片保存、录屏临时文件、webm → gif（ffmpeg）转码
-│
-├── preload/
-│   └── preload.js        # 通过 contextBridge 暴露受控的 window.kkapi
-│
-├── renderer/             # 渲染层（纯 HTML/CSS/JS，file:// 加载，无 require/import）
-│   ├── overlay/          # 截图选区层（框选 + 标注工具栏）
-│   ├── pin/              # 贴图钉屏窗口
-│   ├── longshot/         # 长截图窗口
-│   ├── recorder/         # 录屏控制条
-│   ├── ai/               # AI 面板（问图 / OCR / 翻译 / 润色）
-│   └── settings/         # 设置页
-│
-└── shared/               # 主进程与 preload 共享
-    ├── channels.js       # IPC 通道名常量
-    └── config-schema.js  # 默认配置 DEFAULT_CONFIG
+```bash
+env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron scripts/capture-demo.js
 ```
 
-### 关键约定
+自动测试无法替代屏幕权限、多显示器、全局快捷键、OCR、录屏、贴图拖拽和 Apple 分发链路的真机验证。准备发布时请逐项执行 [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md)，并把实际证据写入发布说明。
 
-- **渲染层禁止** `require` / `import` 任何 Node / Electron 模块，一切交互只能走 `window.kkapi`。
-- DeepSeek 请求只在主进程 `deepseek.js` 中发起；渲染层通过 `kkapi.askImage` / `kkapi.chat` 触发，结果以 `streamId` 标记，经 `kkapi.onStream` 流式推送回对应窗口。
-- 配置由 `config.js` 与 `shared/config-schema.js` 的默认值做深合并，保证升级后新增字段也有默认值；持久化在系统的 `userData` 目录（可从托盘菜单「打开配置文件目录」进入）。
+`npm run dist:mac` 是本地打包入口，但“命令执行成功”不代表产物已签名、公证或能通过另一台 Mac 的 Gatekeeper。任何二进制发布都必须明确标注真实签名/公证状态。
 
-### 配置结构（`kkapi.getConfig()` 返回）
+## 已知限制
 
-```js
-{
-  shortcuts: { capture, pinClipboard, record, longShot, ocr }, // Electron accelerator 字符串
-  deepseek:  { apiKey, baseUrl, visionModel, textModel,
-               askImagePrompt, ocrPrompt, translatePrompt, polishPrompt },
-  ocr:       { engine: 'local' | 'deepseek', lang: 'chi_sim+eng' },
-  capture:   { copyAfterCapture, autoPin },
-  recording: { fps, toGif },
-  general:   { launchAtLogin, saveDir, theme: 'light' | 'dark' },
-}
-```
+- 当前仅把 macOS 作为支持与验收重点；代码中出现的通用 Electron API 不构成跨平台支持承诺。
+- 长截图仍是实验性实现，复杂滚动容器、动态内容和固定元素可能导致拼接异常。
+- GIF 转换会消耗较多时间和空间；高分辨率、长时间录屏尤其明显。
+- 全局快捷键可能与系统或其他应用冲突。
+- OCR 精度取决于图像质量、语言数据和版面；AI 结果也可能错误。
+- 尚未完成的自动或真机验证项目以发布检查清单中的未勾选项为准。
 
----
+## 参与和安全
 
-## 已知局限
+- 贡献流程：[CONTRIBUTING.md](CONTRIBUTING.md)
+- 安全漏洞报告：[SECURITY.md](SECURITY.md)
+- 发布检查：[docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md)
 
-- **长截图为基础版**：当前仅提供框选后的基础采集流程，自动滚动 / 智能拼接的完善程度有限，复杂页面可能需要手动配合。
-- **录屏为基础版**：录制保存为 WebM；导出 GIF 依赖随包的 `ffmpeg-static`（缺失时退回系统 `ffmpeg`）。长时间 / 高帧率录制的 GIF 体积较大，转码也较慢。
-- **OCR 首次需联网**：本地 `local` 引擎基于 tesseract.js，首次识别会从 CDN 下载对应语言包（默认 `chi_sim+eng`），需联网一次，之后会缓存离线可用。
-- **AI 功能依赖网络与 Key**：问图 / 翻译 / 润色 / DeepSeek OCR 均需有效的 DeepSeek API Key 与网络连接。
-- **权限平台差异**：macOS 需手动授予「屏幕录制」权限并重启应用；不同平台的全局快捷键可能与系统或其他软件冲突，可在设置页改键。
-
----
+请勿在公开 Issue、日志或演示截图中粘贴 API Key、访问令牌或未脱敏的个人数据。
 
 ## 许可证
 
-[MIT](https://opensource.org/licenses/MIT) © 困困
+仓库原创源码使用 [MIT License](LICENSE)，版权所有 © 2026 Kunkun / 困困。
+
+运行时还包含不同许可证的第三方组件。尤其是 `ffmpeg-static` 当前解析为 GPL-3.0-or-later，并安装平台对应的 FFmpeg 二进制。MIT 许可证不会覆盖或取代这些条款；分发源码或二进制前请阅读 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 并履行最终产物适用的许可证义务。

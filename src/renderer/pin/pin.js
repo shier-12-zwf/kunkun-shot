@@ -46,6 +46,7 @@
 
   // ---- 内置快捷键（设置页可自定义）----
   var PKEYS = { lock: 'l', top: 't', select: 's', pass: 'p', thumb: 'r' };
+  var PKEY_CONFIG = { lock: 'pinLock', top: 'pinTop', select: 'pinSelect', pass: 'pinPass', thumb: 'pinThumb' };
   function pinKeyMatches(e, want) {
     if (!want) return false;
     return String(e.key || '').toLowerCase() === String(want).toLowerCase();
@@ -704,7 +705,8 @@
         .then(function (cfg) {
           if (cfg && cfg.builtinKeys) {
             Object.keys(PKEYS).forEach(function (key) {
-              if (cfg.builtinKeys[key]) PKEYS[key] = String(cfg.builtinKeys[key]);
+              var configKey = PKEY_CONFIG[key];
+              if (cfg.builtinKeys[configKey]) PKEYS[key] = String(cfg.builtinKeys[configKey]);
             });
           }
         })

@@ -1,7 +1,7 @@
 # 困困截图工具 · 产品需求文档（PRD）
 
 > 说明：本 PRD 由**现有代码与功能逆向倒推**而成（reverse-engineered），用于沉淀产品定义、对齐后续迭代。
-> 产品代号 `kunkun-shot`，当前版本 `v0.1.0`，平台 macOS（Electron）。
+> 产品代号 `kunkun-shot`，当前版本 `v0.2.0`，平台 macOS（Electron）。
 > 文档基于实际实现盘点（IPC 通道、渲染模块、配置项），非凭空设想；标注「⚠️ 待完善 / 已知限制」处为真实现状。
 
 ---
@@ -13,7 +13,7 @@
 **产品形态**：菜单栏常驻 App + 全局快捷键唤起 + 浮层交互（截图蒙版 / 贴图窗 / AI 面板 / 长截图条 / 录屏条）。
 
 **核心差异点**：
-- 截图链路里**原生集成大模型**（DeepSeek / MiniMax 双供应商，可智能分流），截完即可问 AI、翻译、润色；
+- 截图链路里**原生集成大模型**（DeepSeek、MiniMax 与通用 OpenAI 兼容文本服务，可智能分流），截完即可问 AI、翻译、润色；
 - **截图原位翻译**（识别每行文字+坐标，译文盖回原文位置，沉浸式翻译式体验）；
 - **本地优先**：OCR 可走本地 tesseract，配置与历史存本地，隐私可控。
 
@@ -77,8 +77,8 @@
 ### 4.5 AI 能力（问答 / 翻译 / 润色）
 - **截图问 AI**：把选区图发给视觉模型，针对报错/题目/内容给出解释与解法（默认提示词可配）。
 - **翻译**、**润色**：基于 OCR 文本或选区图。
-- **双供应商**：DeepSeek（文本 `deepseek-v4-flash` / 视觉 `deepseek-v4-pro`）、MiniMax（`MiniMax-M3`）。
-  - 模式：`deepseek` / `minimax` / `auto`（智能分流：图片→有 Key 的 MiniMax，文本→DeepSeek，省钱）。
+- **提供商模式**：DeepSeek（文本任务；截图先走本地 OCR）、MiniMax（`MiniMax-M3`，支持直接看图），以及通用 OpenAI 兼容文本服务（硅基流动 / 通义千问 / Kimi / 自定义端点）。
+  - 模式：`deepseek` / `minimax` / `openai` / `auto`。智能分流时，图片优先走已配置的 MiniMax；文本优先走已配置的 OpenAI 兼容服务，否则回退到 DeepSeek。
 - 流式输出；思考过程控制（翻译/OCR 只出结果，问答可展示思考）。
 - 通道：`DEEPSEEK_ASK_IMAGE / DEEPSEEK_CHAT / DEEPSEEK_STREAM / DEEPSEEK_TEST`。
 
@@ -114,9 +114,10 @@
 | 分类 | 配置项 | 默认值 |
 |---|---|---|
 | 快捷键 | 截图 / 贴剪贴板 / 录屏 / 长截图 / OCR | `Cmd+Shift+A / P / R / L / O` |
-| AI | 供应商 provider | `deepseek`（可 `minimax` / `auto`） |
+| AI | 供应商 provider | `deepseek`（可 `minimax` / `openai` / `auto`） |
 | DeepSeek | baseUrl / 文本模型 / 视觉模型 / 各提示词 | `api.deepseek.com`、`v4-flash` / `v4-pro` |
 | MiniMax | baseUrl / 文本 / 视觉模型 / apiKey | `api.minimaxi.com`、`MiniMax-M3` |
+| OpenAI 兼容 | preset / baseUrl / 文本模型 / apiKey | `siliconflow`、`deepseek-ai/DeepSeek-V3`；亦可选通义千问、Kimi 或自定义端点 |
 | OCR | 引擎(local/model) / 语言 | `local`、`chi_sim+eng` |
 | 原位翻译 | 目标语言 `translate.target`（中/英/日/韩/法/德/西/俄） | `中文` |
 | 截图 | 截后复制 / 自动贴图 / 自动存历史 | 均 `false` |
@@ -129,7 +130,7 @@
 
 - **平台**：macOS（darwin）；Electron 桌面应用。
 - **隐私/本地优先**：OCR 可全本地；配置与历史存用户目录；API Key 仅本地保存。
-- **权限**：录屏/长截图需「屏幕录制」权限（TCC）；通过**自签名证书**稳定签名，避免每次重打包后授权失效（授权一次长期有效）。
+- **权限**：录屏/长截图需「屏幕录制」权限（TCC）。当前公开源码构建未签名、未公证，重新打包后 macOS 可能要求重新授权；正式分发前需使用有效的 Apple Developer ID 完成签名与公证。
 - **性能**：截图蒙版即开即用；长截图抓帧 ~0.5s/帧；原位翻译首次含 swift 编译，后续 OCR ~1.5–2s。
 - **交互**：全局快捷键唤起；浮层不抢焦不打断；所有浮窗可拖动/可缩放（贴图等）。
 
@@ -139,8 +140,8 @@
 
 - **主进程**：`main.js`（窗口/快捷键/截图/AI/OCR/历史调度）、`windows.js`（各窗口）、`config.js`、`deepseek.js`（AI 调用：streamChat/completeText/imageMessage/stripThink）、`ocr.js`（tesseract）、`ocr-boxes.js`（macOS Vision 出坐标）、`media.js`（录屏）、`history.js`。
 - **渲染层**：`overlay`（截图标注+AI 面板+原位翻译）、`pin`、`longshot`、`recorder`、`ai`、`settings`、`popover`、`main`。
-- **桥接**：`preload` 注入 `window.kkapi`（contextBridge），渲染层禁止直接 require。
-- **通道**：`src/shared/channels.js` 统一定义（≈40 个 IPC 通道，即功能地图）。
+- **桥接**：`preload` 注入 `window.kkapi`（contextBridge），渲染层禁止直接 require；所有窗口启用 `contextIsolation:true`、`nodeIntegration:false` 与 `sandbox:true`。
+- **通道**：`src/shared/channels.js` 统一定义（当前 53 个 IPC 通道，即功能地图）。
 
 ---
 
@@ -153,11 +154,10 @@
 **后续迭代候选**
 - 原位翻译：~~目标语言选择器~~（已做）、~~把译文合成进导出图~~（已做）、对齐精修；
 - 长截图：针对固定水印的专门处理、滚动引导/防错位提示；
-- 安全硬化：渲染层 `sandbox:true`（需打包 preload 去除 require）；
 - 跨平台（Windows）、云同步（远期）。
 
 ---
 
 ## 9. 版本
 
-- **v0.1.0（当前）**：截图/标注/贴图/OCR/AI 问答翻译/原位翻译(打磨中)/长截图(改进中)/录屏/历史/设置 全链路打通；DeepSeek+MiniMax 双供应商；macOS 自签名稳定授权。
+- **v0.2.0（当前，早期预览）**：截图/标注/贴图/OCR/AI 问答翻译/原位翻译（打磨中）/长截图（改进中）/录屏/历史/设置已具备基础链路；支持 DeepSeek、MiniMax 与通用 OpenAI 兼容文本服务。公开源码构建未签名、未公证。

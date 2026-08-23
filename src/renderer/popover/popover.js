@@ -1,4 +1,4 @@
-// 困困截屏助手 · 菜单栏弹窗逻辑
+// 困困截图工具 · 菜单栏弹窗逻辑
 // 纯浏览器环境，仅通过 window.kkapi 与主进程通信，禁止 require/import node/electron。
 (function () {
   'use strict';

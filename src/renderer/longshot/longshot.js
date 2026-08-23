@@ -4,6 +4,71 @@
 (function () {
   'use strict';
 
+  // Canvas 像素通常以 RGBA 常驻内存，扩容/导出时还会短暂同时保留两份。
+  // 20M 像素约 80 MiB/份，既给 128 MiB 图片 IPC 上限留出 PNG/base64 余量，
+  // 也避免只按高度放行 4K×120000 这类会稳定耗尽内存的尺寸。
+  const MAX_CANVAS_H = 120000;
+  const MAX_CANVAS_PIXELS = 20 * 1024 * 1024;
+  const GROW_STEP = 4000;
+
+  function getMaxCanvasHeight(width) {
+    const w = Math.floor(Number(width));
+    if (!Number.isFinite(w) || w <= 0) return 0;
+    return Math.max(0, Math.min(MAX_CANVAS_H, Math.floor(MAX_CANVAS_PIXELS / w)));
+  }
+
+  function isFrameWithinCanvasBudget(width, height) {
+    const h = Math.floor(Number(height));
+    return Number.isFinite(h) && h > 0 && h <= getMaxCanvasHeight(width);
+  }
+
+  // 把「异步解码 + 横向转置」保留为可独立测试的边界。横向分支必须等图片解码
+  // 完成后才能读取 width/height/canvas；否则拿到的是 Promise，首帧会直接失败。
+  async function loadFrameForDirection(loadFrame, dataURL, isHorizontal, createCanvas) {
+    const frame = await loadFrame(dataURL);
+    if (!isHorizontal) return frame;
+
+    const rot = createCanvas();
+    rot.width = frame.height;
+    rot.height = frame.width;
+    const rctx = rot.getContext('2d', { willReadFrequently: true });
+    rctx.translate(frame.height / 2, frame.width / 2);
+    rctx.rotate(Math.PI / 2);
+    rctx.drawImage(frame.canvas, -frame.width / 2, -frame.height / 2);
+    return { canvas: rot, width: frame.height, height: frame.width };
+  }
+
+  function overlapResult(overlap, hadContent) {
+    return { overlap: overlap, hadContent: !!hadContent };
+  }
+
+  function shouldPauseForUnmatchedContent(match) {
+    return !!match && match.overlap === 0 && match.hadContent === true;
+  }
+
+  async function saveLongshotAndClose(api, dataURL) {
+    const result = await api.saveImage(dataURL);
+    if (!result || result.saved !== true) {
+      throw new Error('保存已取消或失败');
+    }
+    await api.copyImage(dataURL);
+    await api.closeSelf();
+  }
+
+  // Node 回归测试只加载上面的纯函数，不初始化 renderer DOM。
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+      loadFrameForDirection,
+      overlapResult,
+      shouldPauseForUnmatchedContent,
+      MAX_CANVAS_PIXELS,
+      getMaxCanvasHeight,
+      isFrameWithinCanvasBudget,
+      saveLongshotAndClose,
+    };
+    return;
+  }
+
   // ====== 初始化数据（由主进程通过 onInit 注入）======
   // payload: { rect, displayBounds, scaleFactor, displayId }
   let RECT = null; // 选区，CSS px：{ x, y, width, height }
@@ -28,9 +93,6 @@
   const SEARCH_ROWS = 8; // 用于匹配的「行块」高度（采样多少行做指纹）
   const STEP = 2; // offset 搜索步长（先粗搜，命中后细化）
   const MATCH_TOL = 18; // 单通道像素差阈值，低于视为相同
-  const MAX_CANVAS_H = 120000; // 拼接 canvas 最大高度（P2-3：30k→120k 像素，向 PixPin 超长截图靠拢；仍受内存兜底）
-  const GROW_STEP = 4000; // canvas 扩容步长（一次性多给一些，减少复制次数）
-
   // 上一帧的 ImageData，用于「行像素匹配」时取已拼接底部的像素来源。
   // 实际匹配直接从 stitchCtx 取底部行，从新帧 frameCtx 取顶部行。
 
@@ -74,23 +136,19 @@
       scaleFactor: SCALE,
     });
     if (!dataURL) throw new Error('captureRegion 返回空');
-    const f = loadDataURL(dataURL);
-    if (horizontal) {
-      // 横向模式：帧顺时针转 90° 后复用纵向拼接管线，导出时再转回来
-      const rot = document.createElement('canvas');
-      rot.width = f.height;
-      rot.height = f.width;
-      const rctx = rot.getContext('2d', { willReadFrequently: true });
-      rctx.translate(f.height / 2, f.width / 2);
-      rctx.rotate(Math.PI / 2);
-      rctx.drawImage(f.canvas, -f.width / 2, -f.height / 2);
-      return { canvas: rot, width: f.height, height: f.width };
-    }
-    return f;
+    return loadFrameForDirection(
+      loadDataURL,
+      dataURL,
+      horizontal,
+      () => document.createElement('canvas')
+    );
   }
 
   // ====== 创建/初始化拼接 canvas（首帧）======
   function initStitch(frame) {
+    if (!isFrameWithinCanvasBudget(frame.width, frame.height)) {
+      throw new Error('选区分辨率过高，超出长截图的安全内存上限');
+    }
     stitchCanvas = document.createElement('canvas');
     stitchCanvas.width = frame.width; // = rect.width * scaleFactor
     stitchCanvas.height = frame.height; // 起始高度 = 首帧高
@@ -102,9 +160,11 @@
   // ====== 确保拼接 canvas 至少能容纳 needHeight；不够则用临时 canvas 扩高复制 ======
   function ensureCapacity(needHeight) {
     if (needHeight <= stitchCanvas.height) return true;
+    const maxHeight = getMaxCanvasHeight(stitchCanvas.width);
+    if (needHeight > maxHeight) return false;
     let target = stitchCanvas.height + GROW_STEP;
     while (target < needHeight) target += GROW_STEP;
-    if (target > MAX_CANVAS_H) target = MAX_CANVAS_H;
+    if (target > maxHeight) target = maxHeight;
     if (target < needHeight) return false; // 已经到上限，装不下
 
     const tmp = document.createElement('canvas');
@@ -124,8 +184,9 @@
   // 我们枚举「重叠高度 overlap = frameH - d」，从大到小找：重叠越大代表滚动越少。
   // 为效率，用采样行 + 采样列比较，命中即接受。
   //
-  // 返回 { overlap, scrolled } ：
+  // 返回 { overlap, hadContent } ：
   //   overlap = 新帧顶部与已拼接底部相同的像素行数
+  //   hadContent = 搜索区是否有足够内容行；有内容但 overlap=0 时应暂停而不是硬接
   //   新追加的高度 = frameH - overlap
   function matchOverlap(frameCtx, frameW, frameH) {
     const stitchW = stitchCanvas.width;
@@ -133,7 +194,7 @@
     // 忽略最右侧滚动条区域（约 3%），滚动条会移动、破坏匹配
     const mw = Math.max(8, Math.floor(w * 0.97));
     const stitchSampleH = Math.min(stitchedHeight, frameH);
-    if (stitchSampleH < SEARCH_ROWS) return { overlap: 0 };
+    if (stitchSampleH < SEARCH_ROWS) return overlapResult(0, false);
     const sBottom = stitchCtx.getImageData(0, stitchedHeight - stitchSampleH, w, stitchSampleH).data;
     const fTop = frameCtx.getImageData(0, 0, w, stitchSampleH).data;
     const cols = [];
@@ -198,10 +259,10 @@
       }
     }
     if (anyContent && bestScore >= 0.62 && bestOv >= minOverlap) {
-      return { overlap: bestOv };
+      return overlapResult(bestOv, true);
     }
     // 搜索区几乎全空白 → 无法靠像素判定，整帧接上（此时重复的只会是空白，肉眼看不出）
-    return { overlap: 0 };
+    return overlapResult(0, anyContent);
   }
 
   async function consumeFrame(frame) {
@@ -219,7 +280,7 @@
     // 有内容却没能匹配上重叠（overlap=0 且本应有内容）：多半滚动过快或渲染有差异。
     // 整帧硬接会漏接或重复且无法察觉——改为「丢弃本帧、不拼接」，等用户放慢后下一帧自然能匹配上，
     // 宁可暂停也不静默产出错位长图。警告用红色持久显示，避免被后续 tick 的提示覆盖。
-    if (overlap === 0 && m.hadContent) {
+    if (shouldPauseForUnmatchedContent(m)) {
       $hint.textContent = '滚动过快，已暂停拼接——请放慢匀速下滚';
       $hint.style.color = '#ff5a5a';
       return false;
@@ -336,60 +397,58 @@
     $hint.textContent = '正在拼接并保存…';
 
     try {
-      // 若 canvas 预留高度大于实际拼接高度，先裁到实际高度再导出。
+      // P2-3：手动裁剪（上/下裁掉多余区域）
+      const cropT = Math.max(0, Math.min(parseInt($cropTop.value, 10) || 0, stitchedHeight - 8));
+      const cropB = Math.max(0, Math.min(parseInt($cropBottom.value, 10) || 0, stitchedHeight - 8 - cropT));
+      const finalH = stitchedHeight - cropT - cropB;
       let exportCanvas = stitchCanvas;
-      if (stitchCanvas.height !== stitchedHeight) {
+
+      // 裁剪和横向还原最多只创建一个额外 canvas，避免“预留裁剪 + 手动裁剪 +
+      // 旋转”连续保留三份完整 RGBA 位图造成峰值内存倍增。
+      if (horizontal) {
+        const rot = document.createElement('canvas');
+        rot.width = finalH;
+        rot.height = stitchCanvas.width;
+        const rctx = rot.getContext('2d');
+        rctx.translate(rot.width / 2, rot.height / 2);
+        rctx.rotate(-Math.PI / 2);
+        rctx.drawImage(
+          stitchCanvas,
+          0,
+          cropT,
+          stitchCanvas.width,
+          finalH,
+          -stitchCanvas.width / 2,
+          -finalH / 2,
+          stitchCanvas.width,
+          finalH
+        );
+        exportCanvas = rot;
+      } else if (cropT > 0 || cropB > 0 || stitchCanvas.height !== stitchedHeight) {
         const out = document.createElement('canvas');
         out.width = stitchCanvas.width;
-        out.height = stitchedHeight;
+        out.height = finalH;
         const octx = out.getContext('2d');
         octx.drawImage(
           stitchCanvas,
           0,
+          cropT,
+          stitchCanvas.width,
+          finalH,
+          0,
           0,
           stitchCanvas.width,
-          stitchedHeight,
-          0,
-          0,
-          stitchCanvas.width,
-          stitchedHeight
+          finalH
         );
         exportCanvas = out;
-      }
-
-      // P2-3：手动裁剪（上/下裁掉多余区域）
-      const cropT = Math.max(0, Math.min(parseInt($cropTop.value, 10) || 0, stitchedHeight - 8));
-      const cropB = Math.max(0, Math.min(parseInt($cropBottom.value, 10) || 0, stitchedHeight - 8 - cropT));
-      if (cropT > 0 || cropB > 0) {
-        const finalH = stitchedHeight - cropT - cropB;
-        const out2 = document.createElement('canvas');
-        out2.width = exportCanvas.width;
-        out2.height = finalH;
-        const octx2 = out2.getContext('2d');
-        octx2.drawImage(exportCanvas, 0, cropT, exportCanvas.width, finalH, 0, 0, exportCanvas.width, finalH);
-        exportCanvas = out2;
-      }
-
-      // 横向模式：把拼接结果逆时针转 90° 还原
-      if (horizontal) {
-        const rot = document.createElement('canvas');
-        rot.width = exportCanvas.height;
-        rot.height = exportCanvas.width;
-        const rctx = rot.getContext('2d');
-        rctx.translate(rot.width / 2, rot.height / 2);
-        rctx.rotate(-Math.PI / 2);
-        rctx.drawImage(exportCanvas, -exportCanvas.width / 2, -exportCanvas.height / 2);
-        exportCanvas = rot;
       }
 
       const dataURL = exportCanvas.toDataURL('image/png');
       if (!dataURL || dataURL.length < 32 || dataURL === 'data:,') {
         throw new Error('导出失败：拼接图过大或为空，无法生成 PNG');
       }
-      // 先保存再复制（都等待完成，避免窗口提前关闭打断 IPC）
-      await kkapi.saveImage(dataURL);
-      await kkapi.copyImage(dataURL);
-      await kkapi.closeSelf(); // 成功才关窗
+      // 只有主进程明确返回 saved:true 才复制并关窗；取消保存或失败时保留拼接图供重试。
+      await saveLongshotAndClose(kkapi, dataURL);
     } catch (e) {
       // 不要静默关窗丢图：唯一一份拼接图在内存里，关窗即丢失。给出可见提示并保留控制条供重试。
       console.error('[longshot] 保存失败', e);

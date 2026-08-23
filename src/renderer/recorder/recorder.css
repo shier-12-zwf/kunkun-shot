@@ -107,6 +107,17 @@ body {
   color: var(--danger);
 }
 
+.btn-retry {
+  width: auto;
+  min-width: 72px;
+  padding: 0 12px;
+  border-radius: 18px;
+  background: var(--bg-2);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 /* 取消按钮 */
 .btn-cancel:hover:not(:disabled) {
   color: var(--text);
@@ -183,6 +194,11 @@ body {
 
 .toast[hidden] {
   display: none;
+}
+
+.toast.with-action {
+  right: 126px;
+  justify-content: flex-start;
 }
 
 /* ===== 暂停按钮（P2-4） ===== */

@@ -1,4 +1,4 @@
-// 困困截屏助手 · 主窗口外壳逻辑
+// 困困截图工具 · 主窗口外壳逻辑
 // 职责：单窗口多页路由（KKMain.go）、侧栏高亮、标题栏页名同步、内容区滚动复位、
 //      启动初始化（onInit）、外部导航（onNav）、主题（theme-dark）应用。
 // 约束：渲染层只通过全局 window.kkapi 与主进程通信，绝不 require/import node/electron。
@@ -51,7 +51,7 @@
     var mod = getPage(key);
     var name = (mod && mod.title) ? mod.title : (FALLBACK_TITLES[key] || "");
     titlePageEl.textContent = name;
-    document.title = "困困截屏助手 · " + name;
+    document.title = "困困截图工具 · " + name;
   }
 
   // 核心路由：渲染指定页面到 #page 容器

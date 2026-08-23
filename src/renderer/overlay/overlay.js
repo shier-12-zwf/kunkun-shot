@@ -11,6 +11,41 @@
 (function () {
   'use strict';
 
+  // 只有主进程明确确认动作成功后才关闭截图层。保存对话框取消、写盘失败或
+  // IPC 异常都会走 onFailure，由界面恢复 S.finished，保留选区与标注供重试。
+  async function submitOverlayResult(api, result, onFailure) {
+    let outcome;
+    try {
+      outcome = await api.finishCapture(result);
+    } catch (err) {
+      if (typeof onFailure === 'function') {
+        onFailure({ ok: false, error: (err && err.message) || String(err) });
+      }
+      return false;
+    }
+
+    if (!outcome || outcome.ok !== true) {
+      if (typeof onFailure === 'function') onFailure(outcome || { ok: false });
+      return false;
+    }
+
+    try {
+      await api.cancelCapture();
+    } catch (err) {
+      if (typeof onFailure === 'function') {
+        onFailure({ ok: false, completed: true, error: (err && err.message) || String(err) });
+      }
+      return false;
+    }
+    return true;
+  }
+
+  // Node 回归测试只加载上面的纯异步契约，不初始化 renderer DOM。
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { submitOverlayResult };
+    return;
+  }
+
   // ---------- 全局状态 ----------
   var S = {
     payload: null, // onInit 数据
@@ -1854,11 +1889,16 @@
       bounds: boundsOut,
       displayId: S.displayId,
     };
-    try {
-      kkapi.finishCapture(result);
-    } catch (err) {
-      /* 主进程会自行关闭窗口 */
-    }
+    submitOverlayResult(kkapi, result, function (failure) {
+      S.finished = false;
+      if (failure && failure.completed) {
+        showTip('操作已完成，但窗口未能关闭；可按 Esc 退出');
+      } else if (failure && failure.canceled) {
+        showTip('已取消保存，可继续编辑或重试');
+      } else {
+        showTip('操作失败，已保留选区和标注，可重试');
+      }
+    });
   }
 
   function doCancel() {

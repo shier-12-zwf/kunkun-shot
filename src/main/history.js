@@ -2,6 +2,7 @@
 // 列表返回轻量缩略图（≤360px）以便画廊快速渲染；详情按需取原图。
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { app, nativeImage } = require('electron');
 
 let dir = null;
@@ -15,7 +16,25 @@ function ensureDirs() {
     imgDir = path.join(dir, 'images');
     indexPath = path.join(dir, 'index.json');
   }
-  fs.mkdirSync(imgDir, { recursive: true });
+  fs.mkdirSync(imgDir, { recursive: true, mode: 0o700 });
+}
+
+// index.json 是本地可编辑文件，不能直接信任其中的 file/thumbFile。只允许 images/
+// 目录下的单层 PNG 文件名，阻止 ../../ 路径穿越读取或删除其它本机文件。
+function imagePath(fileName) {
+  ensureDirs();
+  if (typeof fileName !== 'string' || !fileName || path.basename(fileName) !== fileName) return null;
+  if (!/\.png$/i.test(fileName)) return null;
+  const root = path.resolve(imgDir) + path.sep;
+  const candidate = path.resolve(imgDir, fileName);
+  return candidate.startsWith(root) ? candidate : null;
+}
+
+function isSafeItem(item) {
+  if (!item || typeof item !== 'object' || typeof item.id !== 'string' || !item.id) return false;
+  if (!imagePath(item.file)) return false;
+  if (item.thumbFile && !imagePath(item.thumbFile)) return false;
+  return true;
 }
 
 function loadIndex() {
@@ -23,8 +42,11 @@ function loadIndex() {
   ensureDirs();
   try {
     if (fs.existsSync(indexPath)) {
-      cache = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
-      if (!Array.isArray(cache)) cache = [];
+      const parsed = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
+      cache = Array.isArray(parsed) ? parsed.filter(isSafeItem) : [];
+      if (Array.isArray(parsed) && cache.length !== parsed.length) {
+        console.warn(`[history] 已忽略 ${parsed.length - cache.length} 条不安全或损坏的索引记录。`);
+      }
     } else {
       cache = [];
     }
@@ -37,10 +59,37 @@ function loadIndex() {
 
 function saveIndex() {
   ensureDirs();
+  const tmp = path.join(dir, `.index-${process.pid}-${crypto.randomBytes(8).toString('hex')}.tmp`);
+  let fd = null;
   try {
-    fs.writeFileSync(indexPath, JSON.stringify(cache || [], null, 2), 'utf-8');
+    // 先把完整 JSON 写入同目录私有临时文件并同步到磁盘，再原子替换正式索引。
+    // 进程若在写入中途退出，旧 index.json 仍保持完整，启动时不会读到半截 JSON。
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, JSON.stringify(cache || [], null, 2), 'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(tmp, indexPath);
   } catch (e) {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    throw e;
+  }
+}
+
+// 只有索引真正原子落盘后才让新的内存视图生效。磁盘满、权限变化等错误发生时，
+// 回滚 cache，避免当前进程显示的历史与重启后读到的历史互相矛盾。
+function commitIndex(next, previous) {
+  cache = next;
+  try {
+    saveIndex();
+    return true;
+  } catch (e) {
+    cache = previous;
     console.error('[history] 写索引失败：', e.message);
+    return false;
   }
 }
 
@@ -68,7 +117,7 @@ function add(dataURL, type) {
     return null;
   }
   const idx = loadIndex();
-  const id = `${Date.now()}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+  const id = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
   const file = id + '.png';
   const thumbFile = id + '.thumb.png';
   let width = 0;
@@ -83,22 +132,26 @@ function add(dataURL, type) {
       console.error('[history] 跳过无法解码的图片（base64 合法但内容不是有效图片）。');
       return null;
     }
-    fs.writeFileSync(path.join(imgDir, file), dataURLToBuffer(dataURL));
+    fs.writeFileSync(imagePath(file), dataURLToBuffer(dataURL), { mode: 0o600 });
     // 生成缩略图（最长边 360）
     const maxw = width >= height ? 360 : Math.round((360 * width) / Math.max(1, height));
     const thumb = img.resize({ width: Math.min(width, maxw || 360), quality: 'good' });
-    fs.writeFileSync(path.join(imgDir, thumbFile), thumb.toPNG());
+    fs.writeFileSync(imagePath(thumbFile), thumb.toPNG(), { mode: 0o600 });
   } catch (e) {
     console.error('[history] 保存图片失败：', e.message);
     // 回滚已写入的半成品文件，避免在 images/ 留下不进 index 的孤儿 png。
-    try { fs.unlinkSync(path.join(imgDir, file)); } catch (_) {}
-    try { fs.unlinkSync(path.join(imgDir, thumbFile)); } catch (_) {}
+    try { fs.unlinkSync(imagePath(file)); } catch (_) {}
+    try { fs.unlinkSync(imagePath(thumbFile)); } catch (_) {}
     return null;
   }
   const item = { id, file, thumbFile, time: Date.now(), width, height, type: type || 'region' };
-  idx.unshift(item);
-  cache = idx;
-  saveIndex();
+  const next = [item, ...idx];
+  if (!commitIndex(next, idx)) {
+    // 图片先写盘、索引后提交：索引提交失败时删除这次新增的图片，维持事务一致性。
+    try { fs.unlinkSync(imagePath(file)); } catch (_) {}
+    try { fs.unlinkSync(imagePath(thumbFile)); } catch (_) {}
+    return null;
+  }
   return item;
 }
 
@@ -124,7 +177,8 @@ function thumbPathOf(id) {
   const it = idx.find((x) => x.id === id);
   if (!it) return null;
   ensureDirs();
-  const p = path.join(imgDir, it.thumbFile || it.file);
+  const p = imagePath(it.thumbFile || it.file);
+  if (!p) return null;
   return fs.existsSync(p) ? p : null;
 }
 
@@ -134,7 +188,8 @@ function get(id) {
   const it = idx.find((x) => x.id === id);
   if (!it) return null;
   try {
-    const p = path.join(imgDir, it.file);
+    const p = imagePath(it.file);
+    if (!p) return null;
     const dataURL = 'data:image/png;base64,' + fs.readFileSync(p).toString('base64');
     return { item: it, dataURL };
   } catch (_) {
@@ -146,10 +201,14 @@ function remove(id) {
   const idx = loadIndex();
   const it = idx.find((x) => x.id === id);
   if (!it) return false;
-  try { fs.unlinkSync(path.join(imgDir, it.file)); } catch (_) {}
-  try { if (it.thumbFile) fs.unlinkSync(path.join(imgDir, it.thumbFile)); } catch (_) {}
-  cache = idx.filter((x) => x.id !== id);
-  saveIndex();
+  const file = imagePath(it.file);
+  const thumb = it.thumbFile ? imagePath(it.thumbFile) : null;
+  if (!file || (it.thumbFile && !thumb)) return false;
+  const next = idx.filter((x) => x.id !== id);
+  if (!commitIndex(next, idx)) return false;
+  // 先从索引提交删除，再清理图片。后者失败至多留下不可见的孤儿文件，不会让索引指向缺失文件。
+  try { fs.unlinkSync(file); } catch (_) {}
+  try { if (thumb) fs.unlinkSync(thumb); } catch (_) {}
   return true;
 }
 
@@ -158,32 +217,41 @@ function removeMany(ids) {
   const set = new Set(ids || []);
   if (!set.size) return 0;
   const idx = loadIndex();
-  let n = 0;
+  const targets = [];
   idx.forEach((it) => {
     if (!set.has(it.id)) return;
-    try { fs.unlinkSync(path.join(imgDir, it.file)); } catch (_) {}
-    try { if (it.thumbFile) fs.unlinkSync(path.join(imgDir, it.thumbFile)); } catch (_) {}
-    n++;
+    const file = imagePath(it.file);
+    const thumb = it.thumbFile ? imagePath(it.thumbFile) : null;
+    if (!file || (it.thumbFile && !thumb)) return;
+    targets.push({ id: it.id, file, thumb });
   });
-  cache = idx.filter((x) => !set.has(x.id));
-  saveIndex();
-  return n;
+  if (!targets.length) return 0;
+  const targetIds = new Set(targets.map((target) => target.id));
+  const next = idx.filter((x) => !targetIds.has(x.id));
+  if (!commitIndex(next, idx)) return 0;
+  targets.forEach(({ file, thumb }) => {
+    try { fs.unlinkSync(file); } catch (_) {}
+    try { if (thumb) fs.unlinkSync(thumb); } catch (_) {}
+  });
+  return targets.length;
 }
 
 function clear() {
   const idx = loadIndex();
+  if (!commitIndex([], idx)) return false;
   idx.forEach((it) => {
-    try { fs.unlinkSync(path.join(imgDir, it.file)); } catch (_) {}
-    try { if (it.thumbFile) fs.unlinkSync(path.join(imgDir, it.thumbFile)); } catch (_) {}
+    const file = imagePath(it.file);
+    const thumb = it.thumbFile ? imagePath(it.thumbFile) : null;
+    try { if (file) fs.unlinkSync(file); } catch (_) {}
+    try { if (thumb) fs.unlinkSync(thumb); } catch (_) {}
   });
-  cache = [];
-  saveIndex();
+  return true;
 }
 
 function filePathOf(id) {
   const idx = loadIndex();
   const it = idx.find((x) => x.id === id);
-  return it ? path.join(imgDir, it.file) : null;
+  return it ? imagePath(it.file) : null;
 }
 
 module.exports = { add, list, get, remove, removeMany, clear, filePathOf, thumbPathOf };

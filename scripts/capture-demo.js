@@ -1,0 +1,606 @@
+#!/usr/bin/env node
+'use strict';
+
+// Generate the public, privacy-safe README demo from the application's real
+// Electron renderer pages. Run with:
+//   ./node_modules/.bin/electron scripts/capture-demo.js
+//
+// This script never starts src/main/main.js. Instead, it loads the production
+// HTML/CSS/JS in isolated hidden windows and supplies an in-memory kkapi bridge.
+// No user config, API key, history file, clipboard content, or desktop pixels
+// are read. HTTP(S) is blocked for every demo window.
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawnSync } = require('child_process');
+const { app, BrowserWindow, session } = require('electron');
+
+const REPO_ROOT = path.resolve(__dirname, '..');
+const RENDERER_ROOT = path.join(REPO_ROOT, 'src', 'renderer');
+const OUTPUT_DIR = path.join(REPO_ROOT, 'docs', 'assets');
+const TEMP_PREFIX = path.join(os.tmpdir(), 'kunkun-shot-demo-');
+const TEMP_ROOT = fs.mkdtempSync(TEMP_PREFIX);
+const STAGE_DIR = path.join(TEMP_ROOT, 'stage');
+const FRAME_DIR = path.join(TEMP_ROOT, 'frames');
+const PRELOAD_PATH = path.join(TEMP_ROOT, 'demo-preload.cjs');
+const VIEWPORT = { width: 1600, height: 1000 };
+
+fs.mkdirSync(STAGE_DIR, { recursive: true, mode: 0o700 });
+fs.mkdirSync(FRAME_DIR, { recursive: true, mode: 0o700 });
+app.setPath('userData', path.join(TEMP_ROOT, 'user-data'));
+app.commandLine.appendSwitch('force-device-scale-factor', '1');
+app.commandLine.appendSwitch('disable-background-networking');
+app.commandLine.appendSwitch('disable-component-update');
+// Keep the capture harness alive while it replaces one hidden renderer window
+// with the next. Electron may otherwise terminate between stages.
+app.on('window-all-closed', () => {});
+
+function escapeXml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&apos;',
+  })[char]);
+}
+
+function demoSvgDataUrl({ accent, accent2, title, subtitle, badge }) {
+  const safe = {
+    accent: escapeXml(accent),
+    accent2: escapeXml(accent2),
+    title: escapeXml(title),
+    subtitle: escapeXml(subtitle),
+    badge: escapeXml(badge),
+  };
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1440 900">
+      <defs>
+        <linearGradient id="wall" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#dce9ff"/>
+          <stop offset="0.52" stop-color="#eef4ff"/>
+          <stop offset="1" stop-color="#dff8ef"/>
+        </linearGradient>
+        <linearGradient id="hero" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="${safe.accent}"/>
+          <stop offset="1" stop-color="${safe.accent2}"/>
+        </linearGradient>
+        <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+          <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#25324a" flood-opacity="0.18"/>
+        </filter>
+      </defs>
+      <rect width="1440" height="900" fill="url(#wall)"/>
+      <circle cx="1250" cy="140" r="220" fill="#ffffff" opacity="0.33"/>
+      <circle cx="120" cy="790" r="260" fill="#ffffff" opacity="0.25"/>
+      <rect x="0" y="0" width="1440" height="34" fill="#f8fbff" opacity="0.95"/>
+      <circle cx="20" cy="17" r="4" fill="#53627a" opacity="0.7"/>
+      <text x="38" y="22" fill="#334155" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13" font-weight="650">Kunkun Shot · Privacy-safe demo desktop</text>
+      <text x="1340" y="22" fill="#64748b" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">DEMO</text>
+
+      <g filter="url(#shadow)">
+        <rect x="118" y="86" width="1204" height="720" rx="24" fill="#f9fbff"/>
+        <rect x="118" y="86" width="1204" height="58" rx="24" fill="#ffffff"/>
+        <rect x="118" y="120" width="1204" height="24" fill="#ffffff"/>
+        <circle cx="151" cy="115" r="7" fill="#ff6b68"/>
+        <circle cx="175" cy="115" r="7" fill="#f7c84b"/>
+        <circle cx="199" cy="115" r="7" fill="#52c96b"/>
+        <text x="234" y="121" fill="#64748b" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14">Demo workspace · synthetic content only</text>
+
+        <rect x="118" y="144" width="236" height="662" fill="#f1f5fb"/>
+        <rect x="146" y="180" width="180" height="44" rx="12" fill="url(#hero)"/>
+        <text x="170" y="208" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" font-weight="700">Overview</text>
+        <text x="170" y="272" fill="#64748b" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14">Captures</text>
+        <text x="170" y="322" fill="#64748b" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14">Annotations</text>
+        <text x="170" y="372" fill="#64748b" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14">AI workspace</text>
+        <rect x="146" y="700" width="180" height="70" rx="14" fill="#ffffff"/>
+        <circle cx="171" cy="727" r="9" fill="#3bb273"/>
+        <text x="190" y="732" fill="#334155" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13" font-weight="650">Local demo mode</text>
+        <text x="164" y="755" fill="#7c8aa0" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">No personal data loaded</text>
+
+        <text x="400" y="210" fill="#14213d" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="34" font-weight="760">${safe.title}</text>
+        <text x="402" y="242" fill="#65758b" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="16">${safe.subtitle}</text>
+        <rect x="1134" y="184" width="142" height="36" rx="18" fill="${safe.accent}" opacity="0.12"/>
+        <circle cx="1157" cy="202" r="6" fill="${safe.accent}"/>
+        <text x="1172" y="207" fill="${safe.accent}" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="700">${safe.badge}</text>
+
+        <rect x="396" y="284" width="260" height="152" rx="18" fill="#ffffff"/>
+        <text x="422" y="321" fill="#738198" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13">CAPTURED TODAY</text>
+        <text x="422" y="375" fill="#17233c" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="44" font-weight="760">24</text>
+        <rect x="542" y="343" width="84" height="42" rx="12" fill="${safe.accent}" opacity="0.12"/>
+        <text x="563" y="370" fill="${safe.accent}" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13" font-weight="700">+18%</text>
+        <text x="422" y="408" fill="#8b98aa" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">Private local workflow</text>
+
+        <rect x="680" y="284" width="278" height="152" rx="18" fill="#ffffff"/>
+        <text x="706" y="321" fill="#738198" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13">READY TO SHARE</text>
+        <text x="706" y="375" fill="#17233c" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="44" font-weight="760">100%</text>
+        <rect x="706" y="398" width="216" height="8" rx="4" fill="#e7edf6"/>
+        <rect x="706" y="398" width="216" height="8" rx="4" fill="url(#hero)"/>
+
+        <rect x="982" y="284" width="294" height="152" rx="18" fill="url(#hero)"/>
+        <text x="1008" y="321" fill="#ffffff" opacity="0.76" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13">NEXT ACTION</text>
+        <text x="1008" y="359" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="20" font-weight="720">Capture → Annotate</text>
+        <text x="1008" y="390" fill="#ffffff" opacity="0.84" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13">Then ask AI when you choose.</text>
+
+        <rect x="396" y="466" width="562" height="294" rx="18" fill="#ffffff"/>
+        <text x="422" y="505" fill="#17233c" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="16" font-weight="720">Capture activity</text>
+        <text x="422" y="529" fill="#8b98aa" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">Synthetic values for the public demo</text>
+        <path d="M430 700 C500 660 540 685 605 620 C675 550 730 630 790 570 C840 520 885 560 924 520" fill="none" stroke="${safe.accent}" stroke-width="8" stroke-linecap="round"/>
+        <path d="M430 700 C500 660 540 685 605 620 C675 550 730 630 790 570 C840 520 885 560 924 520 L924 724 L430 724 Z" fill="${safe.accent}" opacity="0.10"/>
+        <line x1="430" y1="724" x2="924" y2="724" stroke="#dbe3ef"/>
+
+        <rect x="982" y="466" width="294" height="294" rx="18" fill="#ffffff"/>
+        <text x="1008" y="505" fill="#17233c" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="16" font-weight="720">Demo checklist</text>
+        <g font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" fill="#334155">
+          <circle cx="1020" cy="550" r="10" fill="#3bb273"/><path d="M1015 550l4 4 7-9" fill="none" stroke="#fff" stroke-width="2"/>
+          <text x="1042" y="555">Select a region</text>
+          <circle cx="1020" cy="596" r="10" fill="#3bb273"/><path d="M1015 596l4 4 7-9" fill="none" stroke="#fff" stroke-width="2"/>
+          <text x="1042" y="601">Add an annotation</text>
+          <circle cx="1020" cy="642" r="10" fill="#3bb273"/><path d="M1015 642l4 4 7-9" fill="none" stroke="#fff" stroke-width="2"/>
+          <text x="1042" y="647">Review with AI</text>
+          <circle cx="1020" cy="688" r="10" fill="#3bb273"/><path d="M1015 688l4 4 7-9" fill="none" stroke="#fff" stroke-width="2"/>
+          <text x="1042" y="693">Share safely</text>
+        </g>
+      </g>
+    </svg>`;
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+}
+
+const DEMO_IMAGES = [
+  demoSvgDataUrl({
+    accent: '#2563eb',
+    accent2: '#7c3aed',
+    title: 'Capture clearly. Share safely.',
+    subtitle: 'A synthetic workspace made only for this open-source demo.',
+    badge: 'READY',
+  }),
+  demoSvgDataUrl({
+    accent: '#0f9f88',
+    accent2: '#2563eb',
+    title: 'A clean annotation workflow',
+    subtitle: 'Every visible value is generated locally for documentation.',
+    badge: 'LOCAL',
+  }),
+  demoSvgDataUrl({
+    accent: '#7c3aed',
+    accent2: '#e0528d',
+    title: 'Optional AI, explicit control',
+    subtitle: 'The public demo makes no network request and uses no real key.',
+    badge: 'OFFLINE',
+  }),
+];
+
+function createPreloadSource() {
+  const images = JSON.stringify(DEMO_IMAGES);
+  return `'use strict';
+const { contextBridge } = require('electron');
+const kindArg = process.argv.find((arg) => arg.indexOf('--kk-demo-kind=') === 0) || '--kk-demo-kind=main';
+const kind = kindArg.slice('--kk-demo-kind='.length);
+const images = ${images};
+const listeners = { stream: [], history: [], nav: [] };
+const config = {
+  shortcuts: {
+    capture: 'CommandOrControl+Shift+A',
+    pinClipboard: 'CommandOrControl+Shift+P',
+    pinRestore: 'CommandOrControl+3',
+    record: 'CommandOrControl+Shift+R',
+    longShot: 'CommandOrControl+Shift+L',
+    ocr: 'CommandOrControl+Shift+O',
+    translate: 'CommandOrControl+Shift+T'
+  },
+  ai: { provider: 'deepseek' },
+  deepseek: {
+    apiKey: 'PUBLIC_DEMO_PLACEHOLDER',
+    askImagePrompt: '请简洁说明这张演示截图中的内容。',
+    translatePrompt: '请翻译下面的文字。',
+    polishPrompt: '请润色下面的文字。'
+  },
+  minimax: { apiKey: '' },
+  openai: { apiKey: '' },
+  builtinKeys: { cancel: 'Escape', confirm: 'Enter', toolSelect: 'v', pickColor: 'c', histPrev: '<', histNext: '>', rectPrev: 'r' },
+  capture: { copyAfterCapture: true, autoPin: false, autoSaveHistory: true },
+  recording: { fps: 12, toGif: true },
+  general: { theme: 'light', launchAtLogin: false, openMainAtLaunch: true, saveDir: '' },
+  ocr: { engine: 'local', lang: 'chi_sim+eng' },
+  translate: { target: '中文' }
+};
+const history = [
+  { id: 'demo-1', time: '2026-08-24T09:30:00.000Z', width: 1600, height: 1000, type: '区域截图', thumb: images[0] },
+  { id: 'demo-2', time: '2026-08-24T09:18:00.000Z', width: 1280, height: 800, type: '窗口截图', thumb: images[1] },
+  { id: 'demo-3', time: '2026-08-24T09:05:00.000Z', width: 1600, height: 1000, type: '全屏截图', thumb: images[2] }
+];
+function clone(value) { return JSON.parse(JSON.stringify(value)); }
+function subscribe(bucket, cb) {
+  listeners[bucket].push(cb);
+  return () => { const i = listeners[bucket].indexOf(cb); if (i >= 0) listeners[bucket].splice(i, 1); };
+}
+function emitStream(streamId, chunks) {
+  let delay = 120;
+  chunks.forEach((chunk) => {
+    setTimeout(() => listeners.stream.slice().forEach((cb) => cb({ streamId, delta: chunk })), delay);
+    delay += 125;
+  });
+  setTimeout(() => listeners.stream.slice().forEach((cb) => cb({ streamId, done: true })), delay + 40);
+}
+const api = {
+  uid: () => 'demo-' + Date.now() + '-' + Math.floor(Math.random() * 10000),
+  getConfig: async () => clone(config),
+  setConfig: async () => clone(config),
+  onInit: (cb) => {
+    const payload = kind === 'overlay'
+      ? { dataURL: images[0], width: 1600, height: 1000, scaleFactor: 1, displayId: 'public-demo', displayBounds: { x: 0, y: 0, width: 1600, height: 1000 }, mode: 'region' }
+      : { page: kind === 'ai' ? 'ai' : 'capture' };
+    const timer = setTimeout(() => cb(clone(payload)), 0);
+    return () => clearTimeout(timer);
+  },
+  onNav: (cb) => subscribe('nav', cb),
+  onHistoryChanged: (cb) => subscribe('history', cb),
+  onStream: (cb) => subscribe('stream', cb),
+  historyList: async () => clone(history),
+  historyGet: async (id) => ({ item: clone(history.find((entry) => entry.id === id) || history[0]), dataURL: images[Math.max(0, history.findIndex((entry) => entry.id === id))] || images[0] }),
+  historyDelete: async () => ({ ok: true }),
+  historyDeleteMany: async () => ({ ok: true }),
+  historyExport: async () => ({ saved: false }),
+  historyExportMany: async () => ({ saved: false }),
+  historyClear: async () => ({ ok: true }),
+  triggerCapture: async () => ({ ok: true }),
+  captureWindow: async () => ({ ok: true }),
+  captureFullscreenNow: async () => ({ ok: true }),
+  captureTimed: async () => ({ ok: true }),
+  captureRegion: async () => images[0],
+  getSources: async () => [],
+  finishCapture: async () => ({ ok: true }),
+  cancelCapture: async () => ({ ok: true }),
+  copyImage: async () => ({ ok: true }),
+  copyText: async () => ({ ok: true }),
+  readClipboardImage: async () => null,
+  saveImage: async () => ({ saved: false }),
+  chooseSaveDir: async () => ({ dir: '' }),
+  createPin: async () => ({ ok: true }),
+  setPinState: async () => ({ ok: true }),
+  onPinCmd: () => () => {},
+  pinStartDrag: async () => ({ ok: true }),
+  runOCR: async () => ({ text: 'Privacy-safe demo\\nCapture → Annotate → Review' }),
+  ocrBoxes: async () => ({ boxes: [] }),
+  axAtPoint: async () => null,
+  translateLines: async () => ({ text: '' }),
+  askImage: async (payload) => {
+    emitStream(payload.streamId, ['这是一个隐私安全的公开演示画布。', '截图工具已经完成选区和标注，', '你可以继续使用 OCR、翻译、总结或问图。']);
+    return { ok: true };
+  },
+  chat: async (payload) => {
+    emitStream(payload.streamId, ['演示响应由本地 mock IPC 生成，', '没有发送任何网络请求。']);
+    return { ok: true };
+  },
+  cancelStream: async () => ({ ok: true }),
+  testDeepSeek: async () => ({ ok: true, message: 'Demo only' }),
+  fetchModels: async () => ({ ok: true, models: [] }),
+  closeTranslatePopup: async () => ({ ok: true }),
+  saveRecording: async () => ({ saved: false }),
+  openExternal: async () => ({ ok: true }),
+  openPath: async () => ({ ok: true }),
+  openMain: async () => ({ ok: true }),
+  togglePopover: async () => ({ ok: true }),
+  hidePopover: async () => ({ ok: true }),
+  openSettings: async () => ({ ok: true }),
+  openAIPanel: async () => ({ ok: true }),
+  closeSelf: async () => ({ ok: true }),
+  minimizeSelf: async () => ({ ok: true }),
+  resizeSelf: async () => ({ ok: true }),
+  moveSelf: async () => ({ ok: true })
+};
+contextBridge.exposeInMainWorld('kkapi', api);
+`;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitFor(win, expression, timeoutMs = 10000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    let ready = false;
+    try {
+      ready = await win.webContents.executeJavaScript(`Boolean(${expression})`, true);
+    } catch (_) {
+      ready = false;
+    }
+    if (ready) return;
+    await delay(80);
+  }
+  throw new Error(`Timed out waiting for renderer condition: ${expression}`);
+}
+
+async function createDemoWindow(kind, relativeHtml, options = {}) {
+  const partition = `kunkun-shot-demo-${kind}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const ses = session.fromPartition(partition, { cache: false });
+  ses.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (_details, callback) => callback({ cancel: true }));
+  const win = new BrowserWindow({
+    width: VIEWPORT.width,
+    height: VIEWPORT.height,
+    useContentSize: true,
+    show: false,
+    frame: options.frame !== false,
+    titleBarStyle: options.frame === false ? undefined : 'hiddenInset',
+    transparent: options.transparent === true,
+    backgroundColor: options.backgroundColor || '#f4f7fc',
+    resizable: false,
+    webPreferences: {
+      preload: PRELOAD_PATH,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      backgroundThrottling: false,
+      partition,
+      additionalArguments: [`--kk-demo-kind=${kind}`],
+    },
+  });
+  const errors = [];
+  win.webContents.on('console-message', (event) => {
+    if (event.level >= 2) errors.push(event.message);
+  });
+  await win.loadFile(path.join(RENDERER_ROOT, relativeHtml));
+  await win.webContents.insertCSS('* { caret-color: transparent !important; }');
+  await delay(160);
+  if (errors.length) throw new Error(`${kind} renderer console errors: ${errors.join(' | ')}`);
+  return win;
+}
+
+async function capture(win, filePath) {
+  await delay(80);
+  const captured = await win.webContents.capturePage({ x: 0, y: 0, width: VIEWPORT.width, height: VIEWPORT.height });
+  const size = captured.getSize();
+  const expectedRatio = VIEWPORT.width / VIEWPORT.height;
+  if (Math.abs(size.width / size.height - expectedRatio) > 0.001 || size.width < VIEWPORT.width || size.height < VIEWPORT.height) {
+    throw new Error(`Unexpected capture size ${size.width}x${size.height} for ${filePath}`);
+  }
+  // capturePage returns device pixels on Retina displays. Normalize public
+  // documentation assets to stable CSS-pixel dimensions on every Mac.
+  const image = size.width === VIEWPORT.width && size.height === VIEWPORT.height
+    ? captured
+    : captured.resize({ width: VIEWPORT.width, height: VIEWPORT.height, quality: 'best' });
+  fs.writeFileSync(filePath, image.toPNG(), { mode: 0o600 });
+}
+
+async function dispatchMouse(win, selector, type, x, y, buttons) {
+  const source = selector ? `document.querySelector(${JSON.stringify(selector)})` : 'document';
+  await win.webContents.executeJavaScript(`(() => {
+    const target = ${source};
+    if (!target) throw new Error('Missing event target');
+    target.dispatchEvent(new MouseEvent(${JSON.stringify(type)}, {
+      bubbles: true,
+      cancelable: true,
+      clientX: ${Number(x)},
+      clientY: ${Number(y)},
+      button: 0,
+      buttons: ${Number(buttons)}
+    }));
+  })()`, true);
+}
+
+async function captureMain(frames) {
+  const win = await createDemoWindow('main', path.join('main', 'main.html'));
+  try {
+    await waitFor(win, `document.querySelector('.cap-stage') && document.querySelectorAll('.cap-thumb img').length === 3`);
+    await waitFor(win, `Array.from(document.images).every((img) => img.complete)`);
+    const out = path.join(STAGE_DIR, 'screenshot-main.png');
+    await capture(win, out);
+    const frame = path.join(FRAME_DIR, '01-main.png');
+    fs.copyFileSync(out, frame);
+    frames.push({ path: frame, duration: 1.8 });
+
+    await win.webContents.executeJavaScript(`(() => {
+      const stage = document.querySelector('.cap-stage');
+      stage.focus();
+      stage.style.boxShadow = '0 0 0 4px rgba(37,99,235,.18), 0 24px 60px rgba(37,99,235,.22)';
+    })()`, true);
+    const focused = path.join(FRAME_DIR, '02-main-focused.png');
+    await capture(win, focused);
+    frames.push({ path: focused, duration: 0.75 });
+  } finally {
+    win.destroy();
+  }
+}
+
+async function captureOverlay(frames) {
+  const win = await createDemoWindow('overlay', path.join('overlay', 'overlay.html'), {
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+  });
+  try {
+    await waitFor(win, `document.getElementById('bgCanvas') && document.getElementById('bgCanvas').width === 1600`);
+    const empty = path.join(FRAME_DIR, '03-overlay-empty.png');
+    await capture(win, empty);
+    frames.push({ path: empty, duration: 0.55 });
+
+    const start = { x: 360, y: 165 };
+    const points = [
+      { x: 560, y: 300 },
+      { x: 790, y: 435 },
+      { x: 1010, y: 570 },
+      { x: 1320, y: 735 },
+    ];
+    await dispatchMouse(win, null, 'mousedown', start.x, start.y, 1);
+    for (let i = 0; i < points.length; i += 1) {
+      await dispatchMouse(win, null, 'mousemove', points[i].x, points[i].y, 1);
+      const frame = path.join(FRAME_DIR, `0${4 + i}-overlay-drag.png`);
+      await capture(win, frame);
+      frames.push({ path: frame, duration: i === points.length - 1 ? 0.35 : 0.2 });
+    }
+    const end = points[points.length - 1];
+    await dispatchMouse(win, null, 'mouseup', end.x, end.y, 0);
+    await waitFor(win, `!document.getElementById('toolbar').hidden`);
+    const selected = path.join(FRAME_DIR, '08-overlay-selected.png');
+    await capture(win, selected);
+    frames.push({ path: selected, duration: 0.85 });
+
+    await win.webContents.executeJavaScript(`document.querySelector('[data-tool="rect"]').click()`, true);
+    await dispatchMouse(win, '#annoCanvas', 'mousedown', 520, 318, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mousemove', 805, 480, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mouseup', 805, 480, 0);
+
+    await win.webContents.executeJavaScript(`document.querySelector('[data-tool="arrow"]').click()`, true);
+    await dispatchMouse(win, '#annoCanvas', 'mousedown', 690, 555, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mousemove', 1010, 365, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mouseup', 1010, 365, 0);
+
+    const out = path.join(STAGE_DIR, 'screenshot-overlay.png');
+    await capture(win, out);
+    const annotated = path.join(FRAME_DIR, '09-overlay-annotated.png');
+    fs.copyFileSync(out, annotated);
+    frames.push({ path: annotated, duration: 1.8 });
+  } finally {
+    win.destroy();
+  }
+}
+
+async function captureAi(frames) {
+  const win = await createDemoWindow('ai', path.join('main', 'main.html'));
+  try {
+    await waitFor(win, `document.querySelector('.kk-ai-root') && document.querySelector('.kk-ai-preview-img')`);
+    await waitFor(win, `document.querySelector('.kk-ai-preview-img').complete`);
+    await win.webContents.executeJavaScript(`(() => {
+      const left = document.querySelector('.kk-ai-left-toggle');
+      const mid = document.querySelector('.kk-ai-mid-toggle');
+      if (left) left.click();
+      if (mid) mid.click();
+    })()`, true);
+    await delay(120);
+    const ready = path.join(FRAME_DIR, '10-ai-ready.png');
+    await capture(win, ready);
+    frames.push({ path: ready, duration: 0.9 });
+
+    await win.webContents.executeJavaScript(`document.querySelector('.kk-ai-chips .chip').click()`, true);
+    await waitFor(win, `document.body.innerText.includes('你可以继续使用 OCR') && !document.querySelector('.kk-ai-cursor')`);
+    const out = path.join(STAGE_DIR, 'screenshot-ai.png');
+    await capture(win, out);
+    const answered = path.join(FRAME_DIR, '11-ai-response.png');
+    fs.copyFileSync(out, answered);
+    frames.push({ path: answered, duration: 2.4 });
+  } finally {
+    win.destroy();
+  }
+}
+
+function quoteConcatPath(filePath) {
+  return `'${filePath.replace(/'/g, "'\\''")}'`;
+}
+
+function createGif(frames) {
+  const concatPath = path.join(TEMP_ROOT, 'frames.txt');
+  const lines = [];
+  for (const frame of frames) {
+    lines.push(`file ${quoteConcatPath(frame.path)}`);
+    lines.push(`duration ${frame.duration}`);
+  }
+  lines.push(`file ${quoteConcatPath(frames[frames.length - 1].path)}`);
+  fs.writeFileSync(concatPath, `${lines.join('\n')}\n`, { mode: 0o600 });
+
+  const ffmpeg = require('ffmpeg-static');
+  if (!ffmpeg || !fs.existsSync(ffmpeg)) throw new Error('ffmpeg-static binary is unavailable');
+  const gifPath = path.join(STAGE_DIR, 'demo.gif');
+  const filter = [
+    'fps=10',
+    'scale=960:600:force_original_aspect_ratio=decrease:flags=lanczos',
+    'pad=960:600:(ow-iw)/2:(oh-ih)/2:color=0xeff4fb',
+    'split[s0][s1]',
+    '[s0]palettegen=max_colors=192:stats_mode=diff[p]',
+    '[s1][p]paletteuse=dither=sierra2_4a:diff_mode=rectangle',
+  ].join(',');
+  const result = spawnSync(ffmpeg, [
+    '-hide_banner',
+    '-loglevel', 'error',
+    '-y',
+    '-f', 'concat',
+    '-safe', '0',
+    '-i', concatPath,
+    '-vf', filter,
+    '-loop', '0',
+    gifPath,
+  ], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(`FFmpeg failed (${result.status}): ${result.stderr || result.stdout}`);
+  }
+  return gifPath;
+}
+
+function pngDimensions(buffer) {
+  if (buffer.length < 24 || buffer.toString('ascii', 1, 4) !== 'PNG') throw new Error('Invalid PNG output');
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
+function gifDimensions(buffer) {
+  if (buffer.length < 10 || !/^GIF8[79]a$/.test(buffer.toString('ascii', 0, 6))) throw new Error('Invalid GIF output');
+  return { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) };
+}
+
+function validateAndPublish(gifPath) {
+  const staged = [
+    path.join(STAGE_DIR, 'screenshot-main.png'),
+    path.join(STAGE_DIR, 'screenshot-overlay.png'),
+    path.join(STAGE_DIR, 'screenshot-ai.png'),
+    gifPath,
+  ];
+  const forbidden = [/sk-[A-Za-z0-9_-]{12,}/g, /Bearer\s+[A-Za-z0-9._-]{12,}/gi, /api[_ -]?key\s*[:=]\s*[A-Za-z0-9._-]{8,}/gi];
+  const report = [];
+  for (const filePath of staged) {
+    const data = fs.readFileSync(filePath);
+    if (data.length < 20_000) throw new Error(`Generated asset is unexpectedly small: ${filePath}`);
+    const name = path.basename(filePath);
+    const dims = name.endsWith('.png') ? pngDimensions(data) : gifDimensions(data);
+    if (name.endsWith('.png') && (dims.width !== VIEWPORT.width || dims.height !== VIEWPORT.height)) {
+      throw new Error(`${name} has unexpected dimensions ${dims.width}x${dims.height}`);
+    }
+    if (name.endsWith('.gif') && (dims.width !== 960 || dims.height !== 600)) {
+      throw new Error(`${name} has unexpected dimensions ${dims.width}x${dims.height}`);
+    }
+    const latin = data.toString('latin1');
+    for (const pattern of forbidden) {
+      pattern.lastIndex = 0;
+      if (pattern.test(latin)) throw new Error(`Potential credential pattern found in ${name}`);
+    }
+    report.push(`${name}: ${dims.width}x${dims.height}, ${Math.round(data.length / 1024)} KiB`);
+  }
+  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  for (const stagedPath of staged) {
+    const destination = path.join(OUTPUT_DIR, path.basename(stagedPath));
+    fs.copyFileSync(stagedPath, destination);
+    fs.chmodSync(destination, 0o644);
+  }
+  return report;
+}
+
+function cleanupTemp() {
+  const resolvedTemp = path.resolve(TEMP_ROOT);
+  const resolvedOsTemp = path.resolve(os.tmpdir());
+  const expectedPrefix = `${resolvedOsTemp}${path.sep}kunkun-shot-demo-`;
+  if (!resolvedTemp.startsWith(expectedPrefix)) {
+    throw new Error(`Refusing to clean unexpected temporary path: ${resolvedTemp}`);
+  }
+  fs.rmSync(resolvedTemp, { recursive: true, force: true });
+}
+
+async function main() {
+  fs.writeFileSync(PRELOAD_PATH, createPreloadSource(), { mode: 0o600 });
+  await app.whenReady();
+  const frames = [];
+  await captureMain(frames);
+  await captureOverlay(frames);
+  await captureAi(frames);
+  const gifPath = createGif(frames);
+  const report = validateAndPublish(gifPath);
+  process.stdout.write(`Generated privacy-safe renderer demo assets:\n${report.map((line) => `- ${line}`).join('\n')}\n`);
+}
+
+main()
+  .then(() => {
+    cleanupTemp();
+    app.quit();
+  })
+  .catch((error) => {
+    process.stderr.write(`${error && error.stack ? error.stack : error}\n`);
+    try { cleanupTemp(); } catch (cleanupError) { process.stderr.write(`${cleanupError}\n`); }
+    app.exit(1);
+  });

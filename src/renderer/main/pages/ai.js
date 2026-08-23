@@ -870,9 +870,7 @@
       } catch (e) {
         R.config = null;
       }
-      // 若未配 API Key，先给一条提示（不阻断浏览图片）。
-      // 按当前 provider 校验对应服务商的 Key，而非一律查 DeepSeek——否则用 MiniMax/OpenAI 的
-      // 用户即使配好了 Key 也会被误报「未配置 DeepSeek Key」。
+      // 若未配当前路由必需的 API Key，先给一条提示（不阻断浏览图片）。
       const cfg = R.config || {};
       const provider = (cfg.ai && cfg.ai.provider) || 'deepseek';
       const KEY_OF = {
@@ -880,13 +878,14 @@
         minimax: { key: (cfg.minimax || {}).apiKey, label: 'MiniMax' },
         openai: { key: (cfg.openai || {}).apiKey, label: '所选 AI 服务商' },
       };
-      // auto（智能分流）：文本走 openai(若配)否则 deepseek，看图走 minimax。
-      // 只要三家里有任一 Key 就认为可用，全空才提示。
       let missing = null;
       if (provider === 'auto') {
-        const anyKey =
-          (cfg.deepseek || {}).apiKey || (cfg.minimax || {}).apiKey || (cfg.openai || {}).apiKey;
-        if (!anyKey) missing = 'AI';
+        const required = [];
+        if (!(cfg.deepseek || {}).apiKey) required.push('DeepSeek（文本）');
+        if (!(cfg.minimax || {}).apiKey) required.push('MiniMax（看图）');
+        if (required.length) {
+          showError('“智能分流”采用固定路由，当前缺少 ' + required.join('、') + ' API Key。对应任务会明确停止，不会改投其他服务商。');
+        }
       } else {
         const ent = KEY_OF[provider] || KEY_OF.deepseek;
         if (!ent.key) missing = ent.label;

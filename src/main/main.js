@@ -28,18 +28,48 @@ const ocr = require('./ocr');
 const media = require('./media');
 const windows = require('./windows');
 const history = require('./history');
+const tempFiles = require('./temp-files');
+const pasteboardPreserver = require('./pasteboard-preserver');
+const {
+  requireImageDataURL,
+  normalizeCaptureRect,
+  normalizePinBounds,
+  normalizeWindowResize,
+  normalizeWindowMove,
+  normalizeTranslationRequest,
+  normalizeStreamId,
+  normalizeChatRequest,
+  normalizeProviderBaseUrl,
+  normalizeConfigPatch,
+  normalizePinStateFlags,
+  normalizeProviderTestTarget,
+  normalizeRecordingPayload,
+} = require('./ipc-validation');
 const { spawn } = require('child_process');
 const axprobe = require('./axprobe');
 const os = require('os');
-const { pathToFileURL } = require('url');
+const { pathToFileURL, fileURLToPath } = require('url');
 
 // 自定义协议 kkthumb://<id> 专供历史缩略图：让渲染层 <img> 按需加载磁盘缩略图文件，
 // 而非把每张 base64 内联进 DOM（历史攒到成百上千条时内联会导致主进程同步读盘 + 跨进程序列化 +
 // 渲染层常驻大量大字符串）。须在 app ready 前声明为特权 scheme（standard + secure），
 // 否则 file:// 页面因同源策略无法加载它。
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'kkthumb', privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true } },
+  { scheme: 'kkthumb', privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ]);
+
+// 自动化/冒烟测试必须与真实用户配置、历史和 API Key 完全隔离。该环境变量只由本地测试脚本设置，
+// 并且要在任何模块首次调用 app.getPath('userData') 前生效。
+let ownedSmokeUserData = null;
+if (process.env.KK_TEST_USER_DATA_DIR || process.env.KK_SMOKE) {
+  const isolatedUserData = process.env.KK_TEST_USER_DATA_DIR
+    ? path.resolve(process.env.KK_TEST_USER_DATA_DIR)
+    : fs.mkdtempSync(path.join(os.tmpdir(), 'kkshot-smoke-'));
+  if (!process.env.KK_TEST_USER_DATA_DIR) ownedSmokeUserData = isolatedUserData;
+  fs.mkdirSync(isolatedUserData, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(isolatedUserData, 0o700); } catch (_) {}
+  app.setPath('userData', isolatedUserData);
+}
 
 // 进行中的流式请求：streamId -> AbortController，供「主动取消」与「窗口销毁自动中止」使用。
 const streamAborts = new Map();
@@ -47,13 +77,19 @@ const streamAborts = new Map();
 // 包装一次流式请求：登记 AbortController，发起方窗口销毁时自动中止，结束后清理登记。
 async function streamWithAbort(streamId, sender, opts, send) {
   const ac = new AbortController();
-  if (streamId) streamAborts.set(streamId, ac);
+  const streamKey = streamId ? `${sender.id}:${streamId}` : null;
+  if (streamKey) {
+    const previous = streamAborts.get(streamKey);
+    if (previous && previous.controller) previous.controller.abort();
+    streamAborts.set(streamKey, { controller: ac, senderId: sender.id });
+  }
   const onGone = () => ac.abort();
   try { sender.once('destroyed', onGone); } catch (_) {}
   try {
     await deepseek.streamChat({ ...opts, signal: ac.signal }, send);
   } finally {
-    if (streamId) streamAborts.delete(streamId);
+    const current = streamKey && streamAborts.get(streamKey);
+    if (current && current.controller === ac) streamAborts.delete(streamKey);
     try { sender.removeListener('destroyed', onGone); } catch (_) {}
   }
 }
@@ -94,7 +130,7 @@ function checkScreenPermission(promptIfDenied) {
 function saveToHistory(dataURL, type) {
   try {
     const item = history.add(dataURL, type);
-    windows.broadcast(C.HISTORY_CHANGED);
+    if (item) windows.broadcast(C.HISTORY_CHANGED);
     return item;
   } catch (e) {
     console.error('[history] 保存失败：', e.message);
@@ -110,81 +146,157 @@ function autoSaveToHistory(dataURL, type) {
   return saveToHistory(dataURL, type);
 }
 
-// 通用 OpenAI 兼容服务商（硅基流动/通义千问/Kimi/自定义）作为「纯文本」provider 返回。
-// 看图能力它没有（vision:false），故仅用于文本任务；未配 Key 返回 null 让调用方回退。
-function openaiTextProvider() {
-  const o = (config.get().openai) || {};
-  if (!o.apiKey || !o.baseUrl) return null;
-  return {
-    name: 'openai',
-    baseUrl: o.baseUrl,
-    apiKey: o.apiKey,
-    textModel: o.model,
-    visionModel: o.model,
-    vision: false,
-    downgraded: false,
-  };
+// 通用 OpenAI 兼容服务商是纯文本 provider。看图任务仍可选择它：图片只在本地 OCR，
+// 随后把识别文字发给这个已选端点；绝不能因它不支持图片而改投残留的 DeepSeek 配置。
+function openaiTextProvider(cfg, routeMode) {
+  return requireConfiguredProvider(cfg || config.get(), 'openai', routeMode || 'explicit');
 }
 
-// 当前生效的 AI 提供方。四种模式：
-//   deepseek = 全用 DeepSeek（看图走本地 OCR）
-//   minimax  = 全用 MiniMax-M3（可直接看图）
-//   openai   = 通用 OpenAI 兼容（硅基流动/通义千问/Kimi/自定义），纯文本；看图任务自动退回本地 OCR
-//   auto     = 智能分流（省钱）：纯文本走「openai(若配) 否则 DeepSeek」，看图任务走 MiniMax
-// needVision 标记本次任务是否需要「看图」，仅在 auto 模式下影响路由。
-function aiProvider(needVision) {
-  const cfg = config.get();
-  const mode = (cfg.ai && cfg.ai.provider) || 'deepseek';
-  const m = cfg.minimax || {};
-  let which;
-  // 「智能分流」想看图但没配 MiniMax Key → 被迫降级为文本+本地OCR，标记出来好在调用处提示用户。
-  let downgraded = false;
-  if (mode === 'auto') {
-    // 看图且 MiniMax 已配 Key → MiniMax；否则走文本 provider（文本/本地 OCR）
-    if (needVision && m.apiKey) {
-      which = 'minimax';
-    } else {
-      which = 'text'; // 文本路由：优先 openai，其次 deepseek
-      downgraded = needVision && !m.apiKey;
-    }
-  } else if (mode === 'minimax') {
-    which = 'minimax';
-  } else if (mode === 'openai') {
-    // 显式选了通用服务商：文本任务用它；看图任务它做不到 → 退回 DeepSeek 本地 OCR 并标记
-    if (needVision) { which = 'deepseek'; downgraded = true; }
-    else { which = 'openai'; }
-  } else {
-    which = 'deepseek';
-  }
-  if (which === 'minimax') {
-    return {
-      name: 'minimax',
-      baseUrl: m.baseUrl,
-      apiKey: m.apiKey,
-      textModel: m.textModel || m.visionModel,
-      visionModel: m.visionModel || m.textModel,
+const AI_PROVIDER_LABELS = {
+  deepseek: 'DeepSeek',
+  minimax: 'MiniMax',
+  openai: 'OpenAI 兼容服务商',
+};
+
+function requireConfiguredProvider(cfg, name, routeMode) {
+  const source = (cfg && cfg[name]) || {};
+  let provider;
+  if (name === 'minimax') {
+    provider = {
+      name,
+      baseUrl: source.baseUrl,
+      apiKey: source.apiKey,
+      textModel: source.textModel || source.visionModel,
+      visionModel: source.visionModel || source.textModel,
       vision: true,
-      downgraded: false,
+    };
+  } else if (name === 'openai') {
+    provider = {
+      name,
+      baseUrl: source.baseUrl,
+      apiKey: source.apiKey,
+      textModel: source.model,
+      visionModel: source.model,
+      vision: false,
+    };
+  } else {
+    provider = {
+      name: 'deepseek',
+      baseUrl: source.baseUrl,
+      apiKey: source.apiKey,
+      textModel: source.textModel,
+      visionModel: source.visionModel,
+      vision: false,
     };
   }
-  if (which === 'text' || which === 'openai') {
-    const oa = openaiTextProvider();
-    if (oa) { oa.downgraded = downgraded; return oa; }
-    // openai 显式选中却没配好 → 落到 DeepSeek 兜底（避免直接无 Key 报错）
+
+  const missing = [];
+  if (!provider.apiKey) missing.push('API Key');
+  if (!provider.baseUrl) missing.push('Base URL');
+  if (!provider.textModel) missing.push('文本模型');
+  if (provider.vision && !provider.visionModel) missing.push('视觉模型');
+  if (missing.length) {
+    const label = AI_PROVIDER_LABELS[name] || name;
+    const prefix = routeMode === 'auto'
+      ? `智能分流要求本次任务使用 ${label}`
+      : `当前已选择 ${label}`;
+    throw new Error(`${prefix}，但未配置${missing.join('、')}；请求已停止，不会回退到其他服务商。`);
   }
-  const d = cfg.deepseek || {};
-  return {
-    name: 'deepseek',
-    baseUrl: d.baseUrl,
-    apiKey: d.apiKey,
-    textModel: d.textModel,
-    visionModel: d.visionModel,
-    vision: false,
-    downgraded,
-  };
+  return provider;
+}
+
+// 路由是用户选择的确定性映射，不以“哪家还残留着 Key”作为条件：
+//   deepseek = 所有任务都留在 DeepSeek；图片先本地 OCR
+//   minimax  = 所有任务都留在 MiniMax；图片可直接发送
+//   openai   = 所有任务都留在所选 OpenAI 兼容端点；图片先本地 OCR
+//   auto     = 纯文本固定走 DeepSeek，图片固定走 MiniMax
+function chooseTextProvider(cfg) {
+  const mode = (cfg.ai && cfg.ai.provider) || 'deepseek';
+  if (mode === 'auto') return requireConfiguredProvider(cfg, 'deepseek', 'auto');
+  if (mode === 'openai') return openaiTextProvider(cfg, 'explicit');
+  if (mode === 'deepseek' || mode === 'minimax') {
+    return requireConfiguredProvider(cfg, mode, 'explicit');
+  }
+  throw new Error('AI 提供方配置无效，请在设置中重新选择。');
+}
+
+function chooseVisionProvider(cfg) {
+  const mode = (cfg.ai && cfg.ai.provider) || 'deepseek';
+  if (mode === 'auto') return requireConfiguredProvider(cfg, 'minimax', 'auto');
+  if (mode === 'openai') return openaiTextProvider(cfg, 'explicit');
+  if (mode === 'deepseek' || mode === 'minimax') {
+    return requireConfiguredProvider(cfg, mode, 'explicit');
+  }
+  throw new Error('AI 提供方配置无效，请在设置中重新选择。');
+}
+
+function aiProvider(needVision) {
+  const cfg = config.get();
+  return needVision ? chooseVisionProvider(cfg) : chooseTextProvider(cfg);
 }
 
 let tray = null;
+
+// Renderer 按窗口职责分权：即使某个本地页面因将来的 XSS/依赖漏洞被注入，也只能调用
+// 自己正常工作所需的能力。所有 invoke 通道必须显式列出；遗漏即在注册时失败，绝不默认放行。
+const IPC_ROLE_ALLOWLIST = {
+  [C.CONFIG_GET]: ['main', 'overlay', 'ai', 'popover', 'pin'],
+  [C.CONFIG_SET]: ['main', 'popover', 'overlay'],
+
+  [C.WINDOW_CLOSE_SELF]: ['ai', 'longshot', 'pin', 'recorder'],
+  [C.WINDOW_MINIMIZE_SELF]: ['ai'],
+  [C.WINDOW_RESIZE_SELF]: ['pin'],
+  [C.WINDOW_MOVE_SELF]: ['pin'],
+  [C.OPEN_SETTINGS]: ['ai'],
+  [C.OPEN_AI_PANEL]: ['main', 'overlay', 'pin', 'popover'],
+
+  [C.CAPTURE_TRIGGER]: ['main', 'popover'],
+  [C.CAPTURE_REGION]: ['longshot'],
+  [C.CAPTURE_GET_SOURCES]: ['recorder'],
+  [C.OVERLAY_RESULT]: ['overlay'],
+  [C.OVERLAY_CANCEL]: ['overlay', 'recorder'],
+
+  [C.CLIPBOARD_WRITE_IMAGE]: ['main', 'longshot', 'pin'],
+  [C.CLIPBOARD_WRITE_TEXT]: ['main', 'overlay', 'ai', 'pin', 'translate-popup'],
+  [C.CLIPBOARD_READ_IMAGE]: [],
+  [C.IMAGE_SAVE]: ['longshot', 'pin'],
+  [C.CHOOSE_SAVE_DIR]: ['main'],
+
+  [C.PIN_CREATE]: [],
+  [C.PIN_SET_STATE]: ['pin'],
+  [C.PIN_START_DRAG]: ['pin'],
+  [C.OPEN_PATH]: ['pin'],
+
+  [C.OCR_RUN]: ['main', 'overlay', 'ai'],
+  [C.AX_AT_POINT]: ['overlay'],
+  [C.OCR_BOXES]: ['overlay', 'pin'],
+  [C.TRANSLATE_TEXT]: ['overlay'],
+
+  [C.DEEPSEEK_ASK_IMAGE]: ['main', 'overlay', 'ai'],
+  [C.DEEPSEEK_CHAT]: ['main', 'overlay', 'ai'],
+  [C.DEEPSEEK_CANCEL]: ['main', 'overlay', 'ai'],
+  [C.DEEPSEEK_TEST]: ['main'],
+  [C.AI_FETCH_MODELS]: ['main'],
+
+  [C.TRANSLATE_POPUP_CLOSE]: ['translate-popup'],
+  [C.RECORD_SAVE]: ['recorder'],
+  [C.OPEN_EXTERNAL]: ['overlay'],
+
+  [C.OPEN_MAIN]: ['popover'],
+  [C.POPOVER_TOGGLE]: [],
+  [C.POPOVER_HIDE]: ['popover'],
+  [C.CAPTURE_FULLSCREEN_NOW]: ['main', 'popover'],
+  [C.CAPTURE_WINDOW]: ['main', 'popover'],
+  [C.CAPTURE_TIMED]: ['main'],
+
+  [C.HISTORY_LIST]: ['main', 'overlay', 'popover'],
+  [C.HISTORY_GET]: ['main', 'overlay', 'popover'],
+  [C.HISTORY_DELETE]: ['main'],
+  [C.HISTORY_DELETE_MANY]: ['main'],
+  [C.HISTORY_CLEAR]: ['main'],
+  [C.HISTORY_EXPORT]: ['main'],
+  [C.HISTORY_EXPORT_MANY]: ['main'],
+};
 
 // ---------- 屏幕捕获 ----------
 // 抓取光标所在显示器的整屏，返回截图层需要的数据。
@@ -259,7 +371,25 @@ function pinFromClipboard() {
     });
     return;
   }
-  // P1-15：剪贴板没图但有文字 → 文本/颜色贴图（PixPin 式贴图类型之二、三）
+  // Finder 复制文件时通常同时提供 public.file-url 和文本。必须先识别文件 URL，
+  // 否则它会被上面的普通文本分支抢走，最终只生成一张路径文字贴图。
+  try {
+    const buf = clipboard.read('public.file-url');
+    if (buf && buf.length) {
+      const raw = String(buf.toString('utf8') || '').trim();
+      const m = raw.match(/^([^\n\r]+)/);
+
+      if (m) {
+        const fp = fileURLToPath(m[1]);
+        if (fp && fs.existsSync(fp) && fs.statSync(fp).isFile()) {
+          windows.createPin({ file: fp, bounds: { x: point.x, y: point.y, width: 280, height: 120 } });
+          return;
+        }
+      }
+    }
+  } catch (_) {}
+
+  // P1-15：剪贴板没图/文件但有文字 → 文本或颜色贴图（PixPin 式贴图类型之二、三）
   const text = clipboard.readText();
   if (text && text.trim()) {
     const t = text.trim();
@@ -274,23 +404,6 @@ function pinFromClipboard() {
     });
     return;
   }
-  // P1-15 之三：剪贴板里有文件（Finder 里复制文件）→ 文件贴图
-  try {
-    const buf = clipboard.read('public.file-url');
-    if (buf && buf.length) {
-      const raw = String(buf.toString('utf8') || '').trim();
-      const m = raw.match(/^([^\n\r]+)/);
-
-      if (m) {
-        let fp = decodeURIComponent(m[1]);
-        if (fp.startsWith('file://')) fp = decodeURIComponent(fp.slice(7));
-        if (fp && fs.existsSync(fp) && fs.statSync(fp).isFile()) {
-          windows.createPin({ file: fp, bounds: { x: point.x, y: point.y, width: 280, height: 120 } });
-          return;
-        }
-      }
-    }
-  } catch (_) {}
 
   dialog.showMessageBox({ type: 'info', message: '剪贴板里没有图片、文字、颜色或文件', detail: '先复制一张图片、一段文字、一个颜色值或一个文件（Finder 里 Cmd+C），再使用此功能。' });
 }
@@ -310,53 +423,29 @@ function checkAccessibilityPermission(promptIfDenied) {
   }
 }
 
-// 备份当前剪贴板（文本 + 图片），返回一个可用于还原的快照。
-function snapshotClipboard() {
-  let text = '';
-  let image = null;
-  try { text = clipboard.readText(); } catch (_) {}
-  try { const img = clipboard.readImage(); if (img && !img.isEmpty()) image = img; } catch (_) {}
-  return { text, image };
-}
-
-// 用快照还原剪贴板（优先按原本类型还原；都空则清空避免残留选中文字）。
-function restoreClipboard(snap) {
-  try {
-    if (snap && snap.image) { clipboard.writeImage(snap.image); return; }
-    if (snap && typeof snap.text === 'string') { clipboard.writeText(snap.text); return; }
-    clipboard.clear();
-  } catch (_) {}
-}
-
-// 模拟一次 Cmd+C（mac 用 osascript 发 System Events keystroke）。
-function simulateCopy() {
-  return new Promise((resolve) => {
-    if (process.platform !== 'darwin') return resolve(false);
-    const script = 'tell application "System Events" to keystroke "c" using command down';
-    const p = spawn('osascript', ['-e', script]);
-    p.on('error', () => resolve(false));
-    p.on('close', (code) => resolve(code === 0));
-  });
-}
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// 读取「当前选中的文字」：清空剪贴板→模拟 Cmd+C→等系统写入→读回。全程有备份，末尾还原。
+// 读取「当前选中的文字」：完整快照剪贴板→CAS 清空→模拟 Cmd+C→读回→CAS 逐格式还原。
+// 若原生快照不可用则在清空前直接失败；若期间有其它复制写入，changeCount 不再匹配，
+// 恢复会安全跳过，绝不以覆盖用户较新的剪贴板为代价还原旧内容。
 // 返回选中的纯文本（可能为空）。
 async function readSelectedText() {
-  const snap = snapshotClipboard();
+  const session = await pasteboardPreserver.begin();
+  if (!session) return ''; // 快照后剪贴板已被其它来源更新，本轮不再介入
+  let temporaryChangeCount = session.changeCount; // 当前是本轮 CAS 清空产生的代际
   try {
-    // 先清空，便于判断 Cmd+C 是否真的写入了新内容（没选中文字时剪贴板不会变）
-    clipboard.clear();
-    const ok = await simulateCopy();
+    const ok = await pasteboardPreserver.simulateCopy();
     if (!ok) return '';
     // 系统把选中内容写进剪贴板有延迟，Swift 版也等 0.1~0.4s，这里等 180ms 再读
     await sleep(180);
+    // 记录读回时的临时代际。finally 中由原生 helper 再比较一次；此后若用户或其它 App
+    // 写入新内容，代际会变化，旧快照便不会覆盖它。
+    temporaryChangeCount = await pasteboardPreserver.getChangeCount();
     let text = '';
     try { text = clipboard.readText() || ''; } catch (_) {}
     return text.trim();
   } finally {
-    restoreClipboard(snap); // 无论成败都还原用户原本的剪贴板
+    await pasteboardPreserver.restore(session, temporaryChangeCount);
   }
 }
 
@@ -384,7 +473,7 @@ async function triggerGlobalTranslate() {
       dialog.showMessageBox({
         type: 'info',
         message: '需要「辅助功能」权限',
-        detail: '划词翻译要模拟一次「拷贝」来读取你选中的文字。\n请在「系统设置 → 隐私与安全性 → 辅助功能」里勾选「困困截屏助手」，然后重试。',
+        detail: '划词翻译要模拟一次「拷贝」来读取你选中的文字。\n请在「系统设置 → 隐私与安全性 → 辅助功能」里勾选「困困截图工具」，然后重试。',
       });
       releaseBusy();
       return;
@@ -431,7 +520,9 @@ async function triggerGlobalTranslate() {
   } catch (err) {
     // 前置步骤（权限/读字/弹窗）抛错也要释放，否则 busy 永久卡死
     releaseBusy();
-    throw err;
+    const message = (err && err.message) || String(err);
+    console.error('[translate] 划词翻译启动失败：', message);
+    dialog.showErrorBox('划词翻译失败', message);
   }
 }
 
@@ -448,25 +539,61 @@ function doWindowCapture() {
     if (process.platform !== 'darwin') {
       return resolve({ ok: false, error: '交互式窗口截图目前仅支持 macOS' });
     }
-    const tmp = path.join(os.tmpdir(), `kkwin-${Date.now()}.png`);
+    const tmp = tempFiles.createPrivateTempPath('kkshot-window', 'png');
     const p = spawn('screencapture', ['-w', '-x', '-o', tmp]);
-    p.on('error', (e) => resolve({ ok: false, error: e.message }));
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      tempFiles.cleanupTempPath(tmp);
+      resolve(result);
+    };
+    p.on('error', (e) => finish({ ok: false, error: e.message }));
     p.on('close', () => {
       try {
-        if (!fs.existsSync(tmp)) return resolve({ ok: false, error: '已取消' });
+        if (!fs.existsSync(tmp)) return finish({ ok: false, error: '已取消' });
         const dataURL = 'data:image/png;base64,' + fs.readFileSync(tmp).toString('base64');
-        fs.unlinkSync(tmp);
         clipboard.writeImage(nativeImage.createFromDataURL(dataURL));
         const item = autoSaveToHistory(dataURL, 'window');
-        resolve({ ok: true, item });
+        finish({ ok: true, item });
       } catch (err) {
-        resolve({ ok: false, error: err.message });
+        finish({ ok: false, error: err.message });
       }
     });
   });
 }
 
 // ---------- 大图降采样（P2-6/B8）：发送给视觉 API 前压缩，避免超限/烧 token ----------
+function validatedNativeImage(imageDataURL) {
+  requireImageDataURL(imageDataURL);
+  const image = nativeImage.createFromDataURL(imageDataURL);
+  const size = image.getSize();
+  // 限制解码后的尺寸，避免小体积压缩炸弹在主进程分配超大位图。
+  if (
+    image.isEmpty() ||
+    !(size.width > 0) ||
+    !(size.height > 0) ||
+    size.width > 32768 ||
+    size.height > 32768 ||
+    size.width * size.height > 150 * 1024 * 1024
+  ) {
+    throw new Error('图片内容无效或解码后尺寸过大。');
+  }
+  return image;
+}
+
+function normalizeHistoryId(value) {
+  if (typeof value !== 'string' || value.length > 128 || !/^\d{10,20}-[a-f0-9]{6,64}$/i.test(value)) {
+    throw new Error('历史记录标识无效。');
+  }
+  return value;
+}
+
+function normalizeHistoryIds(values) {
+  if (!Array.isArray(values) || values.length > 1000) throw new Error('历史记录列表无效或过长。');
+  return [...new Set(values.map(normalizeHistoryId))];
+}
+
 function downscaleDataURL(dataURL, maxSide) {
   if (!dataURL || maxSide <= 0) return dataURL;
   try {
@@ -500,13 +627,13 @@ async function saveImageWithDialog(dataURL, suggestName) {
   });
   if (canceled || !filePath) return { saved: false };
   const ext = path.extname(filePath || '').toLowerCase();
+  let tmp = null;
   try {
     if (ext === '.jpg' || ext === '.jpeg' || ext === '.webp') {
       // 先写临时 PNG（原始质量），再用 ffmpeg 转目标格式
-      const tmp = path.join(os.tmpdir(), `kkshot-${Date.now()}-${Math.floor(Math.random() * 1e6)}.png`);
+      tmp = tempFiles.createPrivateTempPath('kkshot-image', 'png');
       media.saveImageFile(dataURL, tmp);
       await media.convertImage(tmp, filePath, ext === '.webp' ? ['-quality', '86'] : ['-q:v', '3']);
-      try { fs.unlinkSync(tmp); } catch (_) {}
     } else {
       media.saveImageFile(dataURL, filePath);
     }
@@ -514,6 +641,8 @@ async function saveImageWithDialog(dataURL, suggestName) {
   } catch (err) {
     dialog.showErrorBox('保存图片失败', (err && err.message) || String(err));
     return { saved: false, error: (err && err.message) || String(err) };
+  } finally {
+    if (tmp) tempFiles.cleanupTempPath(tmp);
   }
 }
 
@@ -524,33 +653,24 @@ function registerIpc() {
   if (!ipcMain.__kkGuarded) {
     ipcMain.__kkGuarded = true;
     const origHandle = ipcMain.handle.bind(ipcMain);
-    ipcMain.handle = (channel, listener) =>
-      origHandle(channel, (event, ...args) => {
-        if (!event || !event.sender || !windows.isTrustedSender(event.sender.id)) {
+    ipcMain.handle = (channel, listener) => {
+      if (!Object.prototype.hasOwnProperty.call(IPC_ROLE_ALLOWLIST, channel)) {
+        throw new Error(`IPC 通道缺少角色权限声明：${channel}`);
+      }
+      return origHandle(channel, (event, ...args) => {
+        const allowedRoles = IPC_ROLE_ALLOWLIST[channel];
+        if (!event || !event.sender || !windows.isTrustedSender(event.sender.id, allowedRoles)) {
           return undefined; // invoke 端收到 undefined，静默失败（不抛错、不给信息）
         }
         return listener(event, ...args);
       });
+    };
   }
 
   ipcMain.handle(C.CONFIG_GET, () => config.publicView()); // H2：渲染层只拿掩码视图，Key 不出主进程
-  ipcMain.handle(C.CONFIG_SET, (_e, patch) => {
-    // P1-2(M3)：禁止把 API 端点配成明文 http://（Key 会明文传输）；本机回环地址除外（自建 LLM / Ollama）。
-    const badBase = ['deepseek', 'minimax', 'openai']
-      .map((k) => ({ k, url: patch && patch[k] && typeof patch[k].baseUrl === 'string' ? patch[k].baseUrl.trim() : '' }))
-      .filter((x) => x.url && /^http:\/\//i.test(x.url))
-      .filter(
-        (x) =>
-          !/^http:\/\/localhost([:/]|$)/i.test(x.url) &&
-          !/^http:\/\/127\.0\.0\.1([:/]|$)/i.test(x.url) &&
-          !/^http:\/\/\[?::1\]?([:/]|$)/i.test(x.url)
-      );
-    if (badBase.length) {
-      throw new Error(
-        '「' + badBase[0].k + '」的 Base URL 不允许使用 http:// 明文端点（API Key 会明文传输）。请改用 https://，或本机回环地址（如 http://localhost:11434/v1）。'
-      );
-    }
-    const merged = config.set(patch);
+  ipcMain.handle(C.CONFIG_SET, (e, patch) => {
+    const safePatch = normalizeConfigPatch(patch, windows.getTrustedRole(e.sender.id));
+    const merged = config.set(safePatch);
     registerShortcuts();
     applyLoginItem();
     return merged;
@@ -565,32 +685,40 @@ function registerIpc() {
     if (w && !w.isDestroyed()) w.minimize();
   });
   // 以中心为锚点缩放当前窗口（贴图触控板捏合缩放用）
-  ipcMain.handle(C.WINDOW_RESIZE_SELF, (e, { width, height }) => {
+  ipcMain.handle(C.WINDOW_RESIZE_SELF, (e, payload) => {
     const w = BrowserWindow.fromWebContents(e.sender);
     if (!w || w.isDestroyed()) return;
+    const { width, height } = normalizeWindowResize(payload);
     const b = w.getBounds();
-    const nw = Math.max(48, Math.min(8000, Math.round(width)));
-    const nh = Math.max(48, Math.min(8000, Math.round(height)));
+    const nw = width;
+    const nh = height;
     const cx = b.x + b.width / 2;
     const cy = b.y + b.height / 2;
     w.setBounds({ x: Math.round(cx - nw / 2), y: Math.round(cy - nh / 2), width: nw, height: nh });
     return { width: nw, height: nh }; // 回传实际应用尺寸（含 clamp），供贴图回算真实缩放，避免缩放迟滞
   });
   // 按增量移动当前窗口（贴图 JS 拖动用）
-  ipcMain.handle(C.WINDOW_MOVE_SELF, (e, { dx, dy }) => {
+  ipcMain.handle(C.WINDOW_MOVE_SELF, (e, payload) => {
     const w = BrowserWindow.fromWebContents(e.sender);
     if (!w || w.isDestroyed()) return;
+    const { dx, dy } = normalizeWindowMove(payload);
     const b = w.getBounds();
-    w.setBounds({ x: Math.round(b.x + (dx || 0)), y: Math.round(b.y + (dy || 0)), width: b.width, height: b.height });
+    w.setBounds({ x: Math.round(b.x + dx), y: Math.round(b.y + dy), width: b.width, height: b.height });
   });
   ipcMain.handle(C.OPEN_SETTINGS, () => windows.openSettings());
   ipcMain.handle(C.OPEN_AI_PANEL, (_e, payload) => windows.openAIPanel(payload));
 
-  ipcMain.handle(C.CAPTURE_TRIGGER, (_e, mode) => startCapture(mode));
-  ipcMain.handle(C.CAPTURE_REGION, async (_e, { rect, displayId }) => {
+  ipcMain.handle(C.CAPTURE_TRIGGER, (_e, mode) => {
+    const safeMode = mode == null ? 'region' : mode;
+    if (!['region', 'long', 'record', 'ocr'].includes(safeMode)) throw new Error('截图模式无效。');
+    return startCapture(safeMode);
+  });
+  ipcMain.handle(C.CAPTURE_REGION, async (_e, payload) => {
+    const { rect, displayId } = payload && typeof payload === 'object' ? payload : {};
     const display =
       screen.getAllDisplays().find((d) => String(d.id) === String(displayId)) ||
       screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    const safeRect = normalizeCaptureRect(rect, display.size);
     const sf = display.scaleFactor || 1;
     const sources = await desktopCapturer.getSources({
       types: ['screen'],
@@ -610,10 +738,10 @@ function registerIpc() {
     // 不保护会在 src 为 undefined 时抛 TypeError 静默搞挂整个长截图流程，故与 grabDisplay 一致地给出清晰错误。
     if (!src || !src.thumbnail) throw new Error('未获取到屏幕源，请检查「屏幕录制」权限是否开启。');
     const crop = src.thumbnail.crop({
-      x: Math.round(rect.x * sf),
-      y: Math.round(rect.y * sf),
-      width: Math.round(rect.width * sf),
-      height: Math.round(rect.height * sf),
+      x: Math.round(safeRect.x * sf),
+      y: Math.round(safeRect.y * sf),
+      width: Math.round(safeRect.width * sf),
+      height: Math.round(safeRect.height * sf),
     });
     return crop.toDataURL();
   });
@@ -625,99 +753,120 @@ function registerIpc() {
   ipcMain.handle(C.OVERLAY_CANCEL, () => windows.closeOverlay());
   ipcMain.handle(C.OVERLAY_RESULT, async (_e, result) => {
     const { action, imageDataURL, bounds, displayId, rect } = result || {};
-    windows.closeOverlay();
-    const cfg = config.get();
     try {
-    let savedToHistory = false; // save 动作是否已真正存盘并入历史，用于避免与下面自动入历史重复
-    switch (action) {
-      case 'copy':
-        clipboard.writeImage(nativeImage.createFromDataURL(imageDataURL));
-        break;
-      case 'save': {
-        const r = await saveImageWithDialog(imageDataURL);
-        if (r && r.saved) { saveToHistory(imageDataURL, 'region'); savedToHistory = true; } // 主动保存到本地 → 入历史
-        break;
+      const cfg = config.get();
+      const allowedActions = new Set(['copy', 'save', 'quickSave', 'pin', 'ocr', 'ask', 'translate', 'record', 'long']);
+      if (!allowedActions.has(action)) throw new Error('未知的截图操作。');
+      const isLiveCapture = action === 'record' || action === 'long';
+      let image = null;
+      let safeBounds = null;
+      let safeRect = null;
+      let displayData = null;
+      if (isLiveCapture) {
+        displayData = boundsToDisplay(displayId);
+        safeRect = normalizeCaptureRect(rect, displayData.size);
+      } else {
+        image = validatedNativeImage(imageDataURL);
+        if (bounds != null) safeBounds = normalizePinBounds(bounds);
       }
-      case 'quickSave': {
-        // 快速保存：免对话框直接存到保存目录，并弹系统通知
-        const dir = cfg.general.saveDir || app.getPath('pictures');
-        const file = path.join(dir, `困困截图-${Date.now()}.png`);
-        try {
+      let savedToHistory = false; // save 动作是否已真正存盘并入历史，用于避免与下面自动入历史重复
+      switch (action) {
+        case 'copy':
+          clipboard.writeImage(image);
+          break;
+        case 'save': {
+          const r = await saveImageWithDialog(imageDataURL);
+          if (!r || r.saved !== true) {
+            return {
+              ok: false,
+              canceled: !r || !r.error,
+              error: r && r.error ? r.error : undefined,
+            };
+          }
+          saveToHistory(imageDataURL, 'region');
+          savedToHistory = true;
+          break;
+        }
+        case 'quickSave': {
+          // 快速保存：免对话框直接存到保存目录，并弹系统通知。
+          // 写盘失败抛给统一错误分支，不确认成功，overlay 会保留并可重试。
+          const dir = cfg.general.saveDir || app.getPath('pictures');
+          const file = path.join(dir, `困困截图-${Date.now()}.png`);
           media.saveImageFile(imageDataURL, file);
           saveToHistory(imageDataURL, 'region');
           savedToHistory = true;
           if (Notification.isSupported()) {
             new Notification({ title: '困困截图', body: '已快速保存：' + file }).show();
           }
-        } catch (err) {
-          console.error('[quick-save] 失败：', err);
-          dialog.showErrorBox('快速保存失败', (err && err.message) || String(err));
+          break;
         }
-        break;
+        case 'pin':
+          windows.createPin({ dataURL: imageDataURL, bounds: safeBounds });
+          break;
+        case 'ocr':
+          windows.openAIPanel({ mode: 'ocr', dataURL: imageDataURL });
+          break;
+        case 'ask':
+          windows.openAIPanel({ mode: 'ask', dataURL: imageDataURL });
+          break;
+        case 'translate':
+          windows.openAIPanel({ mode: 'translateImage', dataURL: imageDataURL });
+          break;
+        case 'record': {
+          const dd = displayData;
+          windows.createRecorder({
+            rect: safeRect,
+            displayBounds: dd.bounds,
+            scaleFactor: dd.scaleFactor,
+            displayId,
+            // 显示器序号：macOS 上 source.display_id 可能为空，录屏端据此按序号兜底匹配，避免录错屏。
+            displayIndex: screen.getAllDisplays().findIndex((d) => String(d.id) === String(displayId)),
+            fps: cfg.recording.fps,
+            toGif: cfg.recording.toGif,
+          });
+          break;
+        }
+        case 'long': {
+          const dd = displayData;
+          windows.createLongShot({
+            rect: safeRect,
+            displayBounds: dd.bounds,
+            scaleFactor: dd.scaleFactor,
+            displayId,
+          });
+          break;
+        }
+        default:
+          break;
       }
-      case 'pin':
-        windows.createPin({ dataURL: imageDataURL, bounds });
-        break;
-      case 'ocr':
-        windows.openAIPanel({ mode: 'ocr', dataURL: imageDataURL });
-        break;
-      case 'ask':
-        windows.openAIPanel({ mode: 'ask', dataURL: imageDataURL });
-        break;
-      case 'translate':
-        windows.openAIPanel({ mode: 'translateImage', dataURL: imageDataURL });
-        break;
-      case 'record': {
-        const dd = boundsToDisplay(displayId);
-        windows.createRecorder({
-          rect,
-          displayBounds: dd.bounds,
-          scaleFactor: dd.scaleFactor,
-          displayId,
-          // 显示器序号：macOS 上 source.display_id 可能为空，录屏端据此按序号兜底匹配，避免录错屏。
-          displayIndex: screen.getAllDisplays().findIndex((d) => String(d.id) === String(displayId)),
-          fps: cfg.recording.fps,
-          toGif: cfg.recording.toGif,
-        });
-        break;
+      if (cfg.capture.copyAfterCapture && imageDataURL && action !== 'copy') {
+        clipboard.writeImage(image);
       }
-      case 'long': {
-        const dd = boundsToDisplay(displayId);
-        windows.createLongShot({
-          rect,
-          displayBounds: dd.bounds,
-          scaleFactor: dd.scaleFactor,
-          displayId,
-        });
-        break;
+      // 自动贴图：截完把图钉到屏幕原位。pin 动作本身即贴图、record/long 无静态图，均跳过。
+      if (cfg.capture.autoPin && imageDataURL && safeBounds && action !== 'pin') {
+        windows.createPin({ dataURL: imageDataURL, bounds: safeBounds });
       }
-      default:
-        break;
-    }
-    if (cfg.capture.copyAfterCapture && imageDataURL && action !== 'copy') {
-      clipboard.writeImage(nativeImage.createFromDataURL(imageDataURL));
-    }
-    // 自动贴图：截完把图钉到屏幕原位。pin 动作本身即贴图、record/long 无静态图，均跳过。
-    if (cfg.capture.autoPin && imageDataURL && bounds && action !== 'pin') {
-      windows.createPin({ dataURL: imageDataURL, bounds });
-    }
-    // 自动入历史（仅当开启「自动保存历史」）。save 动作若已真正存盘入库则跳过避免重复；
-    // 但若 save 对话框被取消(未入库)，开启自动历史时仍应入历史，保持与 copy/ocr/ask 等其它动作一致。
-    if (imageDataURL && !(action === 'save' && savedToHistory)) autoSaveToHistory(imageDataURL, action === 'pin' ? 'pin' : 'region');
+      // 自动入历史（仅当开启「自动保存历史」）。save 成功后已入库，跳过避免重复。
+      if (imageDataURL && !(action === 'save' && savedToHistory)) {
+        autoSaveToHistory(imageDataURL, action === 'pin' ? 'pin' : 'region');
+      }
+      return { ok: true };
     } catch (err) {
-      // 核心动作分发器一旦中途抛错，overlay 已关闭、用户看不到任何反馈（图没了也没保存）。
-      // 显式记录并弹原生错误框，避免静默吞错。
+      // 不确认成功，renderer 会恢复可提交状态并保留选区/标注。
       console.error('[overlay-result] 处理失败:', action, err);
-      try { dialog.showErrorBox('截图处理失败', `「${action || '操作'}」处理时出错：\n${(err && err.message) || err}`); } catch (_) {}
+      const error = (err && err.message) || String(err);
+      try { dialog.showErrorBox('截图处理失败', `「${action || '操作'}」处理时出错：\n${error}`); } catch (_) {}
+      return { ok: false, error };
     }
   });
 
   ipcMain.handle(C.CLIPBOARD_WRITE_IMAGE, (_e, dataURL) => {
-    clipboard.writeImage(nativeImage.createFromDataURL(dataURL));
+    clipboard.writeImage(validatedNativeImage(dataURL));
     return true;
   });
   ipcMain.handle(C.CLIPBOARD_WRITE_TEXT, (_e, text) => {
-    clipboard.writeText(String(text || ''));
+    if (typeof text !== 'string' || text.length > 1024 * 1024) throw new Error('剪贴板文本无效或过长。');
+    clipboard.writeText(text);
     return true;
   });
   ipcMain.handle(C.CLIPBOARD_READ_IMAGE, () => {
@@ -725,6 +874,7 @@ function registerIpc() {
     return img.isEmpty() ? null : img.toDataURL();
   });
   ipcMain.handle(C.IMAGE_SAVE, async (_e, dataURL) => {
+    validatedNativeImage(dataURL);
     const r = await saveImageWithDialog(dataURL);
     if (r && r.saved) saveToHistory(dataURL, 'region'); // 主动保存到本地 → 入历史
     return r;
@@ -744,9 +894,19 @@ function registerIpc() {
     return { dir };
   });
 
-  ipcMain.handle(C.PIN_CREATE, (_e, { dataURL, bounds }) => windows.createPin({ dataURL, bounds }));
+  ipcMain.handle(C.PIN_CREATE, (_e, payload) => {
+    const { dataURL, bounds } = payload && typeof payload === 'object' ? payload : {};
+    validatedNativeImage(dataURL);
+    windows.createPin({ dataURL, bounds: normalizePinBounds(bounds) });
+    return { ok: true };
+  });
   // 贴图窗状态：置顶切换 / 鼠标穿透（作用调用方自己的窗口；主进程按 sender 定位）
   ipcMain.handle(C.PIN_SET_STATE, (e, flags) => {
+    try {
+      flags = normalizePinStateFlags(flags);
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
     const w = BrowserWindow.fromWebContents(e.sender);
     if (!w || w.isDestroyed()) return { ok: false };
     try {
@@ -777,7 +937,9 @@ function registerIpc() {
       axPrompted = true;
       return { error: '需要「辅助功能」权限（系统设置 → 隐私与安全性 → 辅助功能）' };
     }
-    if (!isFinite(Number(x)) || !isFinite(Number(y))) return { error: '坐标无效' };
+    if (!isFinite(Number(x)) || !isFinite(Number(y)) || Math.abs(Number(x)) > 100000 || Math.abs(Number(y)) > 100000) {
+      return { error: '坐标无效' };
+    }
     try {
       const r = await axprobe.probeAtPoint(Number(x), Number(y), 700);
       const f = r && r.frame;
@@ -789,10 +951,16 @@ function registerIpc() {
   });
 
   ipcMain.handle(C.OCR_RUN, async (_e, payload) => {
+    const dataURL = payload && payload.dataURL;
+    validatedNativeImage(dataURL);
     const cfg = config.get();
     const lang = (payload && payload.lang) || cfg.ocr.lang;
     const engine = (payload && payload.engine) || (cfg.ocr && cfg.ocr.engine) || 'local';
-    // 大模型模式：用当前 AI 提供方「看图」识别文字（仅支持视觉的提供方，如 MiniMax-M3）
+    if (typeof lang !== 'string' || lang.length > 128 || !/^[a-z][a-z0-9_]*(?:\+[a-z][a-z0-9_]*){0,4}$/i.test(lang)) {
+      throw new Error('OCR 语言代码无效。');
+    }
+    if (!['local', 'model'].includes(engine)) throw new Error('OCR 引擎无效。');
+    // 大模型模式：严格使用当前选择所映射的视觉提供方；纯文本提供方只在本地 OCR，绝不改投别家。
     if (engine !== 'local') {
       const p = aiProvider(true);
       if (p.vision && p.apiKey) {
@@ -802,7 +970,7 @@ function registerIpc() {
             baseUrl: p.baseUrl,
             apiKey: p.apiKey,
             model: p.visionModel,
-            messages: [deepseek.imageMessage(prompt, downscaleDataURL(payload.dataURL, 2048))],
+            messages: [deepseek.imageMessage(prompt, downscaleDataURL(dataURL, 2048))],
             think: false, // OCR 只要结果，不要思考
           });
           return { text: deepseek.stripThink(text) };
@@ -810,11 +978,11 @@ function registerIpc() {
           return { text: '', error: e.message };
         }
       }
-      // 当前提供方不支持看图（如纯 DeepSeek）→ 落到本地引擎兜底
+      // 当前已选提供方不支持看图（如 DeepSeek / OpenAI 兼容）→ 仅在本地完成 OCR。
     }
     // 本地引擎：tesseract.js（已配 langPath + 缓存预填指向打包内 tessdata，离线读取，不联网）
     try {
-      const text = await ocr.recognize(payload.dataURL, lang);
+      const text = await ocr.recognize(dataURL, lang);
       return { text };
     } catch (e) {
       return { text: '', error: e.message };
@@ -823,19 +991,20 @@ function registerIpc() {
 
   ipcMain.handle(C.OCR_BOXES, async (_e, payload) => {
       try {
+        const dataURL = payload && payload.dataURL;
+        validatedNativeImage(dataURL);
         const m = require('./ocr-boxes');
-        return await m.runOCRBoxes(payload && payload.dataURL);
+        return await m.runOCRBoxes(dataURL);
       } catch (err) {
         return { error: (err && err.message) || String(err) };
       }
     });
     ipcMain.handle(C.TRANSLATE_TEXT, async (_e, payload) => {
       try {
-        const lines = (payload && payload.lines) || [];
-        const target = (payload && payload.target) || '中文';
+        const { lines, target } = normalizeTranslationRequest(payload);
         if (!lines.length) return { lines: [] };
         const p = aiProvider(false);
-        if (!p.apiKey) return { error: '未配置 API Key（请在设置里填 DeepSeek Key）' };
+        if (!p.apiKey) return { error: '当前 AI 提供方未配置 API Key。' };
         const numbered = lines.map((t, i) => (i + 1) + '. ' + String(t).replace(/\n/g, ' ')).join('\n');
         const sys = '你是翻译引擎。把带编号的每一行翻译成' + target + '。严格只输出一个 JSON 数组，每个元素形如 {"i":编号数字,"t":"译文"}，不要解释、不要 markdown、不要反引号。';
         const out = await deepseek.completeText({
@@ -864,8 +1033,14 @@ function registerIpc() {
         return { error: (err && err.message) || String(err) };
       }
     });
-    ipcMain.handle(C.DEEPSEEK_ASK_IMAGE, async (e, { dataURL, prompt, streamId, think }) => {
-    const p = aiProvider(true); // 图片任务：auto 模式下走 MiniMax 看图
+    ipcMain.handle(C.DEEPSEEK_ASK_IMAGE, async (e, payload) => {
+    const dataURL = payload && payload.dataURL;
+    validatedNativeImage(dataURL);
+    const prompt = payload && payload.prompt == null ? '' : payload.prompt;
+    const streamId = normalizeStreamId(payload && payload.streamId);
+    if (typeof prompt !== 'string' || prompt.length > 65536) throw new Error('AI 提示词无效或过长。');
+    const think = !!(payload && payload.think);
+    const p = aiProvider(true); // 图片任务：显式选择不变；auto 固定走 MiniMax
     const sender = e.sender;
     const send = (ev) => {
       if (!sender.isDestroyed()) sender.send(C.DEEPSEEK_STREAM, { streamId, ...ev });
@@ -881,14 +1056,7 @@ function registerIpc() {
       }, send);
       return { ok: true };
     }
-    // 纯文本提供方（DeepSeek 不支持图片）：先本地 OCR 抠字，再把文字发给文本模型
-    // 「智能分流」想看图却没配 MiniMax Key 而被降级时，先告知用户，避免「为何识别变差」的困惑。
-    if (p.downgraded) {
-      send({
-        delta:
-          '（提示：当前为「智能分流」但未配置 MiniMax Key，本次看图已降级为 DeepSeek + 本地 OCR，识别精度可能下降。可到「设置 → AI 模型」填入 MiniMax Key 以直接看图。）\n\n',
-      });
-    }
+    // 已显式选择纯文本提供方（DeepSeek / OpenAI 兼容）：先本地 OCR，再只把文字发给同一提供方。
     let text = '';
     try {
       // 本地 OCR 前也降采样：极大图会拖慢 tesseract 且无精度收益
@@ -916,8 +1084,9 @@ function registerIpc() {
     return { ok: true };
   });
 
-  ipcMain.handle(C.DEEPSEEK_CHAT, async (e, { messages, streamId, model, think }) => {
-    const p = aiProvider(false); // 纯文本任务：auto 模式下走 DeepSeek 省钱
+  ipcMain.handle(C.DEEPSEEK_CHAT, async (e, payload) => {
+    const { messages, streamId, model, think } = normalizeChatRequest(payload);
+    const p = aiProvider(false); // 纯文本任务：显式选择不变；auto 固定走 DeepSeek
     const sender = e.sender;
     const send = (ev) => {
       if (!sender.isDestroyed()) sender.send(C.DEEPSEEK_STREAM, { streamId, ...ev });
@@ -929,14 +1098,20 @@ function registerIpc() {
   });
 
   // 主动取消一条进行中的流（渲染层切流 / 离开 AI 页时调用）。
-  ipcMain.handle(C.DEEPSEEK_CANCEL, (_e, streamId) => {
-    const ac = streamId && streamAborts.get(streamId);
-    if (ac) ac.abort();
+  ipcMain.handle(C.DEEPSEEK_CANCEL, (e, streamId) => {
+    try { streamId = normalizeStreamId(streamId); } catch (_) { return { ok: false }; }
+    const entry = streamAborts.get(`${e.sender.id}:${streamId}`);
+    if (entry) entry.controller.abort();
     return { ok: true };
   });
 
   // which: 'deepseek' | 'minimax' | 'openai'（指定测哪一家，与当前生效模式解耦）。缺省按文本路由。
   ipcMain.handle(C.DEEPSEEK_TEST, async (_e, which) => {
+    try {
+      which = normalizeProviderTestTarget(which);
+    } catch (err) {
+      return { ok: false, message: (err && err.message) || String(err) };
+    }
     const cfg = config.get();
     let p;
     if (which === 'minimax') {
@@ -966,10 +1141,12 @@ function registerIpc() {
 
   // 在线拉取模型清单（GET {baseUrl}/models）。设置页「刷新模型列表」用。
   // H2 配套：渲染层拿不到明文 Key（只有掩码），payload.apiKey 为空时按 baseUrl 匹配主进程里存储的真实 Key。
-  ipcMain.handle(C.AI_FETCH_MODELS, async (_e, { baseUrl, apiKey } = {}) => {
+  ipcMain.handle(C.AI_FETCH_MODELS, async (_e, payload) => {
     try {
-      let url = String(baseUrl || '');
+      const { baseUrl, apiKey } = payload && typeof payload === 'object' ? payload : {};
+      let url = normalizeProviderBaseUrl(baseUrl);
       let key = typeof apiKey === 'string' ? apiKey : '';
+      if (key.length > 16384) throw new Error('API Key 过长。');
       if (!key) {
         const norm = url.replace(/\/+$/, '');
         const cfg = config.get();
@@ -994,65 +1171,71 @@ function registerIpc() {
     return { ok: true };
   });
 
-  ipcMain.handle(C.RECORD_SAVE, async (_e, { buffer, mime, toGif, fps, trimStart, trimEnd }) => {
+  ipcMain.handle(C.RECORD_SAVE, async (_e, payload) => {
+    let normalized;
+    try {
+      normalized = normalizeRecordingPayload(payload);
+    } catch (err) {
+      return { saved: false, error: (err && err.message) || String(err) };
+    }
+    const { buffer, toGif, fps: safeFps, trimStart: ss, trimEnd: te } = normalized;
     // P2-4 剪辑：起止秒（0=不裁）
-    const ss = Math.max(0, Number(trimStart) || 0);
-    const te = Math.max(0, Number(trimEnd) || 0);
     const trimArgs = [];
     if (ss > 0) trimArgs.push('-ss', String(ss));
     if (te > 0 && te > ss) trimArgs.push('-t', String(te - ss));
-    // P1-4(B13)：限制录屏数据大小，防止超长录制或异常 payload 打满内存/磁盘。
-    const byteLen = buffer ? (buffer.byteLength != null ? buffer.byteLength : buffer.length) : 0;
-    const MAX_REC_BYTES = 2 * 1024 * 1024 * 1024; // 2GB 上限（约 12fps webm 数小时的量级，正常录屏远达不到）
-    if (!(byteLen > 0) || byteLen > MAX_REC_BYTES) {
-      return { saved: false, error: '录制数据为空或超过 2GB 上限，无法保存。' };
-    }
     const cfg = config.get();
     const tmp = media.writeTempRecording(buffer, 'webm');
-    const wantGif = toGif !== undefined ? toGif : cfg.recording.toGif;
-    const dir = cfg.general.saveDir || app.getPath('videos') || app.getPath('downloads');
-    const ext = wantGif ? 'gif' : 'webm';
-    const { canceled, filePath } = await dialog.showSaveDialog({
-      title: '保存录屏',
-      defaultPath: path.join(dir, `困困录屏-${Date.now()}.${ext}`),
-      filters: wantGif
-        ? [{ name: 'GIF 动图', extensions: ['gif'] }]
-        : [
-            { name: 'WebM 视频', extensions: ['webm'] },
-            { name: 'MP4 视频（快速转封装，无需重编码）', extensions: ['mp4'] },
-          ],
-    });
-    if (canceled || !filePath) {
-      try { fs.unlinkSync(tmp); } catch (_) {}
-      return { saved: false };
-    }
     try {
-      if (wantGif) {
-        await media.convertToGif(tmp, filePath, fps || cfg.recording.fps, trimArgs);
-      } else if (path.extname(filePath || '').toLowerCase() === '.mp4') {
-        // P2-4：webm → mp4 快速转封装（-c copy 不重编码，秒级完成）
-        await media.convertImage(tmp, filePath, trimArgs.concat(['-c', 'copy', '-movflags', '+faststart']));
-      } else if (trimArgs.length) {
-        await media.convertImage(tmp, filePath, trimArgs.concat(['-c', 'copy']));
-      } else {
-        fs.copyFileSync(tmp, filePath);
+      const wantGif = toGif !== undefined ? !!toGif : !!cfg.recording.toGif;
+      const dir = cfg.general.saveDir || app.getPath('videos') || app.getPath('downloads');
+      const ext = wantGif ? 'gif' : 'webm';
+      const { canceled, filePath } = await dialog.showSaveDialog({
+        title: '保存录屏',
+        defaultPath: path.join(dir, `困困录屏-${Date.now()}.${ext}`),
+        filters: wantGif
+          ? [{ name: 'GIF 动图', extensions: ['gif'] }]
+          : [
+              { name: 'WebM 视频', extensions: ['webm'] },
+              { name: 'MP4 视频（H.264，兼容性更好）', extensions: ['mp4'] },
+            ],
+      });
+      if (canceled || !filePath) return { saved: false };
+      try {
+        if (wantGif) {
+          await media.convertToGif(tmp, filePath, safeFps || cfg.recording.fps, trimArgs);
+        } else if (path.extname(filePath || '').toLowerCase() === '.mp4') {
+          await media.convertToMp4(tmp, filePath, trimArgs);
+        } else if (trimArgs.length) {
+          await media.convertImage(tmp, filePath, trimArgs.concat(['-c', 'copy']));
+        } else {
+          media.copyFileAtomic(tmp, filePath);
+        }
+        return { saved: true, path: filePath };
+      } catch (err) {
+        dialog.showErrorBox('保存录屏失败', err.message);
+        return { saved: false, error: err.message };
       }
-      return { saved: true, path: filePath };
-    } catch (err) {
-      dialog.showErrorBox('保存录屏失败', err.message);
-      return { saved: false, error: err.message };
     } finally {
-      try { fs.unlinkSync(tmp); } catch (_) {}
+      tempFiles.cleanupTempPath(tmp);
     }
   });
 
   // ---- 主窗口 / 菜单栏弹窗 ----
-  // 本地文件打开：绝对路径 + 存在性校验，防任意路径
-  ipcMain.handle(C.OPEN_PATH, (_e, p) => {
-    if (typeof p === 'string' && path.isAbsolute(p) && fs.existsSync(p)) {
-      shell.openPath(p).catch(() => {});
+  // 本地文件打开：请求路径必须正好等于该 sender 所属「文件贴图」的 payload。
+  // 不接受渲染层自行提供的任意绝对路径，避免窗口被注入后借此打开本机文件或应用。
+  ipcMain.handle(C.OPEN_PATH, (e, p) => {
+    const payload = windows.getPinPayload(e.sender.id);
+    if (!payload || typeof payload.file !== 'string' || typeof p !== 'string') return { ok: false };
+    const allowed = path.resolve(payload.file);
+    const requested = path.resolve(p);
+    if (requested !== allowed || !path.isAbsolute(payload.file)) return { ok: false };
+    try {
+      if (!fs.statSync(allowed).isFile()) return { ok: false };
+    } catch (_) {
+      return { ok: false };
     }
-    return true;
+    shell.openPath(allowed).catch(() => {});
+    return { ok: true };
   });
 
   // 贴图拖出：把贴图内容写成临时文件，交给系统拖拽（拖进 Finder/微信/其它 App）
@@ -1062,21 +1245,24 @@ function registerIpc() {
     const payload = windows.getPinPayload(e.sender.id) || {};
     try {
       let file = null;
+      let temporary = false;
       let icon = nativeImage.createEmpty();
       if (payload.dataURL) {
-        file = path.join(os.tmpdir(), `kkshot-drag-${Date.now()}.png`);
-        media.saveImageFile(payload.dataURL, file);
-        icon = nativeImage.createFromDataURL(payload.dataURL).resize({ width: 64, height: 64 });
+        const dragImage = validatedNativeImage(payload.dataURL);
+        file = tempFiles.writePrivateTempFile(media.dataURLToBuffer(payload.dataURL), 'kkshot-drag', 'png');
+        temporary = true;
+        icon = dragImage.resize({ width: 64, height: 64 });
       } else if (payload.text) {
-        file = path.join(os.tmpdir(), `kkshot-drag-${Date.now()}.txt`);
-        fs.writeFileSync(file, payload.text, 'utf-8');
+        file = tempFiles.writePrivateTempFile(Buffer.from(payload.text, 'utf8'), 'kkshot-drag', 'txt');
+        temporary = true;
       } else if (payload.color) {
-        file = path.join(os.tmpdir(), `kkshot-drag-${Date.now()}.txt`);
-        fs.writeFileSync(file, payload.color, 'utf-8');
+        file = tempFiles.writePrivateTempFile(Buffer.from(payload.color, 'utf8'), 'kkshot-drag', 'txt');
+        temporary = true;
       } else if (payload.file) {
         file = payload.file; // 文件贴图：直接拖原文件
       }
       if (file && fs.existsSync(file)) {
+        if (temporary) tempFiles.scheduleCleanup(file, 5 * 60 * 1000);
         e.sender.startDrag({ file, icon });
       }
     } catch (err) {
@@ -1087,10 +1273,15 @@ function registerIpc() {
 
   // 外链打开：只放行 http(s)，其它协议一律拒绝（防 file:// 等被利用）
   ipcMain.handle(C.OPEN_EXTERNAL, (_e, url) => {
-    if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
-      shell.openExternal(url).catch(() => {});
+    if (typeof url !== 'string' || url.length > 4096) return { ok: false };
+    try {
+      const parsed = new URL(url);
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return { ok: false };
+      shell.openExternal(parsed.toString()).catch(() => {});
+      return { ok: true };
+    } catch (_) {
+      return { ok: false };
     }
-    return true;
   });
 
   ipcMain.handle(C.OPEN_MAIN, (_e, page) => {
@@ -1113,8 +1304,10 @@ function registerIpc() {
   });
   ipcMain.handle(C.CAPTURE_WINDOW, () => doWindowCapture());
   ipcMain.handle(C.CAPTURE_TIMED, (_e, payload) => {
-    const delay = Math.min(300, Math.max(0, ((payload && payload.delay) || 0))) * 1000; // P3-2：上限 300s，防 setTimeout 溢出
+    const rawDelay = Number(payload && payload.delay);
+    const delay = Math.min(300, Math.max(0, Number.isFinite(rawDelay) ? rawDelay : 0)) * 1000; // P3-2：上限 300s，防 setTimeout 溢出
     const mode = (payload && payload.mode) || 'region';
+    if (!['region', 'fullscreen'].includes(mode)) throw new Error('定时截图模式无效。');
     setTimeout(() => {
       if (mode === 'fullscreen') {
         grabDisplay()
@@ -1136,40 +1329,41 @@ function registerIpc() {
 
   // ---- 历史记录 ----
   ipcMain.handle(C.HISTORY_LIST, () => history.list());
-  ipcMain.handle(C.HISTORY_GET, (_e, id) => history.get(id));
+  ipcMain.handle(C.HISTORY_GET, (_e, id) => history.get(normalizeHistoryId(id)));
   ipcMain.handle(C.HISTORY_DELETE, (_e, id) => {
-    const ok = history.remove(id);
-    windows.broadcast(C.HISTORY_CHANGED);
+    const ok = history.remove(normalizeHistoryId(id));
+    if (ok) windows.broadcast(C.HISTORY_CHANGED);
     return ok;
   });
   ipcMain.handle(C.HISTORY_DELETE_MANY, (_e, ids) => {
-    const n = history.removeMany(ids);
+    const n = history.removeMany(normalizeHistoryIds(ids));
     if (n) windows.broadcast(C.HISTORY_CHANGED); // 批量删除只广播一次，避免刷新风暴
     return { deleted: n };
   });
   ipcMain.handle(C.HISTORY_CLEAR, () => {
-    history.clear();
-    windows.broadcast(C.HISTORY_CHANGED);
-    return true;
+    const ok = history.clear();
+    if (ok) windows.broadcast(C.HISTORY_CHANGED);
+    return ok;
   });
   ipcMain.handle(C.HISTORY_EXPORT, async (_e, id) => {
-    const got = history.get(id);
+    const got = history.get(normalizeHistoryId(id));
     if (!got) return { saved: false };
     return saveImageWithDialog(got.dataURL, `困困截图-${Date.now()}.png`);
   });
   // 批量导出：只弹一次目录选择框，把所有选中图片写进该目录（避免逐张弹保存框）。
   ipcMain.handle(C.HISTORY_EXPORT_MANY, async (_e, ids) => {
-    if (!Array.isArray(ids) || !ids.length) return { saved: false, count: 0 };
+    const safeIds = normalizeHistoryIds(ids);
+    if (!safeIds.length) return { saved: false, count: 0 };
     const cfg = config.get();
     const { canceled, filePaths } = await dialog.showOpenDialog({
-      title: '选择导出目录（批量导出 ' + ids.length + ' 张）',
+      title: '选择导出目录（批量导出 ' + safeIds.length + ' 张）',
       defaultPath: cfg.general.saveDir || app.getPath('pictures'),
       properties: ['openDirectory', 'createDirectory'],
     });
     if (canceled || !filePaths || !filePaths[0]) return { saved: false, count: 0 };
     const dir = filePaths[0];
     let count = 0;
-    for (const id of ids) {
+    for (const id of safeIds) {
       try {
         const got = history.get(id);
         if (got && got.dataURL) { media.saveImageFile(got.dataURL, path.join(dir, `困困截图-${id}.png`)); count++; }
@@ -1183,7 +1377,7 @@ function boundsToDisplay(displayId) {
   const d =
     screen.getAllDisplays().find((x) => String(x.id) === String(displayId)) ||
     screen.getPrimaryDisplay();
-  return { bounds: d.bounds, scaleFactor: d.scaleFactor || 1 };
+  return { bounds: d.bounds, size: d.size, scaleFactor: d.scaleFactor || 1 };
 }
 
 // ---------- 贴图鼠标穿透兜底（穿透后窗口收不到键盘，用临时全局快捷键恢复）----------
@@ -1308,7 +1502,7 @@ function buildTray() {
   }
   tray = new Tray(icon);
   if (icon.isEmpty()) tray.setTitle('📸');
-  tray.setToolTip('困困截屏助手');
+  tray.setToolTip('困困截图工具');
   // 左键：切换菜单栏弹窗
   tray.on('click', () => windows.togglePopover(tray.getBounds()));
   // 右键：原生菜单兜底
@@ -1342,7 +1536,7 @@ function buildTray() {
       { label: '设置…', click: () => windows.createMain('settings') },
       { label: '打开数据文件夹（历史/配置）', click: () => shell.openPath(app.getPath('userData')) },
       { type: 'separator' },
-      { label: '退出困困截屏助手', click: () => app.quit() },
+      { label: '退出困困截图工具', click: () => app.quit() },
     ]);
     tray.popUpContextMenu(menu);
   });
@@ -1398,9 +1592,12 @@ if (!gotLock) {
       } catch (_) {}
     }
     registerIpc();
-    buildTray();
-    registerShortcuts();
-    applyLoginItem();
+    // 冒烟自检不注册全局快捷键、不改开机启动项、也不创建菜单栏常驻图标。
+    if (!process.env.KK_SMOKE) {
+      buildTray();
+      registerShortcuts();
+      applyLoginItem();
+    }
     // 启动即打开桌面主窗口（快捷截图首页）——可在设置里关闭（纯托盘驻留）。
     // （KK_SMOKE 自检模式下由自检流程自行开窗，这里跳过避免重复）
     if (!process.env.KK_SMOKE && config.get().general.openMainAtLaunch !== false) windows.createMain('capture');
@@ -1505,5 +1702,13 @@ if (!gotLock) {
   app.on('will-quit', () => {
     globalShortcut.unregisterAll();
     windows.closeAll();
+    tempFiles.cleanupAll();
+    if (ownedSmokeUserData) {
+      const resolved = path.resolve(ownedSmokeUserData);
+      if (path.basename(resolved).startsWith('kkshot-smoke-') && path.dirname(resolved) === path.resolve(os.tmpdir())) {
+        try { fs.rmSync(resolved, { recursive: true, force: true }); } catch (_) {}
+      }
+      ownedSmokeUserData = null;
+    }
   });
 }

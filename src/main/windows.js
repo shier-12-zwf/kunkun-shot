@@ -1,7 +1,9 @@
 // 窗口工厂：集中创建截图层 / 贴图 / 设置 / AI 面板 / 录屏控制条。
 const path = require('path');
+const fs = require('fs');
 const { BrowserWindow, screen } = require('electron');
 const C = require('../shared/channels');
+const { requireImageDataURL, normalizePinBounds } = require('./ipc-validation');
 
 const PRELOAD = path.join(__dirname, '..', 'preload', 'preload.js');
 const RENDERER = path.join(__dirname, '..', 'renderer');
@@ -21,26 +23,30 @@ const pins = new Set();
 const pinPayloads = new Map();
 // 最近关闭的贴图（Ctrl+3 / 托盘「恢复最近关闭的贴图」）
 const pinHistory = [];
+// 明确销毁的贴图不得进入恢复历史；WeakSet 不延长窗口或敏感 payload 的生命周期。
+const suppressPinHistory = new WeakSet();
 // 录屏控制条
 let recorderWin = null;
 
 // ---- M1 修复：受信 webContents 登记表 ----
 // 只有经本窗口工厂创建的窗口，其 IPC 请求才被接受；窗口销毁即除名。
 // main.js 的 registerIpc 会统一拦截所有 ipcMain.handle 调用并校验 sender。
-const trustedWebContents = new Set();
-function trackWindow(win) {
+const trustedWebContents = new Map();
+function trackWindow(win, role) {
   if (!win || win.isDestroyed()) return;
   const id = win.webContents.id;
-  trustedWebContents.add(id);
+  trustedWebContents.set(id, role);
   win.webContents.once('destroyed', () => trustedWebContents.delete(id));
 }
-function isTrustedSender(id) {
-  return trustedWebContents.has(id);
+function isTrustedSender(id, allowedRoles) {
+  const role = trustedWebContents.get(id);
+  if (!role) return false;
+  return !allowedRoles || allowedRoles.includes(role);
 }
 // 统一创建入口：所有窗口经此创建并自动登记为受信来源
-function newTrackedWindow(opts) {
+function newTrackedWindow(opts, role) {
   const win = new BrowserWindow(opts);
-  trackWindow(win);
+  trackWindow(win, role);
   return win;
 }
 
@@ -83,7 +89,7 @@ function createOverlay(display, captureData) {
     enableLargerThanScreen: true,
     backgroundColor: '#00000000',
     webPreferences: baseWebPrefs(),
-  });
+  }, 'overlay');
   win.setAlwaysOnTop(true, 'screen-saver');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.loadFile(rfile('overlay', 'overlay.html'));
@@ -102,8 +108,25 @@ function closeOverlay() {
 
 // ---- 贴图窗口 ----
 function createPin(payload) {
-  const dataURL = payload && payload.dataURL;
-  const bounds = payload && payload.bounds;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('贴图数据无效。');
+  const bounds = normalizePinBounds(payload.bounds);
+  const safePayload = { bounds };
+  if (payload.dataURL) {
+    safePayload.dataURL = requireImageDataURL(payload.dataURL);
+  } else if (typeof payload.text === 'string' && payload.text.length <= 1024 * 1024) {
+    safePayload.text = payload.text;
+  } else if (typeof payload.color === 'string' && payload.color.length <= 128) {
+    safePayload.color = payload.color;
+  } else if (
+    typeof payload.file === 'string' &&
+    payload.file.length <= 8192 &&
+    path.isAbsolute(payload.file) &&
+    fs.existsSync(payload.file)
+  ) {
+    safePayload.file = path.resolve(payload.file);
+  } else {
+    throw new Error('贴图内容无效。');
+  }
   const win = newTrackedWindow({
     x: Math.round(bounds.x),
     y: Math.round(bounds.y),
@@ -119,18 +142,21 @@ function createPin(payload) {
     minHeight: 32,
     backgroundColor: '#00000000',
     webPreferences: baseWebPrefs(),
-  });
+  }, 'pin');
   win.setAlwaysOnTop(true, 'floating');
   win.loadFile(rfile('pin', 'pin.html'));
-  whenLoaded(win, payload);
+  whenLoaded(win, safePayload);
   pins.add(win);
-  pinPayloads.set(win.webContents.id, payload || {});
+  pinPayloads.set(win.webContents.id, safePayload);
   win.on('closed', () => {
     pins.delete(win);
     pinPayloads.delete(win.webContents.id);
-    // 关闭的贴图进历史（最多保留 10 条），供 Ctrl+3 恢复
-    pinHistory.push(payload || {});
-    if (pinHistory.length > 10) pinHistory.shift();
+    const shouldSuppressHistory = suppressPinHistory.delete(win);
+    if (!shouldSuppressHistory) {
+      // 正常关闭的贴图进历史（最多保留 10 条），供 Ctrl+3 恢复
+      pinHistory.push(safePayload);
+      if (pinHistory.length > 10) pinHistory.shift();
+    }
   });
   return win;
 }
@@ -146,10 +172,21 @@ function openSettings() {
 // ---- AI 面板 ----
 // payload: { mode:'ask'|'ocr'|'translate'|'polish', dataURL?, text? }
 function openAIPanel(payload) {
+  const raw = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  const mode = typeof raw.mode === 'string' ? raw.mode : 'ask';
+  if (!['ask', 'ocr', 'translate', 'polish', 'translateImage'].includes(mode)) {
+    throw new Error('AI 面板模式无效。');
+  }
+  const safePayload = { mode };
+  if (raw.dataURL != null) safePayload.dataURL = requireImageDataURL(raw.dataURL);
+  if (raw.text != null) {
+    if (typeof raw.text !== 'string' || raw.text.length > 1024 * 1024) throw new Error('AI 文本无效或过长。');
+    safePayload.text = raw.text;
+  }
   if (refs.ai && !refs.ai.isDestroyed()) {
     refs.ai.show();
     refs.ai.focus();
-    refs.ai.webContents.send(C.WINDOW_INIT, payload);
+    refs.ai.webContents.send(C.WINDOW_INIT, safePayload);
     return refs.ai;
   }
   const win = newTrackedWindow({
@@ -162,10 +199,10 @@ function openAIPanel(payload) {
     maximizable: true,
     alwaysOnTop: true,
     webPreferences: baseWebPrefs(),
-  });
+  }, 'ai');
   win.setAlwaysOnTop(true, 'floating');
   win.loadFile(rfile('ai', 'ai.html'));
-  whenLoaded(win, payload);
+  whenLoaded(win, safePayload);
   win.on('closed', () => (refs.ai = null));
   refs.ai = win;
   return win;
@@ -197,7 +234,7 @@ function createRecorder(initData) {
     hasShadow: true,
     backgroundColor: '#00000000',
     webPreferences: baseWebPrefs(),
-  });
+  }, 'recorder');
   win.setAlwaysOnTop(true, 'screen-saver');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.loadFile(rfile('recorder', 'recorder.html'));
@@ -239,7 +276,7 @@ function createLongShot(initData) {
     hasShadow: true,
     backgroundColor: '#00000000',
     webPreferences: baseWebPrefs(),
-  });
+  }, 'longshot');
   win.setAlwaysOnTop(true, 'screen-saver');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.loadFile(rfile('longshot', 'longshot.html'));
@@ -258,10 +295,11 @@ function closeLongShot() {
 
 // ---- 桌面主窗口（快捷截图 / 历史记录 / AI 工作台 / 设置 四页） ----
 function createMain(page) {
+  const safePage = ['capture', 'history', 'ai', 'settings'].includes(page) ? page : 'capture';
   if (refs.main && !refs.main.isDestroyed()) {
     refs.main.show();
     refs.main.focus();
-    if (page) refs.main.webContents.send(C.MAIN_NAV, { page });
+    if (page) refs.main.webContents.send(C.MAIN_NAV, { page: safePage });
     return refs.main;
   }
   const win = newTrackedWindow({
@@ -269,13 +307,13 @@ function createMain(page) {
     height: 720,
     minWidth: 920,
     minHeight: 600,
-    title: '困困截屏助手',
+    title: '困困截图工具',
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#f4f7fc',
     webPreferences: baseWebPrefs(),
-  });
+  }, 'main');
   win.loadFile(rfile('main', 'main.html'));
-  whenLoaded(win, { page: page || 'capture' });
+  whenLoaded(win, { page: safePage });
   win.on('closed', () => (refs.main = null));
   refs.main = win;
   return win;
@@ -313,7 +351,7 @@ function togglePopover(trayBounds) {
     hasShadow: false,
     backgroundColor: '#00000000',
     webPreferences: baseWebPrefs(),
-  });
+  }, 'popover');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.loadFile(rfile('popover', 'popover.html'));
   win.on('blur', () => {
@@ -364,7 +402,7 @@ function createTranslatePopup(anchor) {
     hasShadow: false,
     backgroundColor: '#00000000',
     webPreferences: baseWebPrefs(),
-  });
+  }, 'translate-popup');
   win.setAlwaysOnTop(true, 'floating');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.loadFile(rfile('translate-popup', 'translate-popup.html'));
@@ -416,6 +454,7 @@ function pinAllClose() {
 function pinAllDestroy() {
   // 销毁：不进历史
   pinSnapshots().forEach(({ win }) => {
+    suppressPinHistory.add(win);
     pinPayloads.delete(win.webContents.id);
     win.destroy();
   });
@@ -423,7 +462,7 @@ function pinAllDestroy() {
 function restoreLastPin() {
   while (pinHistory.length) {
     const p = pinHistory.pop();
-    if (p && (p.dataURL || p.text || p.color)) {
+    if (p && (p.dataURL || p.text || p.color || p.file)) {
       createPin(p);
       return true;
     }
@@ -462,6 +501,7 @@ module.exports = {
   broadcast,
   closeAll,
   isTrustedSender,
+  getTrustedRole: (id) => trustedWebContents.get(id) || null,
   pinSnapshots,
   pinBroadcast,
   pinAllThumbnail,

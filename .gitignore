@@ -1,5 +1,29 @@
 node_modules/
 dist/
+dist-*/
 out/
+release/
+coverage/
+.cache/
+.electron-builder-cache/
 .DS_Store
 *.log
+
+# Local editor and agent state
+.claude/
+.codex/
+.vscode/
+.idea/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+electron-builder.env
+secrets/

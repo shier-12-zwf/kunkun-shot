@@ -46,7 +46,7 @@ const C = {
   OCR_RUN: 'ocr:run',
   AX_AT_POINT: 'ax:at-point', // ({x,y}) 查询屏幕坐标处 UI 元素（智能识别）
   OCR_BOXES: 'ocr:boxes',
-  TRANSLATE_TEXT: 'ai:translate-text', // ({ dataURL, lang, engine }) => { text, error }
+  TRANSLATE_TEXT: 'ai:translate-text', // ({ lines, target }) => { lines, error }
 
   // ---- DeepSeek ----
   DEEPSEEK_ASK_IMAGE: 'deepseek:ask-image', // ({ dataURL, prompt, streamId }) => { ok }

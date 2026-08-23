@@ -1,4 +1,4 @@
-// 困困截屏助手 · 主窗口「设置」页（分组卡片重构）
+// 困困截图工具 · 主窗口「设置」页（分组卡片重构）
 // 渲染层硬约束：禁止 require / import 引入 node / electron，所有主进程交互只走 window.kkapi。
 // 注册到 window.KKPages.settings；render(el, ctx) 会被多次调用，每次先清空容器再整体重建（幂等）。
 (function () {
@@ -322,7 +322,7 @@
         autoSave({ general: { launchAtLogin: v } }, v ? '已开启开机自启' : '已关闭开机自启');
       });
       gGeneral.body.appendChild(
-        rowField('开机自启动', '登录系统后自动在后台运行困困截屏助手', tgLaunch)
+        rowField('开机自启动', '登录系统后自动在后台运行困困截图工具', tgLaunch)
       );
 
       // P3-11：启动时打开主窗口（托盘型工具可选纯后台启动）
@@ -691,12 +691,12 @@
       // ==========================================================
       // 6) AI 模型（敏感配置：底部操作栏统一保存）
       // ==========================================================
-      const gAI = groupCard('AI', 'AI 模型', '选择 AI 提供方，并配置 DeepSeek / MiniMax。');
-      // P1-3(M5) 隐私提示：AI 类功能会把内容发给第三方服务商
+      const gAI = groupCard('AI', 'AI 模型', '选择 AI 提供方，并配置 DeepSeek / MiniMax / OpenAI 兼容服务。');
+      // P1-3(M5) 隐私提示：区分 Key 的本机加密存储与 AI 请求的网络传输
       gAI.body.appendChild(
         h('div', { class: 'status warn ai-risk' }, [
           ico(ICONS.叹, 'ico-sm'),
-          h('span', null, '隐私提示：问 AI / 翻译 / 划词翻译等 AI 功能，会把截图或选中文字发送到你所配置的第三方服务商（DeepSeek / MiniMax / 硅基流动等）。OCR 默认走本地识别，不上传。'),
+          h('span', null, '隐私提示：API Key 在本机加密保存；调用问 AI、AI OCR、翻译或划词翻译时，请求内容（可能包括截图、OCR 文字或选中文字）会发送到你选择或配置的服务端点。仅使用本地 OCR 时，识别内容不会离开本机。'),
         ])
       );
 
@@ -705,8 +705,8 @@
       const PROVIDERS = [
         { value: 'deepseek', label: 'DeepSeek', desc: '纯文本 · 截图走本地 OCR' },
         { value: 'minimax', label: 'MiniMax', desc: 'M3 · 可直接看图' },
-        { value: 'openai', label: '更多服务商', desc: '硅基/千问/Kimi/自定义' },
-        { value: 'auto', label: '智能分流', desc: '省钱 · 文本→DS 图片→MM' },
+        { value: 'openai', label: '更多服务商', desc: '文本 · 图片先本地 OCR' },
+        { value: 'auto', label: '智能分流', desc: '文本→DS · 看图→MM' },
       ];
       const provWrap = h('div', { class: 'radio-group cols-3' });
       const provRadios = [];
@@ -727,12 +727,12 @@
           ])
         );
       });
-      gAI.body.appendChild(stackField('AI 提供方', provWrap, '切换后立即生效。选「智能分流」时下面两家都要配置好 Key。'));
+      gAI.body.appendChild(stackField('AI 提供方', provWrap, '切换后立即生效。显式选择不会回退到其他服务商；「智能分流」必须同时配置 DeepSeek 与 MiniMax。'));
 
       // 智能分流模式下的额外说明（仅 auto 显示）
       const provHint = h('div', { class: 'status ok ai-risk', style: 'display:none' }, [
         ico(ICONS.叹, 'ico-sm'),
-        h('span', null, '省钱模式：纯文字任务（翻译/润色/对话）用便宜的 DeepSeek；看图任务（截图问 AI / 截图翻译）用 MiniMax 直接看图。'),
+        h('span', null, '固定路由：纯文字任务（翻译/润色/对话）只用 DeepSeek；看图任务（截图问 AI / 截图翻译）只用 MiniMax。缺少对应配置时会明确停止，不会改投其他服务商。'),
       ]);
       gAI.body.appendChild(provHint);
 
@@ -791,7 +791,7 @@
       });
       const apiKeyWrap = h('div', { class: 'apikey-wrap' }, [inApiKey, eyeBtn, makeKeyClearBtn(inApiKey, 'deepseek', api)]);
       paneDeepSeek.appendChild(
-        stackField('DeepSeek · API Key', apiKeyWrap, 'API Key 仅保存在本地配置中，不会上传到任何第三方服务器。')
+        stackField('DeepSeek · API Key', apiKeyWrap, 'API Key 在本机加密保存；调用 DeepSeek 时会作为鉴权信息发送到你配置的 DeepSeek 服务端点。')
       );
       const inBaseUrl = h('input', { class: 'input', type: 'text', placeholder: 'https://api.deepseek.com/v1' });
       const inVision = h('input', { class: 'input', type: 'text', placeholder: 'deepseek-v4-pro' });
@@ -831,7 +831,7 @@
       });
       const mmKeyWrap = h('div', { class: 'apikey-wrap' }, [inMmKey, mmEye, makeKeyClearBtn(inMmKey, 'minimax', api)]);
       paneMiniMax.appendChild(
-        stackField('MiniMax · API Key', mmKeyWrap, 'MiniMax 开放平台 Key（Bearer 鉴权，无需 GroupId），仅存本地')
+        stackField('MiniMax · API Key', mmKeyWrap, 'MiniMax 开放平台 Key（Bearer 鉴权，无需 GroupId）。API Key 在本机加密保存；调用 MiniMax 时会作为鉴权信息发送到你配置的 MiniMax 服务端点。')
       );
       const inMmBase = h('input', { class: 'input', type: 'text', placeholder: 'https://api.minimaxi.com/v1' });
       const inMmModel = h('input', { class: 'input', type: 'text', placeholder: 'MiniMax-M3' });
@@ -852,14 +852,14 @@
 
       // ===================== 更多服务商（通用 OpenAI 兼容）面板 =====================
       // 从 kunkun-translator 移植：一套配置切换硅基流动/通义千问/Kimi/自定义，支持在线拉模型列表。
-      // 仅用于「纯文本」任务（翻译/润色/对话）；看图任务它做不到，会自动退回 DeepSeek+本地 OCR。
+      // 仅用于「纯文本」请求；看图任务会先在本地 OCR，再将识别文字发给同一个已选 OpenAI 兼容端点。
       const paneOpenAI = h('div', { class: 'ai-pane' });
       const oaState = { preset: 'siliconflow' }; // 当前选中的预设
 
       paneOpenAI.appendChild(
         h('div', { class: 'status ok ai-risk' }, [
           ico(ICONS.叹, 'ico-sm'),
-          h('span', null, '通用 OpenAI 兼容服务商：仅做纯文本（翻译/润色/对话）。看图任务会自动退回 DeepSeek 本地 OCR。'),
+          h('span', null, '通用 OpenAI 兼容服务商：仅接收纯文本。看图任务会先在本地 OCR，再将识别文字发给这里配置的端点，不会改投 DeepSeek 或 MiniMax。'),
         ])
       );
 
@@ -962,7 +962,7 @@
       }
 
       paneOpenAI.appendChild(stackField('服务商预设', selOaPreset, '选平台自动填 Base URL 与默认模型；选「自定义」可填任意 OpenAI 兼容端点。'));
-      paneOpenAI.appendChild(stackField('API Key', oaKeyWrap, 'Key 仅保存在本地（加密落盘），不会上传第三方。'));
+      paneOpenAI.appendChild(stackField('API Key', oaKeyWrap, 'API Key 在本机加密保存；调用 AI 或刷新模型列表时会作为鉴权信息发送到你选择或配置的服务端点。'));
       paneOpenAI.appendChild(stackField('Base URL', inOaBase, '请求 {baseUrl}/chat/completions'));
       paneOpenAI.appendChild(
         h('div', { class: 'two-col' }, [
@@ -974,8 +974,8 @@
       paneOpenAI.appendChild(makeTestRow('openai', collectOpenAI));
       gAI.body.appendChild(paneOpenAI);
 
-      // ===================== 公共提示词（两种 AI 通用）=====================
-      gAI.body.appendChild(h('div', { class: 'group-desc', style: 'margin:10px 0 0' }, '以下提示词对 DeepSeek 与 MiniMax 通用'));
+      // ===================== 公共提示词（所有 AI 提供方通用）=====================
+      gAI.body.appendChild(h('div', { class: 'group-desc', style: 'margin:10px 0 0' }, '以下提示词对所有 AI 提供方通用'));
       const taAsk = h('textarea', { class: 'textarea', rows: '3', placeholder: '问图提示词' });
       const taOcr = h('textarea', { class: 'textarea', rows: '3', placeholder: 'OCR 提示词' });
       const taTranslate = h('textarea', { class: 'textarea', rows: '3', placeholder: '翻译提示词' });
@@ -995,7 +995,7 @@
           const card = r.closest('.radio-card');
           if (card) card.classList.toggle('checked', r.checked);
         });
-        // deepseek/minimax/openai 只显示对应面板；auto 显示 DeepSeek+MiniMax（文本可能走 openai，但看图必用 MM）
+        // deepseek/minimax/openai 只显示对应面板；auto 只显示其固定路由所需的 DeepSeek + MiniMax。
         paneDeepSeek.style.display = (mode === 'deepseek' || isAuto) ? '' : 'none';
         paneMiniMax.style.display = (mode === 'minimax' || isAuto) ? '' : 'none';
         paneOpenAI.style.display = (mode === 'openai') ? '' : 'none';
@@ -1079,7 +1079,7 @@
 
       gStore.body.appendChild(
         h('div', { class: 'hint' },
-          '隐私说明：所有截图、历史与 API Key 均仅保存在本机，应用不会主动上传你的数据。')
+          '隐私说明：截图、录屏与历史记录默认保存在本机；API Key 在本机加密保存。使用 AI 功能时，请求内容（可能包括截图、OCR 文字或选中文字）及鉴权信息会发送到你选择或配置的服务端点。仅使用本地 OCR 时，识别内容不会离开本机。')
       );
 
       grid.appendChild(gStore.card);

@@ -9,6 +9,7 @@
   const elBtnStart = document.getElementById('btnStart');
   const elBtnStop = document.getElementById('btnStop');
   const elBtnPause = document.getElementById('btnPause');
+  const elBtnRetry = document.getElementById('btnRetry');
   const elBtnCancel = document.getElementById('btnCancel');
   const elStatus = document.getElementById('status');
   const elTimer = document.getElementById('timer');
@@ -33,6 +34,13 @@
   let canvasEl = null; // 离屏绘制用 canvas
   let drawTimer = null; // setInterval 句柄
   let chunks = []; // 录制数据块
+  let recordedBytes = 0;
+  let sizeLimitReached = false;
+  // 当前保存协议需要 Blob → ArrayBuffer → IPC 的整包传输；把单次上限控制在 128 MiB，
+  // 避免 renderer、structured clone 与主进程副本叠加成数 GiB 内存峰值。
+  const MAX_RECORDING_BYTES = 128 * 1024 * 1024;
+  let pendingRecordingBlob = null; // 保存失败时保留唯一副本，允许用户重试或主动放弃
+  let saveInProgress = false;
   let timerInterval = null; // 计时器句柄
   let startedAt = 0; // 录制开始时间戳
   let isRecording = false;
@@ -51,6 +59,8 @@
     elToast.textContent = msg;
     elToast.style.color = isError ? '#ef4444' : '#1f2329';
     elToast.hidden = false;
+    elToast.classList.remove('with-action');
+    elBtnRetry.hidden = true;
     // 隐藏其余控件，让提示占满胶囊
     elBtnStart.hidden = true;
     elStatus.hidden = true;
@@ -60,6 +70,8 @@
   // 隐藏提示，恢复正常控件
   function hideToast() {
     elToast.hidden = true;
+    elToast.classList.remove('with-action');
+    elBtnRetry.hidden = true;
     elBtnStart.hidden = isRecording;
     elStatus.hidden = false;
     elBtnStop.hidden = !isRecording;
@@ -72,10 +84,26 @@
     elToast.textContent = msg;
     elToast.style.color = '#ef4444';
     elToast.hidden = false;
+    elToast.classList.remove('with-action');
+    elBtnRetry.hidden = true;
     elStatus.hidden = true;
     elBtnStop.hidden = true;
     elBtnStart.hidden = false; // 关键：保留开始按钮，允许原地重试
     toastTimer = setTimeout(hideToast, 4000);
+  }
+
+  function showSaveRetry(msg) {
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+    elToast.textContent = msg;
+    elToast.style.color = '#ef4444';
+    elToast.hidden = false;
+    elToast.classList.add('with-action');
+    elBtnStart.hidden = true;
+    elStatus.hidden = true;
+    elBtnStop.hidden = true;
+    elBtnPause.hidden = true;
+    elBtnRetry.hidden = false;
+    elBtnRetry.disabled = false;
   }
 
   // 格式化计时 mm:ss（超过一小时显示 hh:mm:ss）
@@ -266,6 +294,9 @@
       }
 
       chunks = [];
+      recordedBytes = 0;
+      sizeLimitReached = false;
+      pendingRecordingBlob = null;
       try {
         recorder = chosen
           ? new MediaRecorder(canvasStream, { mimeType: chosen })
@@ -276,7 +307,14 @@
       }
 
       recorder.ondataavailable = (ev) => {
-        if (ev.data && ev.data.size > 0) chunks.push(ev.data);
+        if (!ev.data || ev.data.size <= 0) return;
+        if (recordedBytes + ev.data.size > MAX_RECORDING_BYTES) {
+          sizeLimitReached = true;
+          if (isRecording && !isFinishing) setTimeout(stopRecording, 0);
+          return;
+        }
+        chunks.push(ev.data);
+        recordedBytes += ev.data.size;
       };
       recorder.onstop = onRecorderStop;
       recorder.onerror = () => {
@@ -313,42 +351,57 @@
   }
 
   // ====== MediaRecorder 停止后的回调：组装 blob 并保存 ======
-  async function onRecorderStop() {
-    // 仅在用户主动停止时保存（取消时 isFinishing 为 false）
-    if (!isFinishing) return;
-
+  async function savePendingRecording() {
+    if (!pendingRecordingBlob || saveInProgress) return;
+    saveInProgress = true;
     try {
-      const blob = new Blob(chunks, { type: 'video/webm' });
-      chunks = [];
-
-      if (!blob.size) {
-        showToast('录制内容为空', true);
-        // 短暂提示后关闭
-        setTimeout(() => api.closeSelf(), 1200);
-        return;
-      }
-
       showToast('正在保存…', false);
-      const buffer = await blob.arrayBuffer();
+      const buffer = await pendingRecordingBlob.arrayBuffer();
       const res = await api.saveRecording({
         buffer,
         mime: 'video/webm',
         toGif: !!init.toGif,
         fps: init.fps && init.fps > 0 ? init.fps : 15,
-        trimStart: parseInt(document.getElementById('trimStart').value, 10) || 0, trimEnd: parseInt(document.getElementById('trimEnd').value, 10) || 0 });
+        trimStart: parseInt(document.getElementById('trimStart').value, 10) || 0,
+        trimEnd: parseInt(document.getElementById('trimEnd').value, 10) || 0,
+      });
 
-      // 保存完成关闭窗口（无论 saved 真假都关，结果由主进程处理）
-      if (res && res.saved === false) {
-        showToast('保存已取消', false);
-        setTimeout(() => api.closeSelf(), 800);
-      } else {
+      if (res && res.saved === true) {
+        pendingRecordingBlob = null;
+        chunks = [];
+        recordedBytes = 0;
         api.closeSelf();
+        return;
       }
+      const detail = res && res.error ? `保存失败：${res.error}` : '录屏尚未保存，可重试或点 × 放弃';
+      showSaveRetry(detail);
     } catch (err) {
       const msg = (err && (err.message || err.name)) || '保存失败';
-      showToast('保存失败：' + msg, true);
-      setTimeout(() => api.closeSelf(), 1500);
+      showSaveRetry('保存失败：' + msg);
+    } finally {
+      saveInProgress = false;
     }
+  }
+
+  async function onRecorderStop() {
+    // 仅在用户主动停止时保存（取消时 isFinishing 为 false）
+    if (!isFinishing) return;
+    try {
+      pendingRecordingBlob = new Blob(chunks, { type: 'video/webm' });
+    } catch (err) {
+      showSaveRetry('整理录屏失败：' + ((err && err.message) || String(err)));
+      return;
+    } finally {
+      teardown();
+    }
+    if (!pendingRecordingBlob.size) {
+      pendingRecordingBlob = null;
+      chunks = [];
+      recordedBytes = 0;
+      showToast('录制内容为空', true);
+      return;
+    }
+    await savePendingRecording();
   }
 
   // ====== 停止并保存 ======
@@ -396,7 +449,7 @@
       clearInterval(drawTimer);
       drawTimer = null;
     }
-    showToast('正在保存…', false);
+    showToast(sizeLimitReached ? '已达到 128MB 上限，正在保存…' : '正在保存…', false);
 
     try {
       if (recorder && recorder.state !== 'inactive') {
@@ -428,6 +481,10 @@
     isRecording = false;
     elBar.classList.remove('recording');
     chunks = [];
+    recordedBytes = 0;
+    sizeLimitReached = false;
+    pendingRecordingBlob = null;
+    saveInProgress = false;
     teardown();
     api.cancelCapture && api.cancelCapture(); // 通知主进程取消（若实现则生效）
     api.closeSelf();
@@ -436,6 +493,7 @@
   // ====== 事件绑定 ======
   elBtnStart.addEventListener('click', startRecording);
   elBtnStop.addEventListener('click', stopRecording);
+  elBtnRetry.addEventListener('click', savePendingRecording);
   elBtnCancel.addEventListener('click', cancelRecording);
 
   // Esc 取消

@@ -1,4 +1,4 @@
-// 困困截屏助手 · 快捷截图首页（主窗口页面模块：capture）
+// 困困截图工具 · 快捷截图首页（主窗口页面模块：capture）
 // 渲染层硬约束：禁止 require / import 引入 node/electron，所有主进程交互只走 window.kkapi。
 // 注册到 window.KKPages.capture，render(el) 幂等：每次先清空容器再重建。
 (function () {

@@ -2,6 +2,69 @@
 // 说明：图片多模态用 visionModel（默认 deepseek-v4-pro），纯文本用 textModel。
 // 旧模型 deepseek-chat / deepseek-reasoner 官方已标注弃用且不支持图片，故默认使用 v4 系列。
 
+const { normalizeProviderBaseUrl } = require('./ipc-validation');
+
+const MAX_STREAM_BYTES = 4 * 1024 * 1024;
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+const MAX_MODEL_BODY_BYTES = 2 * 1024 * 1024;
+
+function abortError() {
+  const err = new Error('请求已中止。');
+  err.name = 'AbortError';
+  return err;
+}
+
+function readReaderChunk(reader, signal) {
+  if (!signal) return reader.read();
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(abortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    reader.read().then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      }
+    );
+  });
+}
+
+async function readBoundedResponseText(response, maxBytes, signal, onWait) {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let total = 0;
+  let text = '';
+  while (true) {
+    if (onWait) onWait();
+    const { value, done } = await readReaderChunk(reader, signal);
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      try { await reader.cancel(); } catch (_) {}
+      throw new Error('服务端响应数据过大，已停止读取。');
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  text += decoder.decode();
+  return text;
+}
+
 // 把上游返回的原始错误（多为英文 JSON）翻成「中文原因 + 怎么办」。
 // 既覆盖 MiniMax（authorized_error / base_resp.status_code 等），也兼容 OpenAI 风格的 error.code/message。
 // 返回 null 表示没识别出已知错误，调用方退回原始文案。
@@ -64,14 +127,21 @@ function describeApiError({ provider, isMinimax, status, baseUrl, detail }) {
 // 可选 signal：外部 AbortSignal，触发后中止请求（用户切流/关窗）。
 // 可选 idleTimeoutMs：空闲超时——连上后若长时间收不到新数据则中止，避免界面永久卡在「回复中…」。
 async function streamChat({ baseUrl, apiKey, model, messages, think, signal, idleTimeoutMs }, onEvent) {
+  let safeBaseUrl;
+  try {
+    safeBaseUrl = normalizeProviderBaseUrl(baseUrl);
+  } catch (err) {
+    onEvent({ error: (err && err.message) || String(err) });
+    return;
+  }
   // 报错文案按 baseUrl 推断提供方，避免用 MiniMax 时仍显示「DeepSeek」误导。
-  const isMinimax = /minimax/i.test(String(baseUrl || ''));
+  const isMinimax = /minimax/i.test(safeBaseUrl);
   const providerLabel = isMinimax ? 'MiniMax' : 'DeepSeek';
   if (!apiKey) {
     onEvent({ error: `未配置 ${providerLabel} API Key，请在「设置」里填写。` });
     return;
   }
-  const url = `${String(baseUrl).replace(/\/$/, '')}/chat/completions`;
+  const url = `${safeBaseUrl}/chat/completions`;
   // MiniMax-M3 默认开启思考。think=true：思考单独走 reasoning_content（问答展示思考块）；
   // think=false：彻底关闭思考（翻译/润色/OCR 只要结果，最省钱）。DeepSeek 不认这些参数，故仅 MiniMax 加。
   const body = { model, messages, stream: true };
@@ -126,12 +196,17 @@ async function streamChat({ baseUrl, apiKey, model, messages, think, signal, idl
   }
 
   if (!res.ok) {
-    cleanup();
     let detail = '';
     try {
-      detail = await res.text();
-    } catch (_) {}
-    const friendly = describeApiError({ provider: providerLabel, isMinimax, status: res.status, baseUrl, detail });
+      detail = await readBoundedResponseText(res, MAX_ERROR_BODY_BYTES, ac.signal, armIdle);
+    } catch (err) {
+      cleanup();
+      if (timedOut || canceled) return finishAbort();
+      onEvent({ error: (err && err.message) || '读取错误响应失败。' });
+      return;
+    }
+    cleanup();
+    const friendly = describeApiError({ provider: providerLabel, isMinimax, status: res.status, baseUrl: safeBaseUrl, detail });
     onEvent({ error: friendly || `${providerLabel} 返回 ${res.status}：${detail.slice(0, 500)}` });
     return;
   }
@@ -144,11 +219,19 @@ async function streamChat({ baseUrl, apiKey, model, messages, think, signal, idl
   const reader = res.body.getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
+  let receivedBytes = 0;
   try {
     while (true) {
       armIdle(); // 每次等待新数据前重置空闲计时
-      const { value, done } = await reader.read();
+      const { value, done } = await readReaderChunk(reader, ac.signal);
       if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > MAX_STREAM_BYTES) {
+        try { await reader.cancel(); } catch (_) {}
+        cleanup();
+        onEvent({ error: 'AI 流式响应过大，已停止读取。' });
+        return;
+      }
       buffer += decoder.decode(value, { stream: true });
       // SSE：事件以换行分隔，data: 行承载 JSON
       const lines = buffer.split('\n');
@@ -280,38 +363,42 @@ function extractJson(rawText) {
 
 // 在线拉取模型清单（移植自 kunkun-translator 的 ModelCatalog.fetchModels）。
 // GET {baseUrl}/models?type=text，Bearer 鉴权；返回排序后的 model id 数组。
-async function fetchModels({ baseUrl, apiKey }) {
+async function fetchModels({ baseUrl, apiKey, timeoutMs }) {
   if (!apiKey) throw new Error('未填写 API Key');
-  const base = String(baseUrl || '').replace(/\/$/, '');
-  if (!base) throw new Error('Base URL 为空');
+  const base = normalizeProviderBaseUrl(baseUrl);
   const url = `${base}/models?type=text`;
   // 加 15s 超时兜底：Node 内置 fetch 无默认整体超时，若端点接受连接却不返回（半开连接/丢包），
   // Promise 永不 settle，会让设置页「刷新模型列表」按钮永久转圈。用 AbortController 强制中止。
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 15000);
-  let res;
+  const requestedTimeout = Number(timeoutMs);
+  const deadlineMs = Number.isFinite(requestedTimeout)
+    ? Math.max(10, Math.min(60_000, requestedTimeout))
+    : 15_000;
+  const timer = setTimeout(() => ac.abort(), deadlineMs);
   try {
-    res = await fetch(url, {
+    const res = await fetch(url, {
       method: 'GET',
       headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
       signal: ac.signal,
     });
+    if (!res.ok) {
+      const detail = await readBoundedResponseText(res, MAX_ERROR_BODY_BYTES, ac.signal);
+      throw new Error(`拉取模型失败 ${res.status}：${detail.slice(0, 300)}`);
+    }
+    const raw = await readBoundedResponseText(res, MAX_MODEL_BODY_BYTES, ac.signal);
+    let j;
+    try { j = JSON.parse(raw); } catch (_) { throw new Error('模型列表返回不是合法 JSON'); }
+    const ids = ((j && j.data) || []).map((m) => m && m.id).filter(Boolean);
+    if (!ids.length) throw new Error('模型列表为空');
+    return ids.sort((a, b) => (String(a).toLowerCase() < String(b).toLowerCase() ? -1 : 1));
   } catch (err) {
-    if (err && err.name === 'AbortError') throw new Error('拉取模型超时（15s 未响应），请检查 Base URL 与网络');
+    if ((err && err.name === 'AbortError') || ac.signal.aborted) {
+      throw new Error(`拉取模型超时（${Math.round(deadlineMs / 1000)}s 未响应），请检查 Base URL 与网络`);
+    }
     throw err;
   } finally {
     clearTimeout(timer);
   }
-  if (!res.ok) {
-    let detail = '';
-    try { detail = await res.text(); } catch (_) {}
-    throw new Error(`拉取模型失败 ${res.status}：${detail.slice(0, 300)}`);
-  }
-  let j;
-  try { j = await res.json(); } catch (_) { throw new Error('模型列表返回不是合法 JSON'); }
-  const ids = ((j && j.data) || []).map((m) => m && m.id).filter(Boolean);
-  if (!ids.length) throw new Error('模型列表为空');
-  return ids.sort((a, b) => (String(a).toLowerCase() < String(b).toLowerCase() ? -1 : 1));
 }
 
 module.exports = { streamChat, completeText, imageMessage, stripThink, repairJsonNoise, extractJson, fetchModels };

@@ -1,16 +1,20 @@
 {
   "name": "kunkun-shot",
   "productName": "困困截图工具",
-  "version": "0.1.0",
-  "description": "一个仿 PixPin 的跨平台截图工具：区域截图/标注、贴图钉屏、长截图、OCR、录屏，并内置 DeepSeek AI（截图问 AI + OCR 文字翻译润色）。",
+  "version": "0.2.0",
+  "description": "一款 macOS 优先的截图工具：支持区域截图与标注、贴图钉屏、长截图、OCR、录屏，以及可选的 AI 图片问答与文字处理。",
   "main": "src/main/main.js",
   "author": "困困",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "dist": "electron-builder",
-    "dist:mac": "electron-builder --mac"
+    "test": "node --test test/*.test.js",
+    "dist": "npm run dist:mac",
+    "dist:mac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac"
   },
   "dependencies": {
     "ffmpeg-static": "^5.2.0",
@@ -18,7 +22,6 @@
     "tesseract.js": "^5.1.1"
   },
   "devDependencies": {
-    "@electron/osx-sign": "^1.3.3",
     "electron": "42.9.0",
     "electron-builder": "^26.15.3"
   },
@@ -34,32 +37,60 @@
       {
         "from": "tessdata",
         "to": "tessdata"
+      },
+      {
+        "from": "LICENSE",
+        "to": "licenses/LICENSE"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "licenses/THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "LICENSES",
+        "to": "licenses/LICENSES"
+      },
+      {
+        "from": "node_modules/electron/dist/LICENSE",
+        "to": "licenses/Electron/LICENSE"
+      },
+      {
+        "from": "node_modules/electron/dist/LICENSES.chromium.html",
+        "to": "licenses/Electron/LICENSES.chromium.html"
       }
     ],
     "asarUnpack": [
+      "src/main/pasteboard-preserver.jxa",
       "**/node_modules/tesseract.js/**",
       "**/node_modules/tesseract.js-core/**",
       "**/node_modules/ffmpeg-static/**"
     ],
+    "afterPack": "scripts/after-pack.js",
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "resetAdHocDarwinSignature": true
+    },
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "build/icon.icns",
       "target": [
-        "dmg"
+        "dmg",
+        "zip"
       ],
-      "identity": "A99DC43611DA8D6FDBD2FBCB6281B6DF6580B296",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "extendInfo": {
         "NSScreenCaptureUsageDescription": "困困截图工具需要录制屏幕，用于区域截图、长截图与录屏。",
-        "NSMicrophoneUsageDescription": "录屏时如需同时录制声音，需要使用麦克风。",
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": false
         }
-      },
-      "sign": "./scripts/mac-sign.js"
+      }
     }
   }
 }
