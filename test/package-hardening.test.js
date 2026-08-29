@@ -61,8 +61,11 @@ test('mac afterPack hook restores NSAllowsArbitraryLoads=false', async (t) => {
   const afterPack = require('../scripts/after-pack');
   await afterPack({
     electronPlatformName: 'darwin',
+    arch: 3,
     appOutDir,
-    packager: { appInfo: { productFilename: 'Test' } }
+    packager: { projectDir: root, appInfo: { productFilename: 'Test' } }
+  }, {
+    packageSwiftHelpers: async () => {}
   });
 
   const value = execFileSync(
@@ -73,27 +76,128 @@ test('mac afterPack hook restores NSAllowsArbitraryLoads=false', async (t) => {
   assert.equal(value, 'false');
 });
 
-test('packaged Resources include project and runtime license materials', () => {
+test('mac afterPack hook copies and verifies Electron runtime licenses', async (t) => {
+  if (process.platform !== 'darwin') {
+    t.skip('macOS packaging layout only exists on macOS');
+    return;
+  }
+
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kunkun-license-source-'));
+  const appOutDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kunkun-license-app-'));
+  t.after(() => fs.rmSync(projectDir, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(appOutDir, { recursive: true, force: true }));
+
+  const electronDistDir = path.join(projectDir, 'node_modules', 'electron', 'dist');
+  fs.mkdirSync(electronDistDir, { recursive: true });
+  fs.writeFileSync(path.join(electronDistDir, 'LICENSE'), 'electron-license-fixture');
+  fs.writeFileSync(
+    path.join(electronDistDir, 'LICENSES.chromium.html'),
+    '<html>chromium-license-fixture</html>'
+  );
+
+  const appContentsDir = path.join(appOutDir, 'Test.app', 'Contents');
+  fs.mkdirSync(appContentsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(appContentsDir, 'Info.plist'),
+    [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+      '<plist version="1.0"><dict>',
+      '<key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>',
+      '</dict></plist>',
+      ''
+    ].join('\n')
+  );
+
+  const afterPack = require('../scripts/after-pack');
+  await afterPack({
+    electronPlatformName: 'darwin',
+    arch: 3,
+    appOutDir,
+    packager: {
+      projectDir,
+      appInfo: { productFilename: 'Test' }
+    }
+  }, {
+    packageSwiftHelpers: async () => {}
+  });
+
+  const packagedLicenseDir = path.join(appContentsDir, 'Resources', 'licenses', 'Electron');
+  assert.equal(
+    fs.readFileSync(path.join(packagedLicenseDir, 'LICENSE'), 'utf8'),
+    'electron-license-fixture'
+  );
+  assert.equal(
+    fs.readFileSync(path.join(packagedLicenseDir, 'LICENSES.chromium.html'), 'utf8'),
+    '<html>chromium-license-fixture</html>'
+  );
+});
+
+test('electron-builder stages project license materials before afterPack adds runtime licenses', () => {
   const expectedResources = [
     ['LICENSE', 'licenses/LICENSE'],
     ['THIRD_PARTY_NOTICES.md', 'licenses/THIRD_PARTY_NOTICES.md'],
-    ['LICENSES', 'licenses/LICENSES'],
-    ['node_modules/electron/dist/LICENSE', 'licenses/Electron/LICENSE'],
-    [
-      'node_modules/electron/dist/LICENSES.chromium.html',
-      'licenses/Electron/LICENSES.chromium.html'
-    ]
+    ['LICENSES', 'licenses/LICENSES']
   ];
 
   for (const [from, to] of expectedResources) {
     assert.equal(hasExtraResource(from, to), true, `missing ${from} -> ${to}`);
   }
+
+  assert.equal(
+    packageJson.build.extraResources.some((entry) => entry.to.startsWith('licenses/Electron/')),
+    false,
+    'Electron runtime licenses are copied and verified by afterPack instead of optional extraResources'
+  );
 });
 
-test('mac hardened-runtime entitlements do not request microphone access', () => {
+test('mac afterPack waits for Swift helper packaging and propagates its failure', async (t) => {
+  if (process.platform !== 'darwin') {
+    t.skip('macOS packaging layout only exists on macOS');
+    return;
+  }
+
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kunkun-helper-hook-source-'));
+  const appOutDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kunkun-helper-hook-app-'));
+  t.after(() => fs.rmSync(projectDir, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(appOutDir, { recursive: true, force: true }));
+
+  const electronDistDir = path.join(projectDir, 'node_modules', 'electron', 'dist');
+  fs.mkdirSync(electronDistDir, { recursive: true });
+  fs.writeFileSync(path.join(electronDistDir, 'LICENSE'), 'electron-license-fixture');
+  fs.writeFileSync(path.join(electronDistDir, 'LICENSES.chromium.html'), 'chromium-license-fixture');
+
+  const appContentsDir = path.join(appOutDir, 'Test.app', 'Contents');
+  fs.mkdirSync(appContentsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(appContentsDir, 'Info.plist'),
+    '<?xml version="1.0"?><plist version="1.0"><dict><key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict></dict></plist>'
+  );
+
+  const expectedError = new Error('fake swiftc failure');
+  const afterPack = require('../scripts/after-pack');
+  await assert.rejects(
+    afterPack({
+      electronPlatformName: 'darwin',
+      arch: 3,
+      appOutDir,
+      packager: { projectDir, appInfo: { productFilename: 'Test' } }
+    }, {
+      packageSwiftHelpers: async () => {
+        throw expectedError;
+      }
+    }),
+    (error) => error === expectedError
+  );
+});
+
+test('mac hardened-runtime entitlements explicitly allow opt-in microphone capture', () => {
   const entitlements = fs.readFileSync(
     path.join(root, 'build/entitlements.mac.plist'),
     'utf8'
   );
-  assert.doesNotMatch(entitlements, /com\.apple\.security\.device\.audio-input/);
+  assert.match(
+    entitlements,
+    /<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\/>/
+  );
 });

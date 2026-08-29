@@ -1,12 +1,11 @@
-// Swift 源码 → 预编译二进制缓存（P2-7/P1-8 共用）。
-// 解决两个问题：①swift 解释执行每次数秒编译；②H3 要求脚本不落可预测固定路径。
-// 方案：编译产物放 userData/swift-bin/<name>-<contentHash>（0700 目录），内容哈希命名
-// （源码变了自然换新二进制），首次用时 swiftc -O 编译，之后直接复用。
+// Swift helper 二进制解析。已打包应用只允许使用 Resources/native-helpers
+// 中与源码哈希、当前 CPU 架构一致的构建产物，绝不在用户机器上调用 swiftc。
+// 开发模式仍保留 userData/swift-bin 内容哈希缓存，方便本地调试。
 const { execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const crypto = require('crypto');
 const { app } = require('electron');
+const { createSwiftBinaryCache, createSwiftBinaryProvider } = require('./swift-binary-cache');
 
 const SWIFTC = '/usr/bin/swiftc';
 
@@ -18,34 +17,9 @@ function binDir() {
   return dir;
 }
 
-// 返回已编译二进制路径；首次调用会编译（秒级~十几秒）。
-function ensureBinary({ name, source }) {
+function compileSwift(sourcePath, outputPath) {
   return new Promise((resolve, reject) => {
-    let hash;
-    try {
-      hash = crypto.createHash('sha256').update(source).digest('hex').slice(0, 16);
-    } catch (_) {
-      reject(new Error('哈希计算失败'));
-      return;
-    }
-    const dir = binDir();
-    const bin = path.join(dir, `${name}-${hash}`);
-    if (fs.existsSync(bin)) {
-      resolve(bin);
-      return;
-    }
-    const tmpSrc = path.join(dir, `${name}-${hash}.swift`);
-    const tmpBin = bin + '.tmp';
-    try {
-      fs.writeFileSync(tmpSrc, source, { encoding: 'utf8', mode: 0o600 });
-    } catch (e) {
-      reject(new Error('写入源码失败：' + (e && e.message)));
-      return;
-    }
-    execFile(SWIFTC, ['-O', tmpSrc, '-o', tmpBin], { timeout: 120000 }, (err) => {
-      try {
-        fs.unlinkSync(tmpSrc);
-      } catch (_) {}
+    execFile(SWIFTC, ['-O', sourcePath, '-o', outputPath], { timeout: 120000 }, (err) => {
       if (err) {
         const raw = String((err && err.message) || err || '');
         // 已知系统问题：CLT 与 SDK 的 SwiftBridging modulemap 冲突（macOS 更新后常见）
@@ -62,12 +36,23 @@ function ensureBinary({ name, source }) {
         }
         return;
       }
-      try {
-        fs.renameSync(tmpBin, bin);
-      } catch (_) {}
-      resolve(bin);
+      resolve();
     });
   });
+}
+
+const binaryCache = createSwiftBinaryCache({ cacheDir: binDir, compile: compileSwift });
+const binaryProvider = createSwiftBinaryProvider({
+  isPackaged: () => app.isPackaged,
+  resourcesPath: () => process.resourcesPath,
+  runtimeArch: () => process.arch,
+  developmentCache: binaryCache
+});
+
+// 已打包模式返回包内 helper；开发模式首次调用才编译并缓存。
+// 同一进程的并发请求共享编译 Promise；临时文件名包含随机后缀，避免多进程互相覆盖。
+function ensureBinary({ name, source }) {
+  return binaryProvider.ensureBinary({ name, source });
 }
 
 // 跑二进制并收集 stdout（带超时，超时 kill 进程）

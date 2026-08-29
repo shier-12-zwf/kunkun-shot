@@ -160,7 +160,7 @@
     });
   }
 
-  // captureFullscreenNow / captureWindow 是同步出图，原位反馈成功/失败
+  // captureFullscreenNow / captureWindow 只负责打开统一编辑器，最终输出由用户在编辑器确认。
   function bindCapture(btn, fn, busyText) {
     btn.addEventListener('click', async () => {
       setBusy(true);
@@ -168,8 +168,7 @@
       try {
         const res = await fn();
         if (res && res.ok) {
-          showStatus('ok', '已捕获，已存入历史', true);
-          await refreshRecent();
+          showStatus('ok', '编辑器已打开', true);
           // 成功后短暂停留再收起弹窗
           setTimeout(() => { api.hidePopover(); }, 650);
         } else {

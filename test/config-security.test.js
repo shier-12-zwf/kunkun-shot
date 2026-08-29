@@ -106,6 +106,82 @@ test('malformed or schema-invalid config files fail closed to defaults', (t) => 
   }
 });
 
+test('legacy capture config gains PNG/90 export defaults without losing existing values', (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kk-shot-legacy-image-export-test-'));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(tempDir, 'config.json'),
+    JSON.stringify({ capture: { copyAfterCapture: true, autoPin: true } }),
+    { mode: 0o600 },
+  );
+
+  const capture = loadConfig(tempDir).get().capture;
+  assert.equal(capture.copyAfterCapture, true);
+  assert.equal(capture.autoPin, true);
+  assert.equal(capture.exportFormat, 'png');
+  assert.equal(capture.quality, 90);
+});
+
+test('unsupported OCR language updates fail closed without mutating memory or disk', (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kk-shot-ocr-lang-config-test-'));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+  const config = loadConfig(tempDir);
+  config.set({ ocr: { lang: 'chi_sim' } });
+
+  assert.throws(() => config.set({ ocr: { lang: 'chi_sim+jpn' } }), /OCR.*语言/);
+  assert.equal(config.get().ocr.lang, 'chi_sim');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(tempDir, 'config.json'), 'utf8')).ocr.lang, 'chi_sim');
+});
+
+test('legacy unsupported OCR language migrates only that field and preserves plaintext-era settings', (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kk-shot-ocr-lang-migration-test-'));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+  const target = path.join(tempDir, 'config.json');
+  fs.writeFileSync(target, JSON.stringify({
+    ocr: { engine: 'local', lang: 'jpn' },
+    general: { theme: 'dark', saveDir: '/tmp/keep-this-directory' },
+    shortcuts: { capture: 'CommandOrControl+Shift+7' },
+    deepseek: { apiKey: 'legacy-key-that-must-be-preserved-securely' },
+  }), { mode: 0o600 });
+
+  const config = loadConfig(tempDir, true);
+  const loaded = config.get();
+  assert.equal(loaded.ocr.lang, 'chi_sim+eng');
+  assert.equal(loaded.general.theme, 'dark');
+  assert.equal(loaded.general.saveDir, '/tmp/keep-this-directory');
+  assert.equal(loaded.shortcuts.capture, 'CommandOrControl+Shift+7');
+  assert.equal(loaded.deepseek.apiKey, 'legacy-key-that-must-be-preserved-securely');
+
+  const persisted = fs.readFileSync(target, 'utf8');
+  assert.equal(JSON.parse(persisted).ocr.lang, 'chi_sim+eng');
+  assert.doesNotMatch(persisted, /legacy-key-that-must-be-preserved-securely/);
+  assert.match(JSON.parse(persisted).deepseek.apiKey, /^enc:v1:/);
+});
+
+test('legacy OCR migration preserves an existing encrypted key and unrelated settings', (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kk-shot-ocr-encrypted-migration-test-'));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+  const target = path.join(tempDir, 'config.json');
+
+  loadConfig(tempDir, true).set({
+    deepseek: { apiKey: 'already-encrypted-key' },
+    general: { theme: 'dark' },
+    capture: { autoPin: true },
+  });
+  const before = JSON.parse(fs.readFileSync(target, 'utf8'));
+  before.ocr.lang = 'deu';
+  fs.writeFileSync(target, JSON.stringify(before), { mode: 0o600 });
+
+  const loaded = loadConfig(tempDir, true).get();
+  assert.equal(loaded.ocr.lang, 'chi_sim+eng');
+  assert.equal(loaded.general.theme, 'dark');
+  assert.equal(loaded.capture.autoPin, true);
+  assert.equal(loaded.deepseek.apiKey, 'already-encrypted-key');
+  const after = JSON.parse(fs.readFileSync(target, 'utf8'));
+  assert.equal(after.ocr.lang, 'chi_sim+eng');
+  assert.match(after.deepseek.apiKey, /^enc:v1:/);
+});
+
 test('schema-invalid legacy config still scrubs any plaintext API key', (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kk-shot-invalid-secret-config-test-'));
   t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));

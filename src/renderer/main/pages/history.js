@@ -19,6 +19,7 @@
     窗口: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18"/>',
     全屏: '<path d="M4 9V4h5 M20 9V4h-5 M4 15v5h5 M20 15v5h-5"/>',
     延时: '<circle cx="12" cy="13" r="8"/><path d="M12 13V9 M9 2h6"/>',
+    长截图: '<rect x="6" y="3" width="12" height="18" rx="2"/><path d="M12 6v12 M9 9l3-3 3 3 M9 15l3 3 3-3"/>',
     录屏: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/>',
     贴图: '<rect x="4" y="4" width="13" height="13" rx="2"/><path d="M9 20h9a2 2 0 0 0 2-2V9"/>',
     关闭: '<path d="M6 6l12 12 M18 6L6 18"/>',
@@ -27,12 +28,13 @@
   };
 
   // 类型元信息：键对应 item.type，名用于筛选与详情展示。
-  // 注：录屏保存为视频文件、从不入图片历史，故这里不含 record（避免一个永远为空的筛选项）。
   const TYPE_META = {
     region: { name: '区域', icon: '区域' },
     window: { name: '窗口', icon: '窗口' },
     fullscreen: { name: '全屏', icon: '全屏' },
     timed: { name: '延时', icon: '延时' },
+    long: { name: '长截图', icon: '长截图' },
+    recording: { name: '录屏', icon: '录屏' },
     pin: { name: '贴图', icon: '贴图' },
   };
 
@@ -43,6 +45,8 @@
     { key: 'window', name: '窗口' },
     { key: 'fullscreen', name: '全屏' },
     { key: 'timed', name: '延时' },
+    { key: 'long', name: '长截图' },
+    { key: 'recording', name: '录屏' },
     { key: 'pin', name: '贴图' },
   ];
 
@@ -113,6 +117,14 @@
     );
   }
 
+  function formatBytes(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10 * 1024 ? 1 : 0) + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0) + ' MB';
+    return (n / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+  }
+
   // ---------- 页面注册 ----------
   window.KKPages = window.KKPages || {};
   window.KKPages.history = {
@@ -169,7 +181,7 @@
         if (!allItems.length) return;
         confirmDialog({
           title: '清空全部历史？',
-          desc: '将永久删除全部 ' + allItems.length + ' 条截图记录，此操作不可撤销。',
+          desc: '将永久删除全部 ' + allItems.length + ' 条历史记录，此操作不可撤销。',
           okText: '清空全部',
           danger: true,
           onOk: async () => {
@@ -273,7 +285,7 @@
           const head = el('div', 'kk-hist-group-head');
           head.innerHTML =
             '<span class="kk-hist-group-title"><span class="kk-hist-group-caret">▸</span>' + escapeHTML(dayLabel(g.key)) + '</span>' +
-            '<span class="kk-hist-group-count">' + g.items.length + ' 张</span>';
+            '<span class="kk-hist-group-count">' + g.items.length + ' 条</span>';
           head.addEventListener('click', () => group.classList.toggle('is-collapsed'));
           group.appendChild(head);
           const grid = el('div', 'kk-hist-grid');
@@ -327,9 +339,9 @@
           img.draggable = false;
           thumbBox.appendChild(img);
         } else {
-          // 缺图占位
+          // 录屏没有图片缩略图；损坏图片也用其语义类型作为占位。
           const ph = el('div', 'kk-hist-thumb-ph');
-          ph.innerHTML = svgIcon('图片', 'ico-lg');
+          ph.innerHTML = svgIcon(typeIconName(it.type), 'ico-lg');
           thumbBox.appendChild(ph);
         }
 
@@ -353,7 +365,9 @@
 
         // 卡片底部元信息
         const meta = el('div', 'kk-hist-card-meta');
-        const dims = it.width && it.height ? it.width + '×' + it.height : '';
+        const dims = it.width && it.height
+          ? it.width + '×' + it.height
+          : (it.kind === 'media' && it.size ? formatBytes(it.size) : '');
         meta.innerHTML =
           '<span class="kk-hist-card-time">' + escapeHTML(timeLabel(it.time)) + '</span>' +
           (dims ? '<span class="kk-hist-card-dims">' + escapeHTML(dims) + '</span>' : '');
@@ -429,8 +443,8 @@
         const box = el('div', 'kk-hist-detail-empty');
         box.innerHTML =
           svgIcon('图片', 'ico-lg') +
-          '<div class="kk-hist-detail-empty-title">选择一张截图</div>' +
-          '<div class="kk-hist-detail-empty-desc">点击左侧任意缩略图查看原图与详情，可对其复制、导出、识别或翻译。</div>';
+          '<div class="kk-hist-detail-empty-title">选择一条历史记录</div>' +
+          '<div class="kk-hist-detail-empty-desc">点击左侧记录查看详情；截图可复制、识别或翻译，录屏可再次导出。</div>';
         return box;
       }
 
@@ -442,23 +456,26 @@
           return;
         }
         const myToken = detailToken;
+        const isMedia = meta.kind === 'media';
 
         const head = el('div', 'kk-hist-detail-head');
         head.innerHTML =
-          '<span class="eyebrow">截图详情</span>' +
+          '<span class="eyebrow">历史详情</span>' +
           '<span class="kk-hist-detail-type">' +
           svgIcon(typeIconName(meta.type), 'ico-sm') +
           escapeHTML(typeName(meta.type)) +
           '</span>';
 
         const preview = el('div', 'kk-hist-preview');
-        preview.innerHTML = '<div class="kk-hist-preview-loading">加载预览…</div>';
+        preview.innerHTML = isMedia
+          ? '<div class="kk-hist-preview-loading">' + svgIcon('录屏', 'ico-lg') + '<div>录屏文件</div></div>'
+          : '<div class="kk-hist-preview-loading">加载预览…</div>';
 
         const info = el('div', 'kk-hist-info');
         const dims = meta.width && meta.height ? meta.width + ' × ' + meta.height + ' px' : '未知';
         info.innerHTML =
           infoRow('类型', typeName(meta.type)) +
-          infoRow('尺寸', dims) +
+          infoRow(isMedia ? '大小' : '尺寸', isMedia ? formatBytes(meta.size) : dims) +
           infoRow('时间', fullTimeLabel(meta.time));
 
         // 操作区
@@ -472,11 +489,11 @@
         btnAI.classList.add('kk-hist-act-wide'); // 占满整行
         const btnDel = actionBtn('删除', '删除', 'btn-danger');
 
-        actions.appendChild(btnCopy);
+        if (!isMedia) actions.appendChild(btnCopy);
         actions.appendChild(btnExport);
-        actions.appendChild(btnOCR);
-        actions.appendChild(btnTrans);
-        actions.appendChild(btnAI);
+        if (!isMedia) actions.appendChild(btnOCR);
+        if (!isMedia) actions.appendChild(btnTrans);
+        if (!isMedia) actions.appendChild(btnAI);
         actions.appendChild(btnDel);
 
         detailPanel.appendChild(head);
@@ -484,39 +501,43 @@
         detailPanel.appendChild(info);
         detailPanel.appendChild(actions);
 
-        // 异步取原图（加载完成前先禁用依赖原图的按钮，避免点了静默无反应；btnExport/btnAI 按 id 工作，无需禁用）
+        // 图片异步取原图；录屏只展示受管文件元数据，不把大视频读成 data URL。
         let dataURL = '';
-        [btnCopy, btnOCR, btnTrans].forEach((b) => { if (b) b.disabled = true; });
-        (async () => {
-          try {
-            const res = await kkapi.historyGet(id);
-            if (myToken !== detailToken) return; // 选中已切换，丢弃
-            dataURL = (res && res.dataURL) || '';
-            [btnCopy, btnOCR, btnTrans].forEach((b) => { if (b) b.disabled = !dataURL; });
-            preview.innerHTML = '';
-            if (dataURL) {
-              const img = el('img');
-              img.src = dataURL;
-              img.alt = typeName(meta.type) + '原图';
-              img.draggable = false;
-              preview.appendChild(img);
-            } else {
-              preview.innerHTML = '<div class="kk-hist-preview-loading">原图不可用</div>';
+        if (!isMedia) {
+          [btnCopy, btnOCR, btnTrans].forEach((b) => { if (b) b.disabled = true; });
+          (async () => {
+            try {
+              const res = await kkapi.historyGet(id);
+              if (myToken !== detailToken) return; // 选中已切换，丢弃
+              dataURL = (res && res.dataURL) || '';
+              [btnCopy, btnOCR, btnTrans].forEach((b) => { if (b) b.disabled = !dataURL; });
+              preview.innerHTML = '';
+              if (dataURL) {
+                const img = el('img');
+                img.src = dataURL;
+                img.alt = typeName(meta.type) + '原图';
+                img.draggable = false;
+                preview.appendChild(img);
+              } else {
+                preview.innerHTML = '<div class="kk-hist-preview-loading">原图不可用</div>';
+              }
+            } catch (e) {
+              if (myToken !== detailToken) return;
+              preview.innerHTML = '<div class="kk-hist-preview-loading">预览加载失败</div>';
             }
-          } catch (e) {
-            if (myToken !== detailToken) return;
-            preview.innerHTML = '<div class="kk-hist-preview-loading">预览加载失败</div>';
-          }
-        })();
+          })();
+        }
 
         // —— 操作绑定 ——
-        btnCopy.addEventListener('click', async () => {
-          if (!dataURL) return;
-          try {
-            await kkapi.copyImage(dataURL);
-            flashBtn(btnCopy, '已复制');
-          } catch (_) {}
-        });
+        if (!isMedia) {
+          btnCopy.addEventListener('click', async () => {
+            if (!dataURL) return;
+            try {
+              await kkapi.copyImage(dataURL);
+              flashBtn(btnCopy, '已复制');
+            } catch (_) {}
+          });
+        }
 
         btnExport.addEventListener('click', async () => {
           try {
@@ -525,31 +546,33 @@
           } catch (_) {}
         });
 
-        btnOCR.addEventListener('click', () => {
-          if (!dataURL) return;
-          try {
-            kkapi.openAIPanel({ mode: 'ocr', dataURL });
-          } catch (_) {}
-        });
+        if (!isMedia) {
+          btnOCR.addEventListener('click', () => {
+            if (!dataURL) return;
+            try {
+              kkapi.openAIPanel({ mode: 'ocr', dataURL });
+            } catch (_) {}
+          });
 
-        btnTrans.addEventListener('click', () => {
-          if (!dataURL) return;
-          try {
-            kkapi.openAIPanel({ mode: 'translateImage', dataURL });
-          } catch (_) {}
-        });
+          btnTrans.addEventListener('click', () => {
+            if (!dataURL) return;
+            try {
+              kkapi.openAIPanel({ mode: 'translateImage', dataURL });
+            } catch (_) {}
+          });
 
-        btnAI.addEventListener('click', () => {
-          try {
-            if (window.KKMain && typeof window.KKMain.go === 'function') {
-              window.KKMain.go('ai', { imageId: id });
-            }
-          } catch (_) {}
-        });
+          btnAI.addEventListener('click', () => {
+            try {
+              if (window.KKMain && typeof window.KKMain.go === 'function') {
+                window.KKMain.go('ai', { imageId: id });
+              }
+            } catch (_) {}
+          });
+        }
 
         btnDel.addEventListener('click', () => {
           confirmDialog({
-            title: '删除这张截图？',
+            title: '删除这条历史记录？',
             desc: '删除后无法恢复。',
             okText: '删除',
             danger: true,
@@ -576,7 +599,7 @@
         const count = el('div', 'kk-hist-bulk-count');
         count.innerHTML =
           '<span class="kk-hist-bulk-num">' + ids.length + '</span>' +
-          '<span class="kk-hist-bulk-label">已选 ' + ids.length + ' 张</span>';
+          '<span class="kk-hist-bulk-label">已选 ' + ids.length + ' 条</span>';
 
         // 选中缩略图条带预览
         const strip = el('div', 'kk-hist-bulk-strip');
@@ -590,7 +613,7 @@
             img.draggable = false;
             t.appendChild(img);
           } else {
-            t.innerHTML = svgIcon('图片', 'ico-sm');
+            t.innerHTML = svgIcon(typeIconName(it.type), 'ico-sm');
           }
           strip.appendChild(t);
         });
@@ -634,14 +657,14 @@
           try {
             if (kkapi.historyExportMany) {
               const res = await kkapi.historyExportMany(ids);
-              if (res && res.saved) flashBtn(btnExport, '已导出 ' + res.count + ' 张');
+              if (res && res.saved) flashBtn(btnExport, '已导出 ' + res.count + ' 项');
               else flashBtn(btnExport, '已取消');
             } else {
               let ok = 0;
               for (const id of ids) {
                 try { const res = await kkapi.historyExport(id); if (res && res.saved) ok++; } catch (_) {}
               }
-              flashBtn(btnExport, '已导出 ' + ok + ' 张');
+              flashBtn(btnExport, '已导出 ' + ok + ' 项');
             }
           } finally {
             btnExport.disabled = false;
@@ -651,9 +674,9 @@
         // 批量删除：确认后一次性删除（单次写盘 + 单次广播，避免逐个删的刷新风暴）
         btnDel.addEventListener('click', () => {
           confirmDialog({
-            title: '删除选中的 ' + ids.length + ' 张截图？',
+            title: '删除选中的 ' + ids.length + ' 条记录？',
             desc: '删除后无法恢复。',
-            okText: '删除 ' + ids.length + ' 张',
+            okText: '删除 ' + ids.length + ' 条',
             danger: true,
             onOk: async () => {
               try {
@@ -780,7 +803,7 @@
       async function reload() {
         let list = [];
         try {
-          list = await kkapi.historyList();
+          list = await kkapi.historyList({ includeMedia: true });
         } catch (_) {
           list = [];
         }

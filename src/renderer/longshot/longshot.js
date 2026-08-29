@@ -9,17 +9,303 @@
   // 也避免只按高度放行 4K×120000 这类会稳定耗尽内存的尺寸。
   const MAX_CANVAS_H = 120000;
   const MAX_CANVAS_PIXELS = 20 * 1024 * 1024;
+  const DEFAULT_MAX_FRAMES = 1000;
+  const DEFAULT_MAX_CONSECUTIVE_FAILURES = 5;
   const GROW_STEP = 4000;
 
-  function getMaxCanvasHeight(width) {
-    const w = Math.floor(Number(width));
-    if (!Number.isFinite(w) || w <= 0) return 0;
-    return Math.max(0, Math.min(MAX_CANVAS_H, Math.floor(MAX_CANVAS_PIXELS / w)));
+  function positiveInteger(value, fallback, maximum) {
+    const n = Math.floor(Number(value));
+    if (!Number.isFinite(n) || n <= 0) return fallback;
+    return Math.min(n, maximum);
   }
 
-  function isFrameWithinCanvasBudget(width, height) {
+  function normalizeDirection(value) {
+    if (value === 'horizontal' || value === 'vertical') return value;
+    return null;
+  }
+
+  function getMaxCanvasHeight(width, pixelBudget) {
+    const w = Math.floor(Number(width));
+    if (!Number.isFinite(w) || w <= 0) return 0;
+    const budget = positiveInteger(pixelBudget, MAX_CANVAS_PIXELS, MAX_CANVAS_PIXELS);
+    return Math.max(0, Math.min(MAX_CANVAS_H, Math.floor(budget / w)));
+  }
+
+  function isFrameWithinCanvasBudget(width, height, pixelBudget) {
     const h = Math.floor(Number(height));
-    return Number.isFinite(h) && h > 0 && h <= getMaxCanvasHeight(width);
+    return Number.isFinite(h) && h > 0 && h <= getMaxCanvasHeight(width, pixelBudget);
+  }
+
+  // Renderer 的异步抓帧不能靠几个全局布尔量表达生命周期。每次 start 生成新 token，
+  // stop/超限会立即使 token 失效，这样在途 capture Promise 即使稍后成功也不能触发拼接。
+  function createLongshotSession(options) {
+    const opts = options || {};
+    const limits = {
+      maxFrames: positiveInteger(opts.maxFrames, DEFAULT_MAX_FRAMES, 100000),
+      maxPixels: positiveInteger(opts.maxPixels, MAX_CANVAS_PIXELS, MAX_CANVAS_PIXELS),
+      maxConsecutiveFailures: positiveInteger(
+        opts.maxConsecutiveFailures,
+        DEFAULT_MAX_CONSECUTIVE_FAILURES,
+        100
+      ),
+    };
+    const directionConfirmations = positiveInteger(opts.directionConfirmations, 2, 10);
+    let generation = 0;
+    let active = false;
+    let direction = null;
+    let directionCandidate = null;
+    let directionCandidateCount = 0;
+    let frameCount = 0;
+    let consecutiveFailures = 0;
+    let stitchedPixels = 0;
+    let terminalReason = null;
+
+    function terminate(reason) {
+      active = false;
+      terminalReason = reason || 'stopped';
+      generation += 1;
+    }
+
+    function start(requestedDirection) {
+      generation += 1;
+      active = true;
+      direction = normalizeDirection(requestedDirection);
+      directionCandidate = null;
+      directionCandidateCount = 0;
+      frameCount = 0;
+      consecutiveFailures = 0;
+      stitchedPixels = 0;
+      terminalReason = null;
+      return generation;
+    }
+
+    function isCurrent(token) {
+      return active && token === generation;
+    }
+
+    function stop(reason) {
+      if (active) terminate(reason || 'stopped');
+      else if (!terminalReason) terminalReason = reason || 'stopped';
+    }
+
+    function observeDirection(token, observedDirection) {
+      if (!isCurrent(token)) return direction;
+      const observed = normalizeDirection(observedDirection);
+      if (!observed || direction) return direction;
+      if (directionCandidate === observed) directionCandidateCount += 1;
+      else {
+        directionCandidate = observed;
+        directionCandidateCount = 1;
+      }
+      if (directionCandidateCount >= directionConfirmations) direction = observed;
+      return direction;
+    }
+
+    function recordFailure(token) {
+      if (!isCurrent(token)) {
+        return {
+          accepted: false,
+          terminal: true,
+          consecutiveFailures,
+          reason: terminalReason || 'stale',
+        };
+      }
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= limits.maxConsecutiveFailures) {
+        const count = consecutiveFailures;
+        terminate('capture-failures');
+        return {
+          accepted: true,
+          terminal: true,
+          consecutiveFailures: count,
+          reason: 'capture-failures',
+        };
+      }
+      return { accepted: true, terminal: false, consecutiveFailures };
+    }
+
+    function recordSuccess(token) {
+      if (!isCurrent(token)) return false;
+      consecutiveFailures = 0;
+      return true;
+    }
+
+    function admitFrame(token, frame) {
+      if (!isCurrent(token)) {
+        return { accepted: false, terminal: true, reason: terminalReason || 'stale' };
+      }
+      const width = Math.floor(Number(frame && frame.width));
+      const height = Math.floor(Number(frame && frame.stitchedHeight));
+      if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+        return { accepted: false, terminal: false, reason: 'invalid-frame' };
+      }
+      if (frameCount >= limits.maxFrames) {
+        terminate('frame-limit');
+        return { accepted: false, terminal: true, reason: 'frame-limit' };
+      }
+      const pixels = width * height;
+      if (!Number.isSafeInteger(pixels) || pixels > limits.maxPixels) {
+        terminate('pixel-limit');
+        return { accepted: false, terminal: true, reason: 'pixel-limit' };
+      }
+      frameCount += 1;
+      stitchedPixels = Math.max(stitchedPixels, pixels);
+      return { accepted: true, terminal: false, frameCount, stitchedPixels };
+    }
+
+    function canFitCanvas(token, width, height) {
+      if (!isCurrent(token)) return false;
+      const pixels = Math.floor(Number(width)) * Math.floor(Number(height));
+      return Number.isSafeInteger(pixels) && pixels > 0 && pixels <= limits.maxPixels;
+    }
+
+    function updateStitchedPixels(token, width, height) {
+      if (!canFitCanvas(token, width, height)) return false;
+      stitchedPixels = Math.max(stitchedPixels, Math.floor(Number(width)) * Math.floor(Number(height)));
+      return true;
+    }
+
+    function fail(token, reason) {
+      if (!isCurrent(token)) return false;
+      terminate(reason);
+      return true;
+    }
+
+    function getState() {
+      return {
+        active,
+        direction,
+        frameCount,
+        consecutiveFailures,
+        stitchedPixels,
+        terminalReason,
+      };
+    }
+
+    return {
+      start,
+      stop,
+      fail,
+      isCurrent,
+      observeDirection,
+      recordFailure,
+      recordSuccess,
+      admitFrame,
+      canFitCanvas,
+      updateStitchedPixels,
+      getState,
+      getLimits: () => ({ ...limits }),
+    };
+  }
+
+  async function runCaptureStep(args) {
+    const session = args.session;
+    const token = args.token;
+    try {
+      const frame = await args.capture();
+      if (!session.isCurrent(token)) return { status: 'stale' };
+      if (!frame || !Number.isFinite(Number(frame.width)) || !Number.isFinite(Number(frame.height))) {
+        const emptyFailure = session.recordFailure(token, 'empty-frame');
+        return {
+          status: emptyFailure.terminal ? 'terminal' : 'failure',
+          reason: emptyFailure.reason || 'empty-frame',
+          consecutiveFailures: emptyFailure.consecutiveFailures,
+        };
+      }
+      const admission = session.admitFrame(token, {
+        width: frame.width,
+        stitchedHeight: frame.stitchedHeight || frame.height,
+      });
+      if (!admission.accepted) {
+        if (admission.reason === 'invalid-frame') {
+          const invalidFailure = session.recordFailure(token, 'invalid-frame');
+          return {
+            status: invalidFailure.terminal ? 'terminal' : 'failure',
+            reason: invalidFailure.reason || 'invalid-frame',
+            consecutiveFailures: invalidFailure.consecutiveFailures,
+          };
+        }
+        return { status: admission.terminal ? 'terminal' : 'failure', reason: admission.reason };
+      }
+      const value = args.consume ? await args.consume(frame, token) : undefined;
+      if (!session.isCurrent(token)) return { status: 'stale' };
+      return { status: 'ok', value, frameCount: admission.frameCount };
+    } catch (error) {
+      if (!session.isCurrent(token)) return { status: 'stale' };
+      const failure = session.recordFailure(token, 'capture-error');
+      return {
+        status: failure.terminal ? 'terminal' : 'failure',
+        reason: failure.reason || 'capture-error',
+        consecutiveFailures: failure.consecutiveFailures,
+        error,
+      };
+    }
+  }
+
+  // 位移需要连续稳定样本才确认；方向一旦锁定，反向的单帧噪声只会被丢弃。
+  function createDisplacementGate(options) {
+    const opts = options || {};
+    const confirmations = positiveInteger(opts.confirmations, 2, 10);
+    const toleranceRatio = Math.max(0, Math.min(2, Number(opts.toleranceRatio) || 0.65));
+    let direction = null;
+    let candidateDirection = null;
+    let candidateMagnitude = 0;
+    let candidateCount = 0;
+
+    function resetPending() {
+      candidateDirection = null;
+      candidateMagnitude = 0;
+      candidateCount = 0;
+    }
+
+    function observe(delta) {
+      const amount = Number(delta);
+      if (!Number.isFinite(amount) || Math.abs(amount) < 1) {
+        resetPending();
+        return { confirmed: false, reason: 'idle', direction };
+      }
+      const observedDirection = amount > 0 ? 'forward' : 'backward';
+      const magnitude = Math.abs(amount);
+      if (direction && observedDirection !== direction) {
+        resetPending();
+        return { confirmed: false, reason: 'opposite-direction', direction };
+      }
+      if (candidateDirection !== observedDirection) {
+        candidateDirection = observedDirection;
+        candidateMagnitude = magnitude;
+        candidateCount = 1;
+      } else {
+        const tolerance = Math.max(2, candidateMagnitude * toleranceRatio);
+        if (Math.abs(magnitude - candidateMagnitude) > tolerance) {
+          candidateMagnitude = magnitude;
+          candidateCount = 1;
+          return { confirmed: false, reason: 'unstable-displacement', direction };
+        }
+        candidateCount += 1;
+        candidateMagnitude = (candidateMagnitude + magnitude) / 2;
+      }
+      if (candidateCount < confirmations) {
+        return { confirmed: false, reason: 'awaiting-confirmation', direction };
+      }
+      if (!direction) direction = observedDirection;
+      resetPending();
+      return { confirmed: true, direction, displacement: Math.round(magnitude) };
+    }
+
+    return {
+      observe,
+      resetPending,
+      getState: () => ({ direction, candidateDirection, candidateMagnitude, candidateCount }),
+    };
+  }
+
+  function getNextCaptureDelay(status, streak) {
+    const n = Math.max(0, Math.floor(Number(streak) || 0));
+    if (status === 'movement') return 180;
+    if (status === 'movement-pending' || status === 'unmatched') return 240;
+    if (status === 'failure') return Math.min(2000, 400 * Math.pow(2, Math.max(0, n - 1)));
+    if (status === 'idle') return Math.min(1000, 320 + n * 120);
+    return 320;
   }
 
   // 把「异步解码 + 横向转置」保留为可独立测试的边界。横向分支必须等图片解码
@@ -46,13 +332,18 @@
     return !!match && match.overlap === 0 && match.hadContent === true;
   }
 
-  async function saveLongshotAndClose(api, dataURL) {
+  async function saveLongshotAndClose(api, dataURL, shouldContinue) {
+    const isCurrent = typeof shouldContinue === 'function' ? shouldContinue : () => true;
+    if (!isCurrent()) return { stale: true };
     const result = await api.saveImage(dataURL);
+    if (!isCurrent()) return { stale: true };
     if (!result || result.saved !== true) {
       throw new Error('保存已取消或失败');
     }
     await api.copyImage(dataURL);
+    if (!isCurrent()) return { stale: true };
     await api.closeSelf();
+    return { saved: true };
   }
 
   // Node 回归测试只加载上面的纯函数，不初始化 renderer DOM。
@@ -62,9 +353,15 @@
       overlapResult,
       shouldPauseForUnmatchedContent,
       MAX_CANVAS_PIXELS,
+      DEFAULT_MAX_FRAMES,
+      DEFAULT_MAX_CONSECUTIVE_FAILURES,
       getMaxCanvasHeight,
       isFrameWithinCanvasBudget,
       saveLongshotAndClose,
+      createLongshotSession,
+      runCaptureStep,
+      createDisplacementGate,
+      getNextCaptureDelay,
     };
     return;
   }
@@ -81,14 +378,22 @@
   let stitchCtx = null;
   let stitchedHeight = 0; // 当前已拼接的实际像素高度（canvas 可能比它高，预留空间）
 
-  let timer = null; // setInterval 句柄
+  let timer = null; // 单次 setTimeout 句柄；每帧结束后按状态自适应调度下一帧
   let capturing = false; // 是否处于捕获中
-  let busy = false; // 完成/单帧处理中，避免并发
+  let captureBusy = false; // 单帧处理中，避免并发
+  let finishing = false; // 导出/保存中
   let horizontal = false; // 横向滚动模式（帧转置复用纵向拼接）
+  let captureHorizontal = false; // 会话开始时锁定，捕获中不再读取可变 UI 值
   let frameCount = 0; // 已捕获帧数（含首帧）
+  let captureSession = null;
+  let captureToken = null;
+  let sessionOptions = {};
+  let displacementGate = null;
+  let idleStreak = 0;
+  let failureStreak = 0;
+  let operationGeneration = 0; // 保存/取消也需要抵御迟到回调
 
   // ====== 算法参数 ======
-  const TICK_MS = 700; // 抓帧间隔
   const SAMPLE_COLS = 24; // 每行横向采样点数
   const SEARCH_ROWS = 8; // 用于匹配的「行块」高度（采样多少行做指纹）
   const STEP = 2; // offset 搜索步长（先粗搜，命中后细化）
@@ -129,7 +434,7 @@
   }
 
   // ====== 抓一帧 ======
-  async function grabFrame() {
+  async function grabFrame(isHorizontal) {
     const dataURL = await kkapi.captureRegion({
       rect: RECT,
       displayId: DISPLAY_ID,
@@ -139,14 +444,14 @@
     return loadFrameForDirection(
       loadDataURL,
       dataURL,
-      horizontal,
+      isHorizontal,
       () => document.createElement('canvas')
     );
   }
 
   // ====== 创建/初始化拼接 canvas（首帧）======
-  function initStitch(frame) {
-    if (!isFrameWithinCanvasBudget(frame.width, frame.height)) {
+  function initStitch(frame, pixelBudget) {
+    if (!isFrameWithinCanvasBudget(frame.width, frame.height, pixelBudget)) {
       throw new Error('选区分辨率过高，超出长截图的安全内存上限');
     }
     stitchCanvas = document.createElement('canvas');
@@ -158,9 +463,9 @@
   }
 
   // ====== 确保拼接 canvas 至少能容纳 needHeight；不够则用临时 canvas 扩高复制 ======
-  function ensureCapacity(needHeight) {
+  function ensureCapacity(needHeight, pixelBudget) {
     if (needHeight <= stitchCanvas.height) return true;
-    const maxHeight = getMaxCanvasHeight(stitchCanvas.width);
+    const maxHeight = getMaxCanvasHeight(stitchCanvas.width, pixelBudget);
     if (needHeight > maxHeight) return false;
     let target = stitchCanvas.height + GROW_STEP;
     while (target < needHeight) target += GROW_STEP;
@@ -265,7 +570,8 @@
     return overlapResult(0, anyContent);
   }
 
-  async function consumeFrame(frame) {
+  function consumeFrame(frame, token) {
+    if (!captureSession || !captureSession.isCurrent(token)) return { status: 'stale', changed: false };
     const m = matchOverlap(frame.ctx, frame.width, frame.height);
     const overlap = m.overlap;
     const appendH = frame.height - overlap;
@@ -274,7 +580,15 @@
     // 阈值用帧高的 0.5% 或至少 2px，避免抖动/亚像素噪声反复追加。
     const threshold = Math.max(2, Math.floor(frame.height * 0.005));
     if (appendH <= threshold) {
-      return false; // 未滚动，不追加
+      displacementGate.observe(0);
+      return { status: 'idle', changed: false }; // 未滚动，不追加
+    }
+
+    // 纯色/全透明等视觉空帧无法产生可靠重叠。不再把整帧硬接上去，
+    // 由会话的连续失败计数进行有界重试。
+    if (overlap === 0 && !m.hadContent) {
+      displacementGate.resetPending();
+      return { status: 'empty-frame', changed: false };
     }
 
     // 有内容却没能匹配上重叠（overlap=0 且本应有内容）：多半滚动过快或渲染有差异。
@@ -283,7 +597,17 @@
     if (shouldPauseForUnmatchedContent(m)) {
       $hint.textContent = '滚动过快，已暂停拼接——请放慢匀速下滚';
       $hint.style.color = '#ff5a5a';
-      return false;
+      displacementGate.resetPending();
+      return { status: 'unmatched', changed: false };
+    }
+
+    // 单帧的重叠误判不立即写入 canvas；等连续位移样本稳定后再接入当前帧。
+    // 因为当前帧仍然相对已拼接底部做匹配，等待确认不会丢掉中间内容。
+    const movement = displacementGate.observe(appendH);
+    if (!movement.confirmed) {
+      $hint.style.color = '';
+      $hint.textContent = '正在确认稳定位移…';
+      return { status: 'movement-pending', changed: false };
     }
     // 正常拼接：清掉可能残留的警告态
     if ($hint.style.color) {
@@ -292,12 +616,15 @@
     }
 
     const newHeight = stitchedHeight + appendH;
-    if (!ensureCapacity(newHeight)) {
-      // 到达 canvas 高度上限：停止继续捕获，提示用户完成。
-      stopCapture();
-      $hint.textContent = '已达最大长度，请点完成';
-      return false;
+    const pixelBudget = captureSession.getLimits().maxPixels;
+    if (
+      !captureSession.canFitCanvas(token, stitchCanvas.width, newHeight) ||
+      !ensureCapacity(newHeight, pixelBudget)
+    ) {
+      return { status: 'terminal', reason: 'pixel-limit', changed: false };
     }
+
+    if (!captureSession.isCurrent(token)) return { status: 'stale', changed: false };
 
     // 把新帧的 [overlap, frame.height) 这段，绘制到拼接 canvas 底部
     stitchCtx.drawImage(
@@ -312,24 +639,106 @@
       appendH // 目标区域
     );
     stitchedHeight = newHeight;
-    return true;
+    captureSession.updateStitchedPixels(token, stitchCanvas.width, stitchedHeight);
+    return { status: 'movement', changed: true };
   }
 
-  // ====== 定时 tick ======
+  function clearCaptureTimer() {
+    if (!timer) return;
+    clearTimeout(timer);
+    timer = null;
+  }
+
+  function scheduleNextTick(status, streak) {
+    clearCaptureTimer();
+    if (!capturing || !captureSession || !captureSession.isCurrent(captureToken)) return;
+    timer = setTimeout(tick, getNextCaptureDelay(status, streak));
+  }
+
+  function captureTerminalMessage(reason, count) {
+    if (reason === 'capture-failures') {
+      return '连续 ' + String(count || DEFAULT_MAX_CONSECUTIVE_FAILURES) + ' 次抓帧失败，已安全停止';
+    }
+    if (reason === 'frame-limit') return '已达会话最大帧数，请点完成';
+    if (reason === 'pixel-limit') return '已达图像像素/内存安全上限，请点完成';
+    return '捕获已停止，可保存已拼接内容';
+  }
+
+  function endCapture(reason, count) {
+    capturing = false;
+    clearCaptureTimer();
+    $dot.classList.remove('live');
+    if (captureSession && captureSession.isCurrent(captureToken)) captureSession.fail(captureToken, reason);
+    $hint.style.color = '#b45309';
+    $hint.textContent = captureTerminalMessage(reason, count);
+    $btnDone.disabled = !stitchCanvas || stitchedHeight <= 0;
+    $btnStart.disabled = !!stitchCanvas;
+    $btnDir.disabled = !!stitchCanvas;
+  }
+
+  // ====== 单次自适应 tick ======
   async function tick() {
-    if (!capturing || busy) return;
-    busy = true;
+    if (!capturing || captureBusy || finishing || !captureSession) return;
+    const token = captureToken;
+    captureBusy = true;
+    let cadenceStatus = 'idle';
+    let cadenceStreak = idleStreak;
     try {
-      const frame = await grabFrame();
-      // 帧宽和拼接宽应一致；若不一致（罕见，缩放抖动）按较小宽处理，matchOverlap 已做兼容。
-      const changed = await consumeFrame(frame);
-      if (changed) updateCount(frameCount + 1);
-    } catch (e) {
-      // 单帧失败不致命，下个 tick 重试
-      // 仅在 hint 上轻提示
-      $hint.textContent = '抓帧失败，重试中…';
+      const result = await runCaptureStep({
+        session: captureSession,
+        token,
+        capture: () => grabFrame(captureHorizontal),
+        consume: (frame) => consumeFrame(frame, token),
+      });
+      if (result.status === 'stale') return;
+      if (result.status === 'terminal') {
+        endCapture(result.reason, result.consecutiveFailures);
+        return;
+      }
+      if (result.status === 'failure') {
+        failureStreak = result.consecutiveFailures || failureStreak + 1;
+        idleStreak = 0;
+        cadenceStatus = 'failure';
+        cadenceStreak = failureStreak;
+        $hint.style.color = '#b45309';
+        $hint.textContent = '抓帧失败（' + failureStreak + '），将自动重试…';
+        return;
+      }
+
+      updateCount(result.frameCount);
+      const outcome = result.value || { status: 'idle', changed: false };
+      if (outcome.status === 'terminal') {
+        endCapture(outcome.reason);
+        return;
+      }
+      if (outcome.status === 'empty-frame') {
+        const failure = captureSession.recordFailure(token, 'empty-frame');
+        failureStreak = failure.consecutiveFailures;
+        idleStreak = 0;
+        if (failure.terminal) {
+          endCapture(failure.reason, failure.consecutiveFailures);
+          return;
+        }
+        cadenceStatus = 'failure';
+        cadenceStreak = failureStreak;
+        $hint.style.color = '#b45309';
+        $hint.textContent = '抓到空帧（' + failureStreak + '），将自动重试…';
+        return;
+      }
+
+      captureSession.recordSuccess(token);
+      failureStreak = 0;
+      cadenceStatus = outcome.status;
+      if (outcome.status === 'idle') {
+        idleStreak += 1;
+        cadenceStreak = idleStreak;
+      } else {
+        idleStreak = 0;
+        cadenceStreak = 0;
+      }
     } finally {
-      busy = false;
+      captureBusy = false;
+      scheduleNextTick(cadenceStatus, cadenceStreak);
     }
   }
 
@@ -349,51 +758,83 @@
 
   // ====== 开始捕获 ======
   async function startCapture() {
-    if (capturing || busy) return;
-    busy = true;
+    if (capturing || captureBusy || finishing || stitchCanvas) return;
+    operationGeneration += 1;
+    captureSession = createLongshotSession(sessionOptions);
+    captureHorizontal = horizontal;
+    captureToken = captureSession.start(captureHorizontal ? 'horizontal' : 'vertical');
+    displacementGate = createDisplacementGate({ confirmations: 2, toleranceRatio: 0.65 });
+    idleStreak = 0;
+    failureStreak = 0;
+    captureBusy = true;
     $btnStart.disabled = true;
+    $btnDir.disabled = true;
+    $hint.style.color = '';
     $hint.textContent = '正在抓取首帧…';
     try {
-      const first = await grabFrame();
-      initStitch(first);
-      updateCount(1);
+      const token = captureToken;
+      const result = await runCaptureStep({
+        session: captureSession,
+        token,
+        capture: () => grabFrame(captureHorizontal),
+        consume: (first) => {
+          initStitch(first, captureSession.getLimits().maxPixels);
+          captureSession.updateStitchedPixels(token, first.width, first.height);
+          return { status: 'initial', changed: true };
+        },
+      });
+      if (result.status === 'stale') return;
+      if (result.status !== 'ok') throw (result.error || new Error(result.reason || '首帧失败'));
+      captureSession.recordSuccess(token);
+      updateCount(result.frameCount);
       capturing = true;
       $dot.classList.add('live');
       $btnDone.disabled = false;
-      $hint.textContent = '滚动页面会自动拼接';
-      timer = setInterval(tick, TICK_MS);
+      $hint.textContent = captureHorizontal ? '水平滚动页面会自动拼接' : '滚动页面会自动拼接';
+      scheduleNextTick('idle', 0);
     } catch (e) {
       // 首帧失败：恢复可重试
+      if (captureSession && captureSession.isCurrent(captureToken)) captureSession.stop('first-frame-failure');
+      captureToken = null;
+      stitchCanvas = null;
+      stitchCtx = null;
+      stitchedHeight = 0;
+      updateCount(0);
+      $cropBox.hidden = true;
       $btnStart.disabled = false;
+      $btnDir.disabled = false;
       $hint.textContent = '首帧失败，请重试';
     } finally {
-      busy = false;
+      captureBusy = false;
     }
   }
 
   // ====== 停止定时器（仍保留已拼接内容）======
-  function stopCapture() {
+  function stopCapture(reason) {
     capturing = false;
     $dot.classList.remove('live');
-    if (timer) {
-      clearInterval(timer);
-      timer = null;
+    clearCaptureTimer();
+    if (captureSession && captureSession.isCurrent(captureToken)) {
+      captureSession.stop(reason || 'stopped');
     }
   }
 
   // ====== 完成：导出 -> 保存 + 复制 -> 关窗 ======
   async function finish() {
-    if (busy) return;
-    stopCapture();
+    if (finishing) return;
+    stopCapture('finished');
+    const finishGeneration = ++operationGeneration;
 
     if (!stitchCanvas || stitchedHeight <= 0) {
       // 还没开始捕获就点完成：直接关闭
+      finishing = true;
       await kkapi.closeSelf();
       return;
     }
 
-    busy = true;
+    finishing = true;
     $bar.classList.add('busy');
+    $hint.style.color = '';
     $hint.textContent = '正在拼接并保存…';
 
     try {
@@ -405,7 +846,7 @@
 
       // 裁剪和横向还原最多只创建一个额外 canvas，避免“预留裁剪 + 手动裁剪 +
       // 旋转”连续保留三份完整 RGBA 位图造成峰值内存倍增。
-      if (horizontal) {
+      if (captureHorizontal) {
         const rot = document.createElement('canvas');
         rot.width = finalH;
         rot.height = stitchCanvas.width;
@@ -448,11 +889,16 @@
         throw new Error('导出失败：拼接图过大或为空，无法生成 PNG');
       }
       // 只有主进程明确返回 saved:true 才复制并关窗；取消保存或失败时保留拼接图供重试。
-      await saveLongshotAndClose(kkapi, dataURL);
+      await saveLongshotAndClose(
+        kkapi,
+        dataURL,
+        () => finishing && finishGeneration === operationGeneration
+      );
     } catch (e) {
+      if (finishGeneration !== operationGeneration) return;
       // 不要静默关窗丢图：唯一一份拼接图在内存里，关窗即丢失。给出可见提示并保留控制条供重试。
       console.error('[longshot] 保存失败', e);
-      busy = false;
+      finishing = false;
       $bar.classList.remove('busy');
       $hint.textContent = '保存失败：' + ((e && e.message) || e) + '，可点「完成」重试或「取消」放弃';
     }
@@ -460,13 +906,15 @@
 
   // ====== 取消 ======
   async function cancel() {
-    stopCapture();
+    operationGeneration += 1;
+    finishing = false;
+    stopCapture('cancelled');
     await kkapi.closeSelf();
   }
 
   // ====== 绑定 UI ======
   $btnDir.addEventListener('click', () => {
-    if (busy) return;
+    if (capturing || captureBusy || finishing || stitchCanvas) return;
     horizontal = !horizontal;
     $btnDir.querySelector('.label').textContent = horizontal ? '横向' : '纵向';
     $btnDir.title = '切换滚动方向（当前：' + (horizontal ? '横向' : '纵向') + '）';
@@ -497,6 +945,12 @@
     RECT = payload.rect;
     DISPLAY_ID = payload.displayId;
     SCALE = payload.scaleFactor || 1;
+    const limits = payload.longshotLimits || {};
+    sessionOptions = {
+      maxFrames: limits.maxFrames,
+      maxPixels: limits.maxPixels,
+      maxConsecutiveFailures: limits.maxConsecutiveFailures,
+    };
     // 兜底：rect 缺失时禁用开始
     if (!RECT || !RECT.width || !RECT.height) {
       $hint.textContent = '选区无效，请取消重来';

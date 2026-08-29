@@ -3,6 +3,34 @@
   'use strict';
 
   const api = window.kkapi;
+  const lifecycleContract = window.KKRecorderLifecycle;
+  if (!lifecycleContract || typeof lifecycleContract.createRecorderLifecycle !== 'function') {
+    throw new Error('录屏生命周期模块未加载');
+  }
+  const { RECORDER_STATES, createRecorderLifecycle } = lifecycleContract;
+  const stateReportsInFlight = new Set();
+
+  function reportLifecycleState(snapshot) {
+    if (typeof api.reportRecordingState !== 'function') return;
+    let report;
+    try {
+      // invoke 在这里同步发出 IPC，同一 renderer 的状态顺序由 Electron 保持；
+      // 不把 starting 排在较慢的 idle 响应后，缩小二次启动误关窗的窗口期。
+      report = Promise.resolve(api.reportRecordingState(snapshot)).catch(() => {});
+    } catch (_) {
+      return;
+    }
+    stateReportsInFlight.add(report);
+    report.then(() => stateReportsInFlight.delete(report));
+  }
+
+  const lifecycle = createRecorderLifecycle({
+    onChange: reportLifecycleState,
+  });
+
+  function flushLifecycleState() {
+    return Promise.all([...stateReportsInFlight]).then(() => undefined, () => undefined);
+  }
 
   // ---- DOM 引用 ----
   const elBar = document.getElementById('bar');
@@ -16,7 +44,8 @@
   const elToast = document.getElementById('toast');
 
   // ---- 初始化 payload（由主进程通过 onInit 注入）----
-  // 结构: { rect, displayBounds, scaleFactor, displayId, fps, toGif }
+  // 结构: { rect, displayBounds, scaleFactor, displayId, fps, toGif, systemAudio, microphone }
+  // 音频选项只有严格为 true 时才开启，保证旧版 WINDOW_INIT payload 默认仍为静音录屏。
   let init = {
     rect: { x: 0, y: 0, width: 0, height: 0 },
     displayBounds: { x: 0, y: 0, width: 0, height: 0 },
@@ -24,11 +53,16 @@
     displayId: '',
     fps: 15,
     toGif: false,
+    systemAudio: false,
+    microphone: false,
   };
 
   // ---- 录制运行时状态 ----
   let captureStream = null; // getUserMedia 拿到的整屏流
+  let microphoneStream = null; // 可选麦克风流（与整屏流分开申请）
   let canvasStream = null; // canvas.captureStream 产出的裁剪流
+  let audioMixContext = null; // 系统音频 + 麦克风同时开启时的 Web Audio 混音器
+  let audioMixNodes = [];
   let recorder = null; // MediaRecorder 实例
   let videoEl = null; // 隐藏的 <video>
   let canvasEl = null; // 离屏绘制用 canvas
@@ -39,13 +73,24 @@
   // 当前保存协议需要 Blob → ArrayBuffer → IPC 的整包传输；把单次上限控制在 128 MiB，
   // 避免 renderer、structured clone 与主进程副本叠加成数 GiB 内存峰值。
   const MAX_RECORDING_BYTES = 128 * 1024 * 1024;
+  const RECORDER_STOP_WATCHDOG_MS = 4000;
+  const PARTIAL_RECORDING_CAUSES = Object.freeze({
+    RECORDER_ERROR: 'recorder-error',
+    STOP_TIMEOUT: 'stop-timeout',
+  });
   let pendingRecordingBlob = null; // 保存失败时保留唯一副本，允许用户重试或主动放弃
   let saveInProgress = false;
   let timerInterval = null; // 计时器句柄
-  let startedAt = 0; // 录制开始时间戳
+  let startedAt = 0; // 当前活跃录制段的开始时间戳
+  let elapsedBeforePause = 0; // 暂停前已完成的录制时长（不含暂停时间）
   let isRecording = false;
+  let isStarting = false; // 防止双击并发申请媒体权限/设备
   let isPaused = false; // 是否正在录制
   let isFinishing = false; // 是否正在停止保存（防重复触发）
+  let partialRecordingCause = null; // 编码器出错/停止确认超时后，只允许用户确认保存部分录屏
+  let hasFinalizedRecorderStop = false; // 每次录制只允许一个 stop/watchdog 进入序列化
+  let recorderStopWatchdog = null;
+  let terminalCloseRequested = false; // 只有已保存/已确认放弃才能正常关窗
   let toastTimer = null;
 
   // ====== 工具函数 ======
@@ -89,6 +134,7 @@
     elStatus.hidden = true;
     elBtnStop.hidden = true;
     elBtnStart.hidden = false; // 关键：保留开始按钮，允许原地重试
+    elBtnStart.disabled = false;
     toastTimer = setTimeout(hideToast, 4000);
   }
 
@@ -104,6 +150,8 @@
     elBtnPause.hidden = true;
     elBtnRetry.hidden = false;
     elBtnRetry.disabled = false;
+    elBtnCancel.title = '放弃未保存的录屏';
+    elBtnCancel.setAttribute && elBtnCancel.setAttribute('aria-label', '放弃未保存的录屏');
   }
 
   // 格式化计时 mm:ss（超过一小时显示 hh:mm:ss）
@@ -117,23 +165,186 @@
   }
 
   // 计时器：每 200ms 刷新一次显示
-  function startTimer() {
+  function startTimer(reset) {
+    if (reset) elapsedBeforePause = 0;
     startedAt = Date.now();
-    elTimer.textContent = '00:00';
+    elTimer.textContent = formatTime(elapsedBeforePause);
     timerInterval = setInterval(() => {
-      elTimer.textContent = formatTime(Date.now() - startedAt);
+      elTimer.textContent = formatTime(elapsedBeforePause + Math.max(0, Date.now() - startedAt));
     }, 200);
   }
 
   function stopTimer() {
     if (timerInterval) {
+      elapsedBeforePause += Math.max(0, Date.now() - startedAt);
       clearInterval(timerInterval);
       timerInterval = null;
+      elTimer.textContent = formatTime(elapsedBeforePause);
     }
+  }
+
+  function getTracks(stream, kind) {
+    if (!stream) return [];
+    try {
+      const method = kind === 'audio' ? 'getAudioTracks' : 'getVideoTracks';
+      if (typeof stream[method] === 'function') return stream[method]();
+      if (typeof stream.getTracks === 'function') {
+        return stream.getTracks().filter((track) => track && track.kind === kind);
+      }
+    } catch (e) {
+      /* 无效流统一当作无 track，由上层给出可操作错误 */
+    }
+    return [];
+  }
+
+  function stopStreamTracks(stream) {
+    if (!stream || typeof stream.getTracks !== 'function') return;
+    try {
+      stream.getTracks().forEach((track) => {
+        try { track.stop(); } catch (e) { /* 忽略单 track 清理错误 */ }
+      });
+    } catch (e) {
+      /* 忽略已失效的 MediaStream */
+    }
+  }
+
+  function closeAudioMixer() {
+    const context = audioMixContext;
+    const nodes = audioMixNodes;
+    audioMixContext = null;
+    audioMixNodes = [];
+    nodes.forEach((node) => {
+      try { node.disconnect(); } catch (e) { /* 忽略 */ }
+    });
+    if (context && context.state !== 'closed' && typeof context.close === 'function') {
+      try {
+        const closing = context.close();
+        if (closing && typeof closing.catch === 'function') closing.catch(() => {});
+      } catch (e) {
+        /* 忽略关闭已失效 context 的错误 */
+      }
+    }
+  }
+
+  function captureFailure(code, message) {
+    const error = new Error(message);
+    error.captureCode = code;
+    return error;
+  }
+
+  function errorDetail(error, fallback) {
+    return (error && (error.message || error.name)) || fallback;
+  }
+
+  function isPermissionError(error) {
+    const detail = `${error && error.name ? error.name : ''} ${errorDetail(error, '')}`;
+    return /NotAllowed|Permission|Security|denied|refused/i.test(detail);
+  }
+
+  function isMissingDeviceError(error) {
+    const detail = `${error && error.name ? error.name : ''} ${errorDetail(error, '')}`;
+    return /NotFound|DevicesNotFound|Overconstrained|device.*not.*found|no.*device/i.test(detail);
+  }
+
+  async function acquireMicrophoneStream() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      if (!getTracks(stream, 'audio').length) {
+        stopStreamTracks(stream);
+        throw captureFailure('MICROPHONE_UNAVAILABLE', '未找到可用麦克风，请连接或启用麦克风后重试');
+      }
+      return stream;
+    } catch (error) {
+      if (error && error.captureCode) throw error;
+      if (isPermissionError(error)) {
+        throw captureFailure('MICROPHONE_PERMISSION_DENIED', '麦克风权限被拒绝，请在系统设置中允许麦克风访问后重试');
+      }
+      if (isMissingDeviceError(error)) {
+        throw captureFailure('MICROPHONE_UNAVAILABLE', '未找到可用麦克风，请连接或启用麦克风后重试');
+      }
+      throw captureFailure(
+        'MICROPHONE_CAPTURE_FAILED',
+        `获取麦克风失败：${errorDetail(error, '未知错误')}，请检查设备后重试`
+      );
+    }
+  }
+
+  async function attachRequestedAudio(targetStream) {
+    const inputStreams = [];
+    if (init.systemAudio === true) inputStreams.push(captureStream);
+    if (init.microphone === true) inputStreams.push(microphoneStream);
+    if (!inputStreams.length) return;
+
+    if (!targetStream || typeof targetStream.addTrack !== 'function') {
+      throw captureFailure('AUDIO_STREAM_UNSUPPORTED', '当前环境无法将音频加入录屏，请关闭音频选项后重试');
+    }
+
+    const audioTracks = inputStreams.flatMap((stream) => getTracks(stream, 'audio'));
+    if (audioTracks.length === 1) {
+      targetStream.addTrack(audioTracks[0]);
+      return;
+    }
+
+    // MediaRecorder 对多条音轨的容器行为并不稳定，因此双音源先混成唯一音轨。
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) {
+      throw captureFailure(
+        'AUDIO_MIX_UNSUPPORTED',
+        '当前运行环境无法混合系统音频和麦克风，请只选择一种音频后重试'
+      );
+    }
+
+    try {
+      audioMixContext = new AudioContextCtor();
+      if (audioMixContext.state === 'suspended' && typeof audioMixContext.resume === 'function') {
+        await audioMixContext.resume();
+      }
+      const destination = audioMixContext.createMediaStreamDestination();
+      audioMixNodes = inputStreams.map((stream) => {
+        const node = audioMixContext.createMediaStreamSource(stream);
+        node.connect(destination);
+        return node;
+      });
+      const mixedTracks = getTracks(destination.stream, 'audio');
+      if (!mixedTracks.length) throw new Error('混音器未产生音轨');
+      targetStream.addTrack(mixedTracks[0]);
+    } catch (error) {
+      throw captureFailure(
+        'AUDIO_MIX_FAILED',
+        `无法混合系统音频和麦克风：${errorDetail(error, '未知错误')}，请只选择一种音频后重试`
+      );
+    }
+  }
+
+  function clearRecorderStopWatchdog() {
+    if (recorderStopWatchdog === null) return;
+    clearTimeout(recorderStopWatchdog);
+    recorderStopWatchdog = null;
+  }
+
+  function armRecorderStopWatchdog(targetRecorder) {
+    if (recorderStopWatchdog !== null) return;
+    recorderStopWatchdog = setTimeout(() => {
+      recorderStopWatchdog = null;
+      if (
+        targetRecorder !== recorder
+        || hasFinalizedRecorderStop
+        || !isFinishing
+      ) return;
+      // 正常 stop 后若既没有 stop 也没有 error，chunks 的完整性不可证明。
+      // 若已收到 encoder error，保留更具体的原因，两条路径共用同一个 deadline。
+      if (!partialRecordingCause) {
+        partialRecordingCause = PARTIAL_RECORDING_CAUSES.STOP_TIMEOUT;
+      }
+      // 某些 MediaRecorder 实现在 error 后不再派发 stop。
+      // 有限等待后用已收到的 chunks 收尾，迟到的 stop 会被一次性 gate 忽略。
+      Promise.resolve(onRecorderStop(targetRecorder)).catch(() => {});
+    }, RECORDER_STOP_WATCHDOG_MS);
   }
 
   // ====== 资源清理：停掉所有流、定时器、video ======
   function teardown() {
+    clearRecorderStopWatchdog();
     if (drawTimer) {
       clearInterval(drawTimer);
       drawTimer = null;
@@ -147,19 +358,14 @@
         /* 忽略 */
       }
     }
-    // 停所有 track（整屏流 + canvas 流）
-    const stopTracks = (stream) => {
-      if (!stream) return;
-      try {
-        stream.getTracks().forEach((t) => t.stop());
-      } catch (e) {
-        /* 忽略 */
-      }
-    };
-    stopTracks(captureStream);
-    stopTracks(canvasStream);
+    // 停所有 track（整屏流 + 麦克风 + canvas/混音流）
+    stopStreamTracks(captureStream);
+    stopStreamTracks(microphoneStream);
+    stopStreamTracks(canvasStream);
     captureStream = null;
+    microphoneStream = null;
     canvasStream = null;
+    closeAudioMixer();
     // 释放 video
     if (videoEl) {
       try {
@@ -174,7 +380,11 @@
 
   // ====== 开始录制 ======
   async function startRecording() {
-    if (isRecording || isFinishing) return;
+    if (isRecording || isStarting || isFinishing) return;
+    const startToken = lifecycle.beginStart();
+    if (!startToken) return;
+    isStarting = true;
+    elBtnStart.disabled = true;
 
     const scale = init.scaleFactor || 1;
     const rect = init.rect || {};
@@ -187,21 +397,46 @@
     try {
       // 1. 找到目标显示器对应的采集源
       const sources = await api.getSources();
+      if (!lifecycle.isCurrentGeneration(startToken)) {
+        isStarting = false;
+        return;
+      }
       if (!sources || !sources.length) {
         throw new Error('未找到可录制的屏幕源');
       }
-      let source = sources.find((s) => String(s.display_id) === String(init.displayId));
-      // macOS 上 source.display_id 可能为空串，直接匹配会失败 → 按主进程传来的显示器序号兜底，避免录错屏。
-      if (!source && init.displayIndex != null && init.displayIndex >= 0 && sources[init.displayIndex]) {
-        source = sources[init.displayIndex];
+      const directMatches = sources.filter((s) => (
+        s.display_id != null && String(s.display_id) !== '' && String(s.display_id) === String(init.displayId)
+      ));
+      let source = directMatches.length === 1 ? directMatches[0] : null;
+      if (!source && sources.length === 1) source = sources[0];
+      // source 数组顺序不是 Electron 的稳定契约。主进程已把 screen:<index>:… 解析成
+      // screen_index，必须按该字段匹配，而不能拿 displayIndex 直接索引 sources。
+      if (!source && Number.isInteger(init.displayIndex) && init.displayIndex >= 0) {
+        const indexedMatches = sources.filter((s) => {
+          const parsed = Number.isInteger(s.screen_index)
+            ? s.screen_index
+            : (() => {
+                const match = /^screen:(\d+):/i.exec(String(s.id || ''));
+                return match ? Number(match[1]) : null;
+              })();
+          return parsed === init.displayIndex;
+        });
+        if (indexedMatches.length === 1) source = indexedMatches[0];
       }
-      if (!source) source = sources[0]; // 仍找不到则退回第一个
+      if (!source) throw new Error('无法可靠匹配目标显示器，请重新选择录制区域');
 
       // 2. 整屏媒体流（Electron desktop 采集，需用 mandatory 约束）
       const maxW = Math.max(1, Math.round((db.width || 0) * scale));
       const maxH = Math.max(1, Math.round((db.height || 0) * scale));
       captureStream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
+        audio: init.systemAudio === true
+          ? {
+              mandatory: {
+                chromeMediaSource: 'desktop',
+                chromeMediaSourceId: source.id,
+              },
+            }
+          : false,
         video: {
           mandatory: {
             chromeMediaSource: 'desktop',
@@ -211,16 +446,52 @@
           },
         },
       });
+      if (!lifecycle.isCurrentGeneration(startToken)) {
+        teardown();
+        isStarting = false;
+        return;
+      }
+
+      if (init.systemAudio === true && !getTracks(captureStream, 'audio').length) {
+        throw captureFailure(
+          'SYSTEM_AUDIO_UNAVAILABLE',
+          '当前屏幕源未提供系统音频；当前 macOS/运行环境可能不支持，请关闭“系统音频”后重试'
+        );
+      }
+
+      if (init.microphone === true) {
+        microphoneStream = await acquireMicrophoneStream();
+        if (!lifecycle.isCurrentGeneration(startToken)) {
+          teardown();
+          isStarting = false;
+          return;
+        }
+      }
     } catch (err) {
+      if (!lifecycle.isCurrentGeneration(startToken)) {
+        teardown();
+        isStarting = false;
+        return;
+      }
       // 权限被拒 / 无可用源 等
-      const msg = (err && (err.message || err.name)) || '获取屏幕流失败';
-      let hint = '录制失败：' + msg;
-      if (/Permission|NotAllowed|denied/i.test(msg)) {
+      const msg = errorDetail(err, '获取屏幕流失败');
+      let hint = err && err.captureCode ? msg : '录制失败：' + msg;
+      if (!(err && err.captureCode) && init.systemAudio === true) {
+        if (isPermissionError(err)) {
+          hint = '屏幕或系统音频访问被拒绝，请检查系统录屏/音频权限后重试';
+        } else if (isMissingDeviceError(err)) {
+          hint = '屏幕源或系统音频不可用，请重新选择区域，或关闭“系统音频”后重试';
+        } else {
+          hint = `无法获取屏幕和系统音频：${msg}；当前系统可能不支持，可关闭“系统音频”后重试`;
+        }
+      } else if (!(err && err.captureCode) && isPermissionError(err)) {
         hint = '录屏被拒绝，请在系统设置中授予屏幕录制权限';
-      } else if (/NotFound|no.*source/i.test(msg)) {
+      } else if (!(err && err.captureCode) && isMissingDeviceError(err)) {
         hint = '未找到可录制的屏幕源';
       }
       teardown();
+      isStarting = false;
+      lifecycle.markError();
       showRecoverableError(hint); // 保留开始按钮，允许原地重试（而非隐藏全部控件只能关窗）
       return;
     }
@@ -243,6 +514,11 @@
         // 兜底：1s 后无论如何继续
         setTimeout(finish, 1000);
       });
+      if (!lifecycle.isCurrentGeneration(startToken)) {
+        teardown();
+        isStarting = false;
+        return;
+      }
       try {
         await videoEl.play();
       } catch (e) {
@@ -274,13 +550,20 @@
 
       // 5. 从 canvas 取流并录制
       canvasStream = canvasEl.captureStream(fps);
+      await attachRequestedAudio(canvasStream);
 
       // 优先 vp9，失败退 vp8，再退默认
-      const candidates = [
-        'video/webm;codecs=vp9',
-        'video/webm;codecs=vp8',
-        'video/webm',
-      ];
+      const candidates = getTracks(canvasStream, 'audio').length
+        ? [
+            'video/webm;codecs=vp9,opus',
+            'video/webm;codecs=vp8,opus',
+            'video/webm',
+          ]
+        : [
+            'video/webm;codecs=vp9',
+            'video/webm;codecs=vp8',
+            'video/webm',
+          ];
       let chosen = '';
       for (const t of candidates) {
         if (
@@ -297,6 +580,9 @@
       recordedBytes = 0;
       sizeLimitReached = false;
       pendingRecordingBlob = null;
+      partialRecordingCause = null;
+      clearRecorderStopWatchdog();
+      hasFinalizedRecorderStop = false;
       try {
         recorder = chosen
           ? new MediaRecorder(canvasStream, { mimeType: chosen })
@@ -306,7 +592,9 @@
         recorder = new MediaRecorder(canvasStream);
       }
 
-      recorder.ondataavailable = (ev) => {
+      const recordingRecorder = recorder;
+      recordingRecorder.ondataavailable = (ev) => {
+        if (recordingRecorder !== recorder || hasFinalizedRecorderStop) return;
         if (!ev.data || ev.data.size <= 0) return;
         if (recordedBytes + ev.data.size > MAX_RECORDING_BYTES) {
           sizeLimitReached = true;
@@ -316,20 +604,60 @@
         chunks.push(ev.data);
         recordedBytes += ev.data.size;
       };
-      recorder.onstop = onRecorderStop;
-      recorder.onerror = () => {
+      recordingRecorder.onstop = () => onRecorderStop(recordingRecorder);
+      recordingRecorder.onerror = () => {
+        if (recordingRecorder !== recorder || partialRecordingCause) return;
+        const stateBeforeError = lifecycle.snapshot().state;
         if (!isFinishing) {
-          teardown();
-          showToast('录制过程出错', true);
-          isRecording = false;
-          elBar.classList.remove('recording');
+          // error 后 MediaRecorder 通常还会产生最后的 dataavailable/stop。
+          // 先进入正常 stopping 代次，再尽力请求最后分片；不能先 teardown。
+          if (!lifecycle.beginStop().accepted) return;
+          isFinishing = true;
+        } else if (![
+          RECORDER_STATES.STOPPING,
+          RECORDER_STATES.SERIALIZING,
+        ].includes(stateBeforeError)) {
+          // save IPC 一旦提交就不能诚实地撤回；终态/重试态的迟到 error 也不得回退。
+          return;
         }
+        partialRecordingCause = PARTIAL_RECORDING_CAUSES.RECORDER_ERROR;
+        isRecording = false;
+        isPaused = false;
+        elBar.classList.remove('recording');
+        elBar.classList.remove('paused');
+        elBtnStop.disabled = true;
+        elBtnPause.hidden = true;
+        stopTimer();
+        if (drawTimer) {
+          clearInterval(drawTimer);
+          drawTimer = null;
+        }
+        showToast('录制过程出错，正在整理可恢复内容…', true);
+        if (!hasFinalizedRecorderStop) armRecorderStopWatchdog(recordingRecorder);
+
+        const failedRecorder = recordingRecorder;
+        if (failedRecorder && failedRecorder.state !== 'inactive') {
+          if (typeof failedRecorder.requestData === 'function') {
+            try { failedRecorder.requestData(); } catch (_) { /* 编码器可能已自行停止 */ }
+          }
+          try { failedRecorder.stop(); } catch (_) { /* 等待 MediaRecorder 的 stop 事件 */ }
+        }
+        // 不再继续采集新内容；canvas/混音输出在 onstop 组装 Blob 后统一清理。
+        stopStreamTracks(captureStream);
+        stopStreamTracks(microphoneStream);
       };
 
       // 每秒切一个数据块，避免单块过大
       recorder.start(1000);
 
+      if (!lifecycle.markActive(startToken).accepted) {
+        teardown();
+        isStarting = false;
+        return;
+      }
+
       // 6. 进入录制状态，更新 UI + 计时
+      isStarting = false;
       isRecording = true;
       isPaused = false;
       elBar.classList.add('recording');
@@ -340,23 +668,52 @@
       elBtnPause.title = '暂停录制';
       elBtnStop.hidden = false;
       elBtnStop.disabled = false;
-      startTimer();
+      startTimer(true);
     } catch (err) {
+      if (!lifecycle.isCurrentGeneration(startToken)) {
+        teardown();
+        isStarting = false;
+        return;
+      }
       const msg = (err && (err.message || err.name)) || '初始化录制失败';
       teardown();
+      isStarting = false;
       isRecording = false;
+      lifecycle.markError();
       elBar.classList.remove('recording');
       showRecoverableError('录制失败：' + msg); // 保留开始按钮，允许原地重试
     }
   }
 
   // ====== MediaRecorder 停止后的回调：组装 blob 并保存 ======
-  async function savePendingRecording() {
+  function retainPartialRecording(saveToken) {
+    const retained = lifecycle.failSerialization(saveToken);
+    if (!retained.accepted) return false;
+    showSaveRetry(partialRecordingCause === PARTIAL_RECORDING_CAUSES.STOP_TIMEOUT
+      ? '未收到录制停止确认；已保留可用的部分录屏，点击“重试保存”即可保存'
+      : '录制过程出错；已保留可用的部分录屏，点击“重试保存”即可保存');
+    return true;
+  }
+
+  async function savePendingRecording(existingToken) {
     if (!pendingRecordingBlob || saveInProgress) return;
+    const isAutomaticStopSave = !!existingToken;
+    const saveToken = existingToken || lifecycle.beginSerialization();
+    if (!saveToken || !lifecycle.isCurrentSave(saveToken)) return;
+    const blobToSave = pendingRecordingBlob;
     saveInProgress = true;
     try {
       showToast('正在保存…', false);
-      const buffer = await pendingRecordingBlob.arrayBuffer();
+      const buffer = await blobToSave.arrayBuffer();
+      // Blob.arrayBuffer() 可能很慢。若用户已在这期间放弃，不得再提交 IPC。
+      if (!lifecycle.isCurrentSave(saveToken)) return;
+      // 用户 stop 后、自动保存提交前仍可能收到编码器 error，
+      // 或 watchdog 已证明停止确认缺失。这时必须降级为“部分录屏”等待用户确认。
+      if (isAutomaticStopSave && partialRecordingCause) {
+        retainPartialRecording(saveToken);
+        return;
+      }
+      if (!lifecycle.markSaveSubmitted(saveToken).accepted) return;
       const res = await api.saveRecording({
         buffer,
         mime: 'video/webm',
@@ -366,16 +723,35 @@
         trimEnd: parseInt(document.getElementById('trimEnd').value, 10) || 0,
       });
 
-      if (res && res.saved === true) {
+      // 强制关窗/detach 会使 token 失效。主进程仍可能已写盘，
+      // 但迟到结果不能再操作已销毁页面、弹出重试或二次关窗。
+      if (!lifecycle.isCurrentSave(saveToken)) return;
+      const completion = lifecycle.completeSave(saveToken, res);
+      if (!completion.accepted) return;
+
+      if (completion.saved === true) {
         pendingRecordingBlob = null;
         chunks = [];
         recordedBytes = 0;
-        api.closeSelf();
+        terminalCloseRequested = true;
+        await flushLifecycleState();
+        await api.closeSelf();
         return;
       }
-      const detail = res && res.error ? `保存失败：${res.error}` : '录屏尚未保存，可重试或点 × 放弃';
+      const detail = res && res.error
+        ? `保存失败：${res.error}`
+        : '已取消保存对话框；录屏仍完整保留，可重试或点 × 放弃';
       showSaveRetry(detail);
     } catch (err) {
+      if (!lifecycle.isCurrentSave(saveToken)) return;
+      const snapshot = lifecycle.snapshot();
+      if (snapshot.state === RECORDER_STATES.SERIALIZING) {
+        lifecycle.failSerialization(saveToken);
+      } else if (snapshot.state === RECORDER_STATES.SAVING) {
+        lifecycle.completeSave(saveToken, { saved: false });
+      } else {
+        return;
+      }
       const msg = (err && (err.message || err.name)) || '保存失败';
       showSaveRetry('保存失败：' + msg);
     } finally {
@@ -383,13 +759,19 @@
     }
   }
 
-  async function onRecorderStop() {
-    // 仅在用户主动停止时保存（取消时 isFinishing 为 false）
-    if (!isFinishing) return;
+  async function onRecorderStop(sourceRecorder) {
+    // 仅在用户主动停止或编码器错误恢复时保留录屏（取消时 isFinishing 为 false）
+    if (sourceRecorder && sourceRecorder !== recorder) return;
+    if (!isFinishing || hasFinalizedRecorderStop) return;
+    hasFinalizedRecorderStop = true;
+    clearRecorderStopWatchdog();
+    const saveToken = lifecycle.beginSerialization();
+    if (!saveToken) return;
     try {
       pendingRecordingBlob = new Blob(chunks, { type: 'video/webm' });
     } catch (err) {
-      showSaveRetry('整理录屏失败：' + ((err && err.message) || String(err)));
+      lifecycle.markError();
+      showToast('整理录屏失败：' + ((err && err.message) || String(err)), true);
       return;
     } finally {
       teardown();
@@ -398,10 +780,20 @@
       pendingRecordingBlob = null;
       chunks = [];
       recordedBytes = 0;
-      showToast('录制内容为空', true);
+      lifecycle.markError();
+      const emptyRecordingMessage = partialRecordingCause === PARTIAL_RECORDING_CAUSES.RECORDER_ERROR
+        ? '录制过程出错，且未能恢复任何录制内容'
+        : partialRecordingCause === PARTIAL_RECORDING_CAUSES.STOP_TIMEOUT
+          ? '未收到录制停止确认，且未能恢复任何录制内容'
+          : '录制内容为空';
+      showToast(emptyRecordingMessage, true);
       return;
     }
-    await savePendingRecording();
+    if (partialRecordingCause) {
+      retainPartialRecording(saveToken);
+      return;
+    }
+    await savePendingRecording(saveToken);
   }
 
   // ====== 停止并保存 ======
@@ -412,21 +804,23 @@
     try {
       if (isPaused) {
         recorder.resume();
+        if (!lifecycle.markResumed().accepted) return;
         isPaused = false;
         elBar.classList.remove('paused');
         elBtnPause.textContent = '⏸';
         elBtnPause.title = '暂停录制';
-        startTimer();
-        showToast('继续录制', false);
+        startTimer(false);
       } else {
         recorder.pause();
+        if (!lifecycle.markPaused().accepted) return;
         isPaused = true;
         elBar.classList.add('paused');
         elBtnPause.textContent = '▶';
         elBtnPause.title = '继续录制';
         stopTimer();
-        showToast('已暂停（点 ▶ 继续）', false);
       }
+      // 暂停状态由橙色指示点和 ▶/⏸ 按钮表达；不复用会覆盖整个控制条的保存/错误 toast。
+      hideToast();
     } catch (e) {
       showToast('暂停/继续失败：' + (e && e.message ? e.message : e), true);
     }
@@ -435,6 +829,7 @@
 
   function stopRecording() {
     if (!isRecording || isFinishing) return;
+    if (!lifecycle.beginStop().accepted) return;
     isFinishing = true;
     isRecording = false;
     isPaused = false;
@@ -451,49 +846,63 @@
     }
     showToast(sizeLimitReached ? '已达到 128MB 上限，正在保存…' : '正在保存…', false);
 
+    const stoppingRecorder = recorder;
+    if (stoppingRecorder) armRecorderStopWatchdog(stoppingRecorder);
     try {
-      if (recorder && recorder.state !== 'inactive') {
-        recorder.stop();
+      if (stoppingRecorder && stoppingRecorder.state !== 'inactive') {
+        stoppingRecorder.stop();
       } else {
         // recorder 已停或不存在，直接走保存流程
-        onRecorderStop();
+        onRecorderStop(stoppingRecorder);
       }
     } catch (e) {
-      onRecorderStop();
+      onRecorderStop(stoppingRecorder);
     }
 
     // 停掉采集 track（保留 chunks，已在 stop 前收集）
-    const stopTracks = (stream) => {
-      if (!stream) return;
-      try {
-        stream.getTracks().forEach((t) => t.stop());
-      } catch (err) {
-        /* 忽略 */
-      }
-    };
-    // 整屏流可立即停；canvas 流由 recorder.stop 触发 onstop 后无需保留
-    stopTracks(captureStream);
+    // 源流可立即停；canvas/混音输出由 recorder.stop 触发 onstop 后清理。
+    stopStreamTracks(captureStream);
+    stopStreamTracks(microphoneStream);
   }
 
   // ====== 取消录制：停一切，不保存，关窗 ======
-  function cancelRecording() {
+  async function cancelRecording() {
+    if (terminalCloseRequested) return;
+    const cancellation = lifecycle.requestCancel();
+    if (cancellation.outcome === 'already-canceled') return;
+    if (!cancellation.accepted) {
+      if (cancellation.outcome === 'save-outcome-pending') {
+        showToast('保存请求已提交，文件可能正在写入；请等待保存结果，以免误报“已取消”', false);
+      }
+      return;
+    }
+    if (cancellation.outcome === 'already-saved') {
+      terminalCloseRequested = true;
+      await flushLifecycleState();
+      await api.closeSelf();
+      return;
+    }
+    isStarting = false;
     isFinishing = false; // 确保 onstop 不触发保存
+    hasFinalizedRecorderStop = true;
     isRecording = false;
     elBar.classList.remove('recording');
     chunks = [];
     recordedBytes = 0;
     sizeLimitReached = false;
     pendingRecordingBlob = null;
-    saveInProgress = false;
+    partialRecordingCause = null;
     teardown();
-    api.cancelCapture && api.cancelCapture(); // 通知主进程取消（若实现则生效）
-    api.closeSelf();
+    terminalCloseRequested = true;
+    await flushLifecycleState();
+    await api.closeSelf();
   }
 
   // ====== 事件绑定 ======
   elBtnStart.addEventListener('click', startRecording);
   elBtnStop.addEventListener('click', stopRecording);
-  elBtnRetry.addEventListener('click', savePendingRecording);
+  // DOM listener receives a MouseEvent; never pass it through as the lifecycle token.
+  elBtnRetry.addEventListener('click', () => savePendingRecording());
   elBtnCancel.addEventListener('click', cancelRecording);
 
   // Esc 取消
@@ -502,6 +911,13 @@
       e.preventDefault();
       cancelRecording();
     }
+  });
+
+  // 如果主进程/系统强制销毁窗口，使所有未完成的 async 代次失效。
+  // saving 阶段只标记“结果未知”，不宣称已取消，因为主进程可能已写盘。
+  window.addEventListener('beforeunload', () => {
+    if (!terminalCloseRequested) lifecycle.detach();
+    teardown();
   });
 
   // 接收主进程注入的初始化数据
@@ -513,5 +929,8 @@
     elBtnStop.hidden = true;
     elBtnStop.disabled = true;
     elBtnStart.hidden = false;
+    elBtnStart.disabled = false;
+    // 覆盖主进程创建窗口时的 opening 状态。
+    reportLifecycleState(lifecycle.snapshot());
   });
 })();

@@ -148,9 +148,17 @@
         <svg viewBox="0 0 24 24"><path d="M4 8V5h3 M20 8V5h-3 M4 16v3h3 M20 16v3h-3 M8 12h8"/></svg>
         <span>OCR</span>
       </button>
-      <button class="action-btn" id="btnQR" data-action="qr" title="识别到二维码后出现" hidden>
+      <button class="action-btn" data-action="table" title="AI 表格识别（输出 Markdown / CSV）">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 9h18 M9 4v16 M15 4v16 M3 14h18"/></svg>
+        <span>AI 表格</span>
+      </button>
+      <button class="action-btn" data-action="formula" title="AI 公式识别（输出 LaTeX）">
+        <svg viewBox="0 0 24 24"><path d="M5 5h13 M5 19h13 M8 5l-3 7 3 7 M12 9l6 6 M18 9l-6 6"/></svg>
+        <span>AI 公式</span>
+      </button>
+      <button class="action-btn" id="btnQR" data-action="qr" title="识别到二维码或条码后出现" hidden>
         <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3z M20 14h1 M14 20h1 M18 18h3v3h-3"/></svg>
-        <span>二维码</span>
+        <span>条码</span>
       </button>
       <button class="action-btn" data-action="ask" title="问 AI">
         <svg viewBox="0 0 24 24"><path d="M12 4a8 8 0 0 0-8 8c0 1.6.5 3 1.3 4.2L4 20l4-1.2A8 8 0 1 0 12 4z"/><path d="M9.5 10a2.5 2.5 0 1 1 3.4 2.3c-.6.3-.9.7-.9 1.4"/><circle cx="12" cy="16.5" r=".6"/></svg>
@@ -214,9 +222,9 @@
   <!-- UI 元素识别高亮框 -->
   <div id="axHighlight" class="ax-highlight" hidden></div>
 
-  <!-- 二维码结果面板（识别到二维码后点击工具栏按钮出现） -->
+  <!-- 二维码 / 条码结果面板 -->
   <div id="qrPanel" class="qr-panel" hidden>
-    <div class="qr-title">二维码内容</div>
+    <div class="qr-title">条码识别结果</div>
     <div id="qrText" class="qr-text"></div>
     <div class="qr-actions">
       <button class="qr-btn" id="btnQrCopy" type="button">复制</button>

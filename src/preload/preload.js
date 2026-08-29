@@ -9,7 +9,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const C = {
   // ---- 配置 ----
   CONFIG_GET: 'config:get', // () => config
-  CONFIG_SET: 'config:set', // (patch) => config
+  CONFIG_SET: 'config:set', // (patch) => config | { ok:false, error, config }（事务失败）
 
   // ---- 窗口控制 ----
   WINDOW_INIT: 'window:init', // (main->renderer) 窗口初始化数据
@@ -33,12 +33,14 @@ const C = {
   CLIPBOARD_WRITE_IMAGE: 'clipboard:write-image', // (dataURL)
   CLIPBOARD_WRITE_TEXT: 'clipboard:write-text', // (text)
   CLIPBOARD_READ_IMAGE: 'clipboard:read-image', // () => dataURL | null
-  IMAGE_SAVE: 'image:save', // (dataURL) => { saved, path }
+  IMAGE_SAVE: 'image:save', // (dataURL) => { saved, path?, format?, quality?, canceled?, error? }
   CHOOSE_SAVE_DIR: 'dialog:choose-save-dir', // () => { dir } 选择截图保存目录
 
   // ---- 贴图 ----
   PIN_CREATE: 'pin:create', // ({ dataURL, bounds }) 在屏幕上钉一张图
-  PIN_SET_STATE: 'pin:set-state', // ({ onTop?, ignoreMouse? }) 置顶切换/鼠标穿透（作用当前贴图窗）
+  PIN_SET_STATE: 'pin:set-state', // ({ onTop?, ignoreMouse?, opacity?, locked?, title? }) 更新当前贴图窗状态
+  PIN_UPDATE_CONTENT: 'pin:update-content', // ({ baseRevision, revision, dataURL }) 原子更新标注后的贴图内容
+  PIN_CLOSE_READY: 'pin:close-ready', // ({ requestId, ok, error? }) 退出前已将最新标注同步到主进程
   PIN_CMD: 'pin:cmd', // (main->pin) { cmd: 'thumb'|'passthrough-off'|'save', on? } 贴图批量指令
   PIN_START_DRAG: 'pin:start-drag', // (pin->main) 把贴图内容拖出窗口到其它应用
 
@@ -50,6 +52,7 @@ const C = {
 
   // ---- DeepSeek ----
   DEEPSEEK_ASK_IMAGE: 'deepseek:ask-image', // ({ dataURL, prompt, streamId }) => { ok }
+  AI_RECOGNIZE_IMAGE: 'ai:recognize-image', // ({ mode:'table'|'formula', dataURL, streamId }) => { ok }; prompt 由主进程固定
   DEEPSEEK_CHAT: 'deepseek:chat', // ({ messages, streamId, model }) => { ok }
   DEEPSEEK_STREAM: 'deepseek:stream', // (main->renderer) { streamId, delta, done, error }
   DEEPSEEK_TEST: 'deepseek:test', // () => { ok, message } 设置页测试连通性
@@ -62,6 +65,7 @@ const C = {
 
   // ---- 录屏 ----
   RECORD_SAVE: 'record:save', // ({ buffer, mime, toGif, fps }) => { saved, path }
+  RECORD_STATE: 'record:state', // ({ state, generation, saveAttempt }) => { ok }
 
   // ---- 外部链接 ----
   OPEN_EXTERNAL: 'shell:open-external', // (url) 仅允许 http(s)，走系统浏览器
@@ -77,9 +81,10 @@ const C = {
   CAPTURE_FULLSCREEN_NOW: 'capture:fullscreen-now', // 立即整屏截图 -> 存历史+复制
   CAPTURE_WINDOW: 'capture:window', // 交互式窗口截图（screencapture -w）
   CAPTURE_TIMED: 'capture:timed', // ({ delay, mode }) 倒计时后截图
+  CAPTURE_TIMED_CANCEL: 'capture:timed-cancel', // (jobId) 取消尚未触发的主进程定时截图
 
   // ---- 历史记录 ----
-  HISTORY_LIST: 'history:list', // () => [{id,time,width,height,type,thumb}]
+  HISTORY_LIST: 'history:list', // ({includeMedia?}) => [{id,time,width,height,type,kind,thumb}]
   HISTORY_GET: 'history:get', // (id) => { item, dataURL }
   HISTORY_DELETE: 'history:delete', // (id)
   HISTORY_DELETE_MANY: 'history:delete-many', // (ids[]) 批量删除，一次写盘+一次广播
@@ -131,6 +136,9 @@ const api = {
   // ---- 贴图 ----
   createPin: (dataURL, bounds) => ipcRenderer.invoke(C.PIN_CREATE, { dataURL, bounds }),
   setPinState: (flags) => ipcRenderer.invoke(C.PIN_SET_STATE, flags),
+  pinUpdateState: (flags) => ipcRenderer.invoke(C.PIN_SET_STATE, flags),
+  pinUpdateContent: (payload) => ipcRenderer.invoke(C.PIN_UPDATE_CONTENT, payload),
+  pinCloseReady: (payload) => ipcRenderer.invoke(C.PIN_CLOSE_READY, payload),
   onPinCmd: (cb) => on(C.PIN_CMD, cb),
   pinStartDrag: () => ipcRenderer.invoke(C.PIN_START_DRAG),
 
@@ -142,6 +150,7 @@ const api = {
 
   // ---- DeepSeek ----
   askImage: (payload) => ipcRenderer.invoke(C.DEEPSEEK_ASK_IMAGE, payload),
+  recognizeImage: (payload) => ipcRenderer.invoke(C.AI_RECOGNIZE_IMAGE, payload),
   chat: (payload) => ipcRenderer.invoke(C.DEEPSEEK_CHAT, payload),
   onStream: (cb) => on(C.DEEPSEEK_STREAM, cb),
   cancelStream: (streamId) => ipcRenderer.invoke(C.DEEPSEEK_CANCEL, streamId),
@@ -154,6 +163,7 @@ const api = {
 
   // ---- 录屏 ----
   saveRecording: (payload) => ipcRenderer.invoke(C.RECORD_SAVE, payload),
+  reportRecordingState: (payload) => ipcRenderer.invoke(C.RECORD_STATE, payload),
 
   // ---- 外部链接 ----
   openExternal: (url) => ipcRenderer.invoke(C.OPEN_EXTERNAL, url),
@@ -169,9 +179,10 @@ const api = {
   captureFullscreenNow: () => ipcRenderer.invoke(C.CAPTURE_FULLSCREEN_NOW),
   captureWindow: () => ipcRenderer.invoke(C.CAPTURE_WINDOW),
   captureTimed: (payload) => ipcRenderer.invoke(C.CAPTURE_TIMED, payload),
+  cancelTimedCapture: (jobId) => ipcRenderer.invoke(C.CAPTURE_TIMED_CANCEL, jobId),
 
   // ---- 历史记录 ----
-  historyList: () => ipcRenderer.invoke(C.HISTORY_LIST),
+  historyList: (options) => ipcRenderer.invoke(C.HISTORY_LIST, options),
   historyGet: (id) => ipcRenderer.invoke(C.HISTORY_GET, id),
   historyDelete: (id) => ipcRenderer.invoke(C.HISTORY_DELETE, id),
   historyDeleteMany: (ids) => ipcRenderer.invoke(C.HISTORY_DELETE_MANY, ids),

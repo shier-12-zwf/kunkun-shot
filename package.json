@@ -13,8 +13,11 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "test": "node --test test/*.test.js",
-    "dist": "npm run dist:mac",
-    "dist:mac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac"
+    "dist": "npm run dist:mac:local",
+    "dist:mac": "npm run dist:mac:local",
+    "dist:mac:local": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --config.mac.identity=null --config.mac.notarize=false --config.forceCodeSigning=false --publish never",
+    "dist:mac:release": "node scripts/build-macos-release.js",
+    "verify:mac:release": "node scripts/verify-macos-release.js"
   },
   "dependencies": {
     "ffmpeg-static": "^5.2.0",
@@ -28,6 +31,7 @@
   "build": {
     "appId": "com.kunkun.shot",
     "productName": "困困截图工具",
+    "forceCodeSigning": false,
     "files": [
       "src/**/*",
       "assets/**/*",
@@ -49,14 +53,6 @@
       {
         "from": "LICENSES",
         "to": "licenses/LICENSES"
-      },
-      {
-        "from": "node_modules/electron/dist/LICENSE",
-        "to": "licenses/Electron/LICENSE"
-      },
-      {
-        "from": "node_modules/electron/dist/LICENSES.chromium.html",
-        "to": "licenses/Electron/LICENSES.chromium.html"
       }
     ],
     "asarUnpack": [
@@ -77,6 +73,8 @@
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "build/icon.icns",
+      "identity": null,
+      "notarize": false,
       "target": [
         "dmg",
         "zip"
@@ -87,6 +85,8 @@
       "entitlementsInherit": "build/entitlements.mac.plist",
       "extendInfo": {
         "NSScreenCaptureUsageDescription": "困困截图工具需要录制屏幕，用于区域截图、长截图与录屏。",
+        "NSAudioCaptureUsageDescription": "困困截图工具仅在你开启系统声音录制时采集设备正在播放的音频。",
+        "NSMicrophoneUsageDescription": "困困截图工具仅在你开启麦克风录制时采集麦克风声音。",
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": false
         }

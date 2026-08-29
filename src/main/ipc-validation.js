@@ -1,7 +1,7 @@
 // IPC 边界校验：所有来自 renderer 的数据都按不可信输入处理。
 // 保持纯 Node 模块，便于不启动 Electron 就做回归测试。
 const path = require('node:path');
-const { DEFAULT_CONFIG } = require('../shared/config-schema');
+const { DEFAULT_CONFIG, SUPPORTED_OCR_LANGUAGES } = require('../shared/config-schema');
 
 const MAX_IMAGE_DATA_URL_CHARS = 128 * 1024 * 1024;
 const MAX_TEXT_CHARS = 1024 * 1024;
@@ -159,12 +159,23 @@ function normalizeProviderBaseUrl(value) {
 
 function normalizePinStateFlags(value) {
   if (!isPlainObject(value)) throw new Error('贴图状态格式无效。');
-  const allowed = new Set(['onTop', 'ignoreMouse']);
+  const allowed = new Set(['onTop', 'ignoreMouse', 'opacity', 'locked', 'title']);
   const out = {};
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) throw new Error(`未知贴图状态：${key}`);
-    if (typeof value[key] !== 'boolean') throw new Error(`${key} 必须是布尔值。`);
-    out[key] = value[key];
+    if (key === 'opacity') {
+      const opacity = Number(value[key]);
+      if (!Number.isFinite(opacity)) throw new Error('opacity 必须是有限数字。');
+      out.opacity = Math.max(0.3, Math.min(1, opacity));
+    } else if (key === 'title') {
+      if (typeof value[key] !== 'string' || value[key].length > 512 || value[key].includes('\0')) {
+        throw new Error('贴图标题无效或过长。');
+      }
+      out.title = value[key];
+    } else {
+      if (typeof value[key] !== 'boolean') throw new Error(`${key} 必须是布尔值。`);
+      out[key] = value[key];
+    }
   }
   return out;
 }
@@ -214,10 +225,19 @@ function normalizeRecordingPayload(value) {
   };
 }
 
+function normalizeOCRLanguage(value) {
+  if (typeof value !== 'string' || !SUPPORTED_OCR_LANGUAGES.includes(value)) {
+    throw new Error(`OCR 语言选择无效。仅支持：${SUPPORTED_OCR_LANGUAGES.join('、')}`);
+  }
+  return value;
+}
+
 const CONFIG_ENUMS = {
   'ai.provider': ['deepseek', 'minimax', 'openai', 'auto'],
   'openai.preset': ['siliconflow', 'qwen', 'kimi', 'custom'],
   'ocr.engine': ['local', 'model'],
+  'ocr.lang': SUPPORTED_OCR_LANGUAGES,
+  'capture.exportFormat': ['png', 'jpeg', 'webp', 'bmp', 'avif', 'pdf'],
   'general.theme': ['light', 'dark'],
 };
 
@@ -246,18 +266,20 @@ function normalizeConfigValue(value, defaultValue, keyPath) {
     if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${keyPath} 必须是有限数字。`);
     const n = value;
     if (keyPath === 'recording.fps') return Math.max(1, Math.min(60, Math.round(n)));
+    if (keyPath === 'capture.quality') {
+      if (!Number.isInteger(n) || n < 1 || n > 100) throw new Error('capture.quality 必须是 1 到 100 的整数。');
+      return n;
+    }
     return n;
   }
   if (typeof defaultValue === 'string') {
     if (typeof value !== 'string') throw new Error(`${keyPath} 必须是文本。`);
     if (value.length > configStringLimit(keyPath) || value.includes('\0')) throw new Error(`${keyPath} 文本无效或过长。`);
+    if (keyPath === 'ocr.lang') return normalizeOCRLanguage(value);
     const enums = CONFIG_ENUMS[keyPath];
     if (enums && !enums.includes(value)) throw new Error(`${keyPath} 取值无效。`);
     if (keyPath.endsWith('.baseUrl')) return normalizeProviderBaseUrl(value);
     if (keyPath === 'general.saveDir' && value && !path.isAbsolute(value)) throw new Error('保存目录必须是绝对路径。');
-    if (keyPath === 'ocr.lang' && !/^[a-z][a-z0-9_]*(?:\+[a-z][a-z0-9_]*){0,4}$/i.test(value)) {
-      throw new Error('OCR 语言代码无效。');
-    }
     return value;
   }
   throw new Error(`${keyPath} 配置类型不受支持。`);
@@ -311,6 +333,7 @@ module.exports = {
   normalizeStreamId,
   normalizeChatRequest,
   normalizeProviderBaseUrl,
+  normalizeOCRLanguage,
   normalizeConfigPatch,
   normalizePinStateFlags,
   normalizeProviderTestTarget,

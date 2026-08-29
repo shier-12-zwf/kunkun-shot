@@ -56,6 +56,10 @@
       let config = null; // 最近一次拿到的完整配置
       let offHistory = null; // onHistoryChanged 退订函数
       let countdownTimer = null; // 延时倒计时句柄
+      let timedJobId = null; // 主进程持有的定时任务 id
+      let timedScheduling = false; // invoke 尚未返回时防止重复排程
+      let countdownGeneration = 0; // 取消时使迟到的排程响应失效
+      let pageActive = true;
       let delaySec = 3; // 当前选择的延时秒数（3/5/10）
 
       // —— 顶部任务式标题 ——
@@ -156,7 +160,7 @@
           aWindow.btn.disabled = true;
           try {
             const r = await api.captureWindow();
-            if (r && r.ok) flash(aWindow, 'ok', '已捕捉窗口');
+            if (r && r.ok) flash(aWindow, 'ok', '已打开窗口编辑器');
             else if (r && r.error) flash(aWindow, 'err', r.error);
             else flash(aWindow, 'warn', '已取消');
           } catch (e) {
@@ -176,7 +180,7 @@
           aFull.btn.disabled = true;
           try {
             const r = await api.captureFullscreenNow();
-            if (r && r.ok) flash(aFull, 'ok', '已捕捉全屏');
+            if (r && r.ok) flash(aFull, 'ok', '已打开全屏编辑器');
             else if (r && r.error) flash(aFull, 'err', r.error);
             else flash(aFull, 'warn', '已取消');
           } catch (e) {
@@ -205,7 +209,7 @@
         c.dataset.sec = String(sec);
         c.addEventListener('click', (ev) => {
           ev.stopPropagation();
-          if (countdownTimer) return; // 倒计时进行中不允许改秒数
+          if (countdownTimer || timedJobId || timedScheduling) return; // 倒计时进行中不允许改秒数
           setDelay(sec);
         });
         delayPicker.appendChild(c);
@@ -220,8 +224,10 @@
       cCustom.addEventListener('keydown', (ev) => {
         ev.stopPropagation();
         if (ev.key === 'Enter') {
-          const v = parseInt(cCustom.value, 10);
-          if (!isNaN(v) && v >= 1 && v <= 300) {
+          if (countdownTimer || timedJobId || timedScheduling) return;
+          const rawDelay = cCustom.value.trim();
+          const v = /^\d+$/.test(rawDelay) ? Number(rawDelay) : NaN;
+          if (Number.isInteger(v) && v >= 1 && v <= 300) {
             setDelay(v);
             cCustom.value = '';
           } else {
@@ -239,47 +245,94 @@
       // 把选择器插到延时卡的按钮和小字之间
       aTimed.wrap.insertBefore(delayPicker, aTimed.hint);
 
-      // 启动延时倒计时：按钮上显示可见数字，到 0 调 captureTimed
-      function startCountdown() {
-        if (countdownTimer) {
-          // 再次点击 = 取消
-          cancelCountdown();
-          return;
-        }
-        let left = delaySec;
-        aTimed.btn.classList.add('counting');
-        aTimed.wrap.classList.add('counting');
+      function drawCountdown(left) {
         const label = aTimed.btn.querySelector('.cap-act-label');
-        const draw = () => {
-          if (label) label.textContent = left + ' 秒…点此取消';
-        };
-        draw();
-        countdownTimer = setInterval(async () => {
-          left -= 1;
-          if (left > 0) {
-            draw();
-            return;
-          }
-          // 到点：清理倒计时 UI 后触发延时截图（区域模式）
-          cancelCountdown();
-          try {
-            await api.captureTimed({ delay: 0, mode: 'region' });
-            flash(aTimed, 'ok', '已触发延时截图');
-          } catch (e) {
-            flash(aTimed, 'err', '延时截图失败');
-          }
-        }, 1000);
+        if (label) label.textContent = left + ' 秒…点此取消';
       }
 
-      function cancelCountdown() {
-        if (countdownTimer) {
-          clearInterval(countdownTimer);
-          countdownTimer = null;
-        }
+      function resetCountdownUi() {
+        if (countdownTimer) clearInterval(countdownTimer);
+        countdownTimer = null;
         aTimed.btn.classList.remove('counting');
         aTimed.wrap.classList.remove('counting');
         const label = aTimed.btn.querySelector('.cap-act-label');
         if (label) label.textContent = '延时截图';
+      }
+
+      // 任务在主进程立即排程；页面里的 interval 只负责反馈，不再决定截图是否执行。
+      async function startCountdown() {
+        if (countdownTimer || timedJobId || timedScheduling) {
+          await cancelCountdown();
+          return;
+        }
+        const generation = ++countdownGeneration;
+        timedScheduling = true;
+        aTimed.btn.classList.add('counting');
+        aTimed.wrap.classList.add('counting');
+        drawCountdown(delaySec);
+        let scheduled;
+        try {
+          scheduled = await api.captureTimed({ delay: delaySec, mode: 'region' });
+        } catch (e) {
+          timedScheduling = false;
+          if (generation === countdownGeneration && pageActive) {
+            resetCountdownUi();
+            flash(aTimed, 'err', '延时截图排程失败');
+          }
+          return;
+        }
+        timedScheduling = false;
+        if (!scheduled || scheduled.ok !== true || !scheduled.id) {
+          if (generation === countdownGeneration && pageActive) {
+            resetCountdownUi();
+            flash(aTimed, 'err', (scheduled && scheduled.error) || '延时截图排程失败');
+          }
+          return;
+        }
+        if (generation !== countdownGeneration) {
+          try { await api.cancelTimedCapture(scheduled.id); } catch (_) {}
+          return;
+        }
+        // 页面切走不取消主进程任务；它会继续准时触发。
+        if (!pageActive) return;
+        timedJobId = scheduled.id;
+        let left = Math.max(0, Number(scheduled.delay));
+        drawCountdown(left);
+        countdownTimer = setInterval(() => {
+          left -= 1;
+          if (left > 0) {
+            drawCountdown(left);
+            return;
+          }
+          // 主进程独立触发；这里只清理可见倒计时，不能再发第二次截图。
+          timedJobId = null;
+          resetCountdownUi();
+          flash(aTimed, 'ok', '延时截图已触发');
+        }, 1000);
+      }
+
+      async function cancelCountdown() {
+        countdownGeneration += 1;
+        timedScheduling = false;
+        const jobId = timedJobId;
+        timedJobId = null;
+        resetCountdownUi();
+        let cancelResult = null;
+        let cancelFailed = false;
+        if (jobId) {
+          try {
+            cancelResult = await api.cancelTimedCapture(jobId);
+          } catch (_) {
+            cancelFailed = true;
+          }
+        }
+        if (!jobId || (cancelResult && cancelResult.ok === true)) {
+          flash(aTimed, 'warn', '已取消延时截图');
+        } else if (cancelFailed) {
+          flash(aTimed, 'err', '延时截图取消失败');
+        } else {
+          flash(aTimed, 'ok', '延时截图已触发');
+        }
       }
 
       // 5) 录屏（带快捷键）
@@ -411,9 +464,12 @@
       //     改用 MutationObserver 监听本页内容被移除（以页内 header 节点是否在 DOM 判定），自动退订与清 timer。——
       const lifeObserver = new MutationObserver(() => {
         if (document.contains(header)) return;
+        pageActive = false;
         lifeObserver.disconnect();
         if (typeof offHistory === 'function') { try { offHistory(); } catch (_) {} offHistory = null; }
-        if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+        // 只停止 UI 计时；主进程任务故意继续，页面导航不应误取消用户已排好的截图。
+        resetCountdownUi();
+        timedJobId = null;
       });
       try {
         lifeObserver.observe(el.parentNode || document.body, { childList: true, subtree: true });

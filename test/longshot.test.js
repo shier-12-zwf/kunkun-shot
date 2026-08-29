@@ -9,6 +9,10 @@ const {
   getMaxCanvasHeight,
   isFrameWithinCanvasBudget,
   saveLongshotAndClose,
+  createLongshotSession,
+  runCaptureStep,
+  createDisplacementGate,
+  getNextCaptureDelay,
 } = require('../src/renderer/longshot/longshot');
 
 test('horizontal longshot waits for frame decoding before rotating it', async () => {
@@ -109,4 +113,121 @@ test('longshot copies and closes only after an explicit saved:true response', as
 
   await saveLongshotAndClose(api, 'data:image/png;base64,test');
   assert.deepEqual(calls, ['save', 'copy', 'close']);
+});
+
+test('capture direction is locked for the whole session and one opposite sample cannot reverse it', () => {
+  const session = createLongshotSession({ directionConfirmations: 2 });
+  const token = session.start('vertical');
+
+  assert.equal(session.getState().direction, 'vertical');
+  assert.equal(session.observeDirection(token, 'horizontal'), 'vertical');
+  assert.equal(session.getState().direction, 'vertical');
+});
+
+test('consecutive empty or failed captures terminate after a bounded retry count', () => {
+  const session = createLongshotSession({ maxConsecutiveFailures: 3 });
+  const token = session.start('vertical');
+
+  session.admitFrame(token, { width: 10, stitchedHeight: 10 });
+  assert.deepEqual(session.recordFailure(token, 'empty-frame'), {
+    accepted: true,
+    terminal: false,
+    consecutiveFailures: 1,
+  });
+  // A decoded-but-visually-empty frame is admitted for dimensions first; admission
+  // must not accidentally reset the consecutive empty-frame counter.
+  session.admitFrame(token, { width: 10, stitchedHeight: 10 });
+  assert.equal(session.recordFailure(token, 'capture-error').terminal, false);
+
+  session.admitFrame(token, { width: 10, stitchedHeight: 10 });
+  const terminal = session.recordFailure(token, 'empty-frame');
+  assert.equal(terminal.terminal, true);
+  assert.equal(terminal.reason, 'capture-failures');
+  assert.equal(session.isCurrent(token), false);
+  assert.equal(session.getState().terminalReason, 'capture-failures');
+});
+
+test('session rejects work that exceeds configurable frame or stitched-pixel budgets', () => {
+  const frameLimited = createLongshotSession({ maxFrames: 2, maxPixels: 1_000 });
+  const frameToken = frameLimited.start('vertical');
+  assert.equal(frameLimited.admitFrame(frameToken, { width: 10, stitchedHeight: 10 }).accepted, true);
+  assert.equal(frameLimited.admitFrame(frameToken, { width: 10, stitchedHeight: 20 }).accepted, true);
+  const tooMany = frameLimited.admitFrame(frameToken, { width: 10, stitchedHeight: 30 });
+  assert.equal(tooMany.accepted, false);
+  assert.equal(tooMany.reason, 'frame-limit');
+
+  const pixelLimited = createLongshotSession({ maxFrames: 10, maxPixels: 100 });
+  const pixelToken = pixelLimited.start('horizontal');
+  const tooLarge = pixelLimited.admitFrame(pixelToken, { width: 11, stitchedHeight: 10 });
+  assert.equal(tooLarge.accepted, false);
+  assert.equal(tooLarge.reason, 'pixel-limit');
+  assert.equal(pixelLimited.getState().terminalReason, 'pixel-limit');
+});
+
+test('a capture that resolves after stop is stale and cannot reach the stitch callback', async () => {
+  const session = createLongshotSession();
+  const token = session.start('vertical');
+  let resolveCapture;
+  let consumed = 0;
+
+  const pending = runCaptureStep({
+    session,
+    token,
+    capture: () => new Promise((resolve) => { resolveCapture = resolve; }),
+    consume: async () => { consumed += 1; },
+  });
+
+  session.stop('cancelled');
+  resolveCapture({ width: 20, height: 20 });
+  const result = await pending;
+
+  assert.equal(result.status, 'stale');
+  assert.equal(consumed, 0);
+});
+
+test('canceling while save is pending prevents late copy and close side effects', async () => {
+  let active = true;
+  let resolveSave;
+  const calls = [];
+  const api = {
+    saveImage: () => {
+      calls.push('save');
+      return new Promise((resolve) => { resolveSave = resolve; });
+    },
+    copyImage: async () => calls.push('copy'),
+    closeSelf: async () => calls.push('close'),
+  };
+
+  const pending = saveLongshotAndClose(api, 'data:image/png;base64,test', () => active);
+  active = false;
+  resolveSave({ saved: true });
+  const result = await pending;
+
+  assert.deepEqual(result, { stale: true });
+  assert.deepEqual(calls, ['save']);
+});
+
+test('displacement requires stable confirmation and an opposite noise frame cannot reverse a locked direction', () => {
+  const gate = createDisplacementGate({ confirmations: 2, toleranceRatio: 0.25 });
+
+  assert.equal(gate.observe(100).confirmed, false);
+  const confirmed = gate.observe(110);
+  assert.equal(confirmed.confirmed, true);
+  assert.equal(confirmed.direction, 'forward');
+
+  const oppositeNoise = gate.observe(-105);
+  assert.equal(oppositeNoise.confirmed, false);
+  assert.equal(oppositeNoise.reason, 'opposite-direction');
+  assert.equal(gate.getState().direction, 'forward');
+});
+
+test('capture cadence adapts to movement, idle frames, and repeated failures', () => {
+  const movingDelay = getNextCaptureDelay('movement', 0);
+  const idleDelay = getNextCaptureDelay('idle', 4);
+  const firstFailureDelay = getNextCaptureDelay('failure', 1);
+  const repeatedFailureDelay = getNextCaptureDelay('failure', 4);
+
+  assert.ok(movingDelay < idleDelay);
+  assert.ok(firstFailureDelay < repeatedFailureDelay);
+  assert.ok(repeatedFailureDelay <= 2000);
 });

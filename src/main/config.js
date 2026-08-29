@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { app, safeStorage } = require('electron');
-const { DEFAULT_CONFIG } = require('../shared/config-schema');
+const { DEFAULT_CONFIG, SUPPORTED_OCR_LANGUAGES } = require('../shared/config-schema');
 const { normalizeConfigPatch } = require('./ipc-validation');
 
 let cache = null;
@@ -59,6 +59,32 @@ function readParsedConfigFromDisk() {
   return JSON.parse(text);
 }
 
+// 配置 schema 收紧时要先做有边界的版本迁移，再进入严格校验。
+// v0.2.0 之前 OCR 语言是自由文本；现在发布包只携带中英三种组合。旧值不可用时
+// 只回退这一个字段，不能因此丢掉用户的快捷键、保存目录、主题或密钥。
+function migrateDiskConfig(parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { value: parsed, changed: false };
+  }
+  const ocr = parsed.ocr;
+  if (
+    !ocr ||
+    typeof ocr !== 'object' ||
+    Array.isArray(ocr) ||
+    typeof ocr.lang !== 'string' ||
+    SUPPORTED_OCR_LANGUAGES.includes(ocr.lang)
+  ) {
+    return { value: parsed, changed: false };
+  }
+  return {
+    value: {
+      ...parsed,
+      ocr: { ...ocr, lang: DEFAULT_CONFIG.ocr.lang },
+    },
+    changed: true,
+  };
+}
+
 function normalizeDiskConfig(parsed) {
   let candidate = parsed;
   const encryptedSecrets = [];
@@ -94,7 +120,7 @@ function normalizeDiskConfig(parsed) {
 function readValidatedConfigFromDisk() {
   const parsed = readParsedConfigFromDisk();
   // 磁盘数据与 renderer 输入一样不可信：只接受 DEFAULT_CONFIG 中存在且类型正确的字段。
-  return normalizeDiskConfig(parsed);
+  return normalizeDiskConfig(migrateDiskConfig(parsed).value);
 }
 
 function canEncrypt() {
@@ -234,6 +260,7 @@ function load() {
   if (cache) return cache;
   let onDisk = {};
   let hadPlaintextSecret = false;
+  let migratedLegacyFields = false;
   try {
     const parsed = readParsedConfigFromDisk();
     // 即使其他字段导致 schema 校验失败，也要先识别旧版明文秘密，随后用安全默认值覆盖原文件。
@@ -241,7 +268,9 @@ function load() {
       ([a, b]) => parsed && parsed[a] && typeof parsed[a][b] === 'string' &&
         parsed[a][b] && !parsed[a][b].startsWith(ENC_PREFIX)
     );
-    onDisk = normalizeDiskConfig(parsed);
+    const migration = migrateDiskConfig(parsed);
+    migratedLegacyFields = migration.changed;
+    onDisk = normalizeDiskConfig(migration.value);
   } catch (e) {
     console.error('[config] 读取失败，使用默认配置：', e.message);
     onDisk = {};
@@ -250,12 +279,15 @@ function load() {
   const loaded = deepMerge(DEFAULT_CONFIG, onDisk);
   // 安全迁移：磁盘上发现旧版明文 Key 就立即重写。系统加密可用时转成密文；不可用时
   // 从磁盘移除、只保留在本次进程内存，避免为了“继续持久化”而永久留下明文秘密。
-  if (hadPlaintextSecret) {
+  if (hadPlaintextSecret || migratedLegacyFields) {
     try {
       writeConfigFile(loaded);
     } catch (e) {
-      console.error('[config] 旧版明文 API Key 安全迁移失败：', e.message);
-      throw new Error(`旧版明文 API Key 安全迁移失败：${e.message}`, { cause: e });
+      const migrationLabel = hadPlaintextSecret
+        ? '旧版明文 API Key 安全迁移'
+        : '旧版配置迁移';
+      console.error(`[config] ${migrationLabel}失败：`, e.message);
+      throw new Error(`${migrationLabel}失败：${e.message}`, { cause: e });
     }
   }
   cache = loaded;

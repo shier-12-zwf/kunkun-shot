@@ -224,13 +224,24 @@
       // 即时保存某分组的 patch（通用/快捷键/截图/录屏/OCR 用）。
       // 用 promise 链做真正的串行化：每次保存排到上一次之后，快速连点也按序写、不并发。
       let saveChain = Promise.resolve();
-      function autoSave(patch, okMsg) {
+      function autoSave(patch, okMsg, onError) {
         saveChain = saveChain.then(async function () {
           try {
             const merged = await api.setConfig(patch);
+            if (merged && merged.ok === false) {
+              if (merged.config && typeof merged.config === 'object') currentConfig = merged.config;
+              const error = new Error(
+                (merged.error && merged.error.message) || '设置未能生效',
+              );
+              error.response = merged;
+              throw error;
+            }
             if (merged && typeof merged === 'object') currentConfig = merged;
             if (okMsg !== false) toast(okMsg || '已保存', 'ok');
           } catch (e) {
+            if (typeof onError === 'function') {
+              try { onError(e); } catch (_) {}
+            }
             toast('保存失败：' + (e && e.message ? e.message : '未知错误'), 'err');
           }
         });
@@ -576,7 +587,11 @@
       function persistShortcut(scKey, accel) {
         const patch = { shortcuts: {} };
         patch.shortcuts[scKey] = accel;
-        autoSave(patch, accel ? '快捷键已更新' : '快捷键已清除');
+        autoSave(patch, accel ? '快捷键已更新' : '快捷键已清除', function (error) {
+          const restored = error && error.response && error.response.config;
+          const shortcuts = (restored && restored.shortcuts) || currentConfig.shortcuts || {};
+          if (shortcutInputs[scKey]) shortcutInputs[scKey].value = shortcuts[scKey] || '';
+        });
       }
 
       // ==========================================================
@@ -603,6 +618,46 @@
       });
       gCapture.body.appendChild(
         rowField('自动保存到历史', '开启后每张截图都自动进历史记录；关闭则只有点了「保存到本地」的截图才入历史', tgAutoSaveHistory)
+      );
+
+      const selExportFormat = h('select', { class: 'select' }, [
+        h('option', { value: 'png' }, 'PNG（无损，支持透明）'),
+        h('option', { value: 'jpeg' }, 'JPEG（体积小，兼容性好）'),
+        h('option', { value: 'webp' }, 'WebP（高压缩率）'),
+        h('option', { value: 'bmp' }, 'BMP（无损）'),
+        h('option', { value: 'avif' }, 'AVIF（更高压缩率）'),
+        h('option', { value: 'pdf' }, 'PDF（单页图片）'),
+      ]);
+      selExportFormat.addEventListener('change', function () {
+        updateExportQualityState();
+        autoSave({ capture: { exportFormat: selExportFormat.value } }, '截图导出格式已更新');
+      });
+      gCapture.body.appendChild(
+        stackField('默认导出格式', selExportFormat, '用于快速保存、保存对话框默认格式和历史批量导出。')
+      );
+
+      const inExportQuality = h('input', {
+        class: 'input', type: 'number', min: '1', max: '100', step: '1', placeholder: '90',
+      });
+      const exportQualityHint = h('span');
+      function updateExportQualityState() {
+        const lossless = selExportFormat.value === 'png' || selExportFormat.value === 'bmp';
+        inExportQuality.disabled = lossless;
+        exportQualityHint.textContent = lossless
+          ? '无损格式不使用质量参数；当前值会保留，切回有损格式时继续使用。'
+          : '1–100；数值越高画质越好，文件通常也越大。';
+      }
+      inExportQuality.addEventListener('change', function () {
+        const quality = Number(inExportQuality.value);
+        if (!Number.isInteger(quality) || quality < 1 || quality > 100) {
+          inExportQuality.value = (currentConfig.capture && currentConfig.capture.quality) || 90;
+          toast('图片质量必须是 1–100 的整数', 'err');
+          return;
+        }
+        autoSave({ capture: { quality: quality } }, '截图导出质量已更新');
+      });
+      gCapture.body.appendChild(
+        stackField('导出质量', inExportQuality, exportQualityHint)
       );
 
       grid.appendChild(gCapture.card);
@@ -634,6 +689,34 @@
       });
       gRec.body.appendChild(
         rowField('导出为 GIF', '关闭则导出为视频文件', tgGif)
+      );
+
+      const tgSystemAudio = toggle(false, function (v) {
+        autoSave(
+          { recording: { systemAudio: v } },
+          v ? '录屏将采集系统声音' : '已关闭系统声音'
+        );
+      });
+      gRec.body.appendChild(
+        rowField(
+          '系统声音',
+          '默认关闭；macOS 会单独询问“系统音频录制”权限，不支持时会明确停止而不是生成无声视频。',
+          tgSystemAudio
+        )
+      );
+
+      const tgMicrophone = toggle(false, function (v) {
+        autoSave(
+          { recording: { microphone: v } },
+          v ? '录屏将采集麦克风' : '已关闭麦克风'
+        );
+      });
+      gRec.body.appendChild(
+        rowField(
+          '麦克风',
+          '默认关闭；首次录制时由 macOS 请求权限，可与系统声音混合。',
+          tgMicrophone
+        )
       );
 
       grid.appendChild(gRec.card);
@@ -677,13 +760,20 @@
       }
       gOcr.body.appendChild(stackField('识别引擎', ocrEngineWrap));
 
-      // lang
-      const inLang = h('input', { class: 'input', type: 'text', placeholder: 'chi_sim+eng' });
-      inLang.addEventListener('change', function () {
-        autoSave({ ocr: { lang: inLang.value.trim() } }, '已更新识别语言');
+      // 语言只展示随应用打包的离线模型组合，不接受任意 Tesseract 代码。
+      const OCR_LANGUAGES = [
+        { value: 'chi_sim+eng', label: '简体中文 + English（推荐）' },
+        { value: 'chi_sim', label: '简体中文' },
+        { value: 'eng', label: 'English' },
+      ];
+      const selOcrLang = h('select', { class: 'select' }, OCR_LANGUAGES.map(function (lang) {
+        return h('option', { value: lang.value }, lang.label);
+      }));
+      selOcrLang.addEventListener('change', function () {
+        autoSave({ ocr: { lang: selOcrLang.value } }, '已更新识别语言');
       });
       gOcr.body.appendChild(
-        stackField('识别语言', inLang, '本地引擎语言代码，多语言用 + 连接，例如 chi_sim+eng。')
+        stackField('识别语言', selOcrLang, '仅使用应用内置的离线中英文模型；模型缺失时会明确失败，不会联网下载。')
       );
 
       grid.appendChild(gOcr.card);
@@ -1087,7 +1177,7 @@
       // 刷新历史数量
       async function refreshHistoryCount() {
         try {
-          const list = await api.historyList();
+          const list = await api.historyList({ includeMedia: true });
           histCount.textContent = Array.isArray(list) ? String(list.length) : '0';
         } catch (e) {
           histCount.textContent = '0';
@@ -1179,16 +1269,23 @@
         tgCopyAfter.querySelector('.kk-toggle-input').checked = !!cap.copyAfterCapture;
         tgAutoPin.querySelector('.kk-toggle-input').checked = !!cap.autoPin;
         tgAutoSaveHistory.querySelector('.kk-toggle-input').checked = !!cap.autoSaveHistory;
+        selExportFormat.value = cap.exportFormat || 'png';
+        inExportQuality.value = cap.quality != null ? cap.quality : 90;
+        updateExportQualityState();
 
         // 录屏
         inFps.value = rec.fps != null ? rec.fps : '';
         tgGif.querySelector('.kk-toggle-input').checked = !!rec.toGif;
+        tgSystemAudio.querySelector('.kk-toggle-input').checked = !!rec.systemAudio;
+        tgMicrophone.querySelector('.kk-toggle-input').checked = !!rec.microphone;
 
         // OCR
         const engine = (ocr.engine && ocr.engine !== 'local') ? 'model' : 'local';
         ocrRadios.forEach(function (r) { r.checked = r.value === engine; });
         updateRadioVisual();
-        inLang.value = ocr.lang || '';
+        selOcrLang.value = OCR_LANGUAGES.some(function (lang) { return lang.value === ocr.lang; })
+          ? ocr.lang
+          : 'chi_sim+eng';
 
         // AI 模型
         fillKeyInput(inApiKey, ds.apiKey);

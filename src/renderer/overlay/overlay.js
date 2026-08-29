@@ -40,9 +40,397 @@
     return true;
   }
 
+  function resolveInitialOverlayRect(mode, width, height) {
+    if (mode !== 'fullscreen' && mode !== 'image') return null;
+    var w = Number(width);
+    var h = Number(height);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+    return { x: 0, y: 0, width: w, height: h };
+  }
+
+  // CSS 窗口必须是整数尺寸，原图像素尺寸不一定能被它整除。
+  // 分别映射四条边再相减，可以保证整图选区恒等于整张原图，且局部选区不会越界。
+  function mapOverlayRectToSource(rect, viewport, source) {
+    var vw = Number(viewport && viewport.width);
+    var vh = Number(viewport && viewport.height);
+    var sw = Math.floor(Number(source && source.width));
+    var sh = Math.floor(Number(source && source.height));
+    if (!(vw > 0) || !(vh > 0) || !(sw > 0) || !(sh > 0) || !rect) return null;
+    var x0 = Math.max(0, Math.min(vw, Number(rect.x) || 0));
+    var y0 = Math.max(0, Math.min(vh, Number(rect.y) || 0));
+    var x1 = Math.max(x0, Math.min(vw, x0 + Math.max(0, Number(rect.width) || 0)));
+    var y1 = Math.max(y0, Math.min(vh, y0 + Math.max(0, Number(rect.height) || 0)));
+    var left = Math.max(0, Math.min(sw - 1, Math.round((x0 / vw) * sw)));
+    var top = Math.max(0, Math.min(sh - 1, Math.round((y0 / vh) * sh)));
+    var right = Math.max(left + 1, Math.min(sw, Math.round((x1 / vw) * sw)));
+    var bottom = Math.max(top + 1, Math.min(sh, Math.round((y1 / vh) * sh)));
+    return { x: left, y: top, width: right - left, height: bottom - top };
+  }
+
+  function buildOverlayResultGeometry(rect, viewport, source, displayBounds) {
+    if (!rect) return null;
+    var rectOut = {
+      x: Math.round(Number(rect.x) || 0),
+      y: Math.round(Number(rect.y) || 0),
+      width: Math.max(1, Math.round(Number(rect.width) || 0)),
+      height: Math.max(1, Math.round(Number(rect.height) || 0)),
+    };
+    var originX = Number(displayBounds && displayBounds.x) || 0;
+    var originY = Number(displayBounds && displayBounds.y) || 0;
+    return {
+      rect: rectOut,
+      bounds: {
+        x: Math.round(originX + rect.x),
+        y: Math.round(originY + rect.y),
+        width: rectOut.width,
+        height: rectOut.height,
+      },
+      sourceRect: mapOverlayRectToSource(rect, viewport, source),
+    };
+  }
+
+  // 原位翻译的非 DOM 数据链路。保留为可注入依赖的函数，Node 回归测试可以验证：
+  // OCR 必须读取 clean 合成、翻译必须使用调用方提供的目标语言，且屏幕层和导出层共用同一批 cells。
+  function buildInlineTranslationCells(sourceLines, translatedLines) {
+    var lines = Array.isArray(sourceLines) ? sourceLines : [];
+    var outs = Array.isArray(translatedLines) ? translatedLines : [];
+    return lines.map(function (line, index) {
+      function numberOrZero(value) {
+        var n = Number(value);
+        return Number.isFinite(n) ? n : 0;
+      }
+      return {
+        xp: numberOrZero(line && line.x),
+        yp: numberOrZero(line && line.y),
+        wp: numberOrZero(line && line.w),
+        hp: numberOrZero(line && line.h),
+        text: outs[index] == null ? '' : String(outs[index]),
+        bg: '#fff',
+        fg: '#111',
+      };
+    });
+  }
+
+  async function prepareInlineTranslation(api, compose, target, onStage) {
+    var dataURL = compose({ clean: true });
+    var result = { dataURL: dataURL, vision: null, translation: null, cells: [] };
+    if (!dataURL) return result;
+
+    result.vision = await api.ocrBoxes({ dataURL: dataURL });
+    if (!result.vision || result.vision.error || !Array.isArray(result.vision.lines) || !result.vision.lines.length) {
+      return result;
+    }
+
+    if (typeof onStage === 'function') onStage('translate');
+    var sourceTexts = result.vision.lines.map(function (line) { return line.t; });
+    var requestedTarget = typeof target === 'string' && target.trim() ? target.trim() : '中文';
+    result.translation = await api.translateLines({ lines: sourceTexts, target: requestedTarget });
+    if (!result.translation || result.translation.error) return result;
+
+    result.cells = buildInlineTranslationCells(result.vision.lines, result.translation.lines);
+    return result;
+  }
+
+  // 表格 / 公式都是明确标注的 AI 辅助识别，不冒充本地专用 OCR。
+  // 只把当前选区的纯底图交给受信 AI 窗口；不提交 overlay result，
+  // 所以选区、标注和编辑窗口都保留，失败后可立即重试。
+  async function openStructuredRecognition(api, compose, mode) {
+    if (mode !== 'table' && mode !== 'formula') throw new Error('AI 识别模式无效。');
+    if (!api || typeof api.openAIPanel !== 'function' || typeof compose !== 'function') {
+      throw new Error('AI 识别接口不可用。');
+    }
+    var dataURL = compose({ clean: true });
+    if (!dataURL) throw new Error('当前选区无法生成图片。');
+    return api.openAIPanel({ mode: mode, dataURL: dataURL });
+  }
+
+  function clearInlineTranslationState(state) {
+    if (!state) return 0;
+    if (state.trLayer && state.trLayer.parentNode) state.trLayer.parentNode.removeChild(state.trLayer);
+    state.trLayer = null;
+    state.trCells = [];
+    state.trRequestId = (Number(state.trRequestId) || 0) + 1;
+    return state.trRequestId;
+  }
+
+  function commitInlineTranslationCells(state, requestId, cells) {
+    if (!state || state.trRequestId !== requestId) return false;
+    state.trCells = Array.isArray(cells) ? cells : [];
+    return true;
+  }
+
+  var BARCODE_FORMATS = [
+    'qr_code', 'aztec', 'code_128', 'code_39', 'code_93', 'codabar',
+    'data_matrix', 'ean_13', 'ean_8', 'itf', 'pdf417', 'upc_a', 'upc_e',
+  ];
+  var MAX_BARCODE_RESULTS = 20;
+  var MAX_BARCODE_VALUE_LENGTH = 8192;
+
+  function calculateBarcodeScanSize(width, height, maxEdge, maxPixels) {
+    var sourceWidth = Math.max(1, Math.floor(Number(width) || 1));
+    var sourceHeight = Math.max(1, Math.floor(Number(height) || 1));
+    var edgeLimit = Math.max(64, Math.floor(Number(maxEdge) || 1280));
+    var pixelLimit = Math.max(4096, Math.floor(Number(maxPixels) || 1500000));
+    var scale = Math.min(
+      1,
+      edgeLimit / Math.max(sourceWidth, sourceHeight),
+      Math.sqrt(pixelLimit / (sourceWidth * sourceHeight))
+    );
+    return {
+      width: Math.max(1, Math.floor(sourceWidth * scale)),
+      height: Math.max(1, Math.floor(sourceHeight * scale)),
+    };
+  }
+
+  function normalizeBarcodeResults(results, limit) {
+    var max = Math.max(1, Math.min(MAX_BARCODE_RESULTS, Math.floor(Number(limit) || MAX_BARCODE_RESULTS)));
+    var seen = Object.create(null);
+    return (Array.isArray(results) ? results : [])
+      .map(function (item, index) {
+        var rawValue = item && (item.rawValue != null ? item.rawValue : item.value);
+        var value = rawValue == null ? '' : String(rawValue).trim();
+        if (!value) return null;
+        if (value.length > MAX_BARCODE_VALUE_LENGTH) value = value.slice(0, MAX_BARCODE_VALUE_LENGTH);
+        var format = item && item.format ? String(item.format).toLowerCase() : 'unknown';
+        var box = item && item.boundingBox ? item.boundingBox : item;
+        var x = Number(box && box.x);
+        var y = Number(box && box.y);
+        return {
+          value: value,
+          format: format,
+          x: Number.isFinite(x) ? x : 0,
+          y: Number.isFinite(y) ? y : 0,
+          _index: index,
+        };
+      })
+      .filter(Boolean)
+      .sort(function (a, b) {
+        return a.y - b.y || a.x - b.x || a.format.localeCompare(b.format) ||
+          a.value.localeCompare(b.value) || a._index - b._index;
+      })
+      .filter(function (item) {
+        var key = item.format + '\u0000' + item.value;
+        if (seen[key]) return false;
+        seen[key] = true;
+        return true;
+      })
+      .slice(0, max)
+      .map(function (item) {
+        return { value: item.value, format: item.format, x: item.x, y: item.y };
+      });
+  }
+
+  function formatBarcodeResultsForCopy(results) {
+    var safe = normalizeBarcodeResults(results, MAX_BARCODE_RESULTS);
+    if (!safe.length) return '';
+    if (safe.length === 1) return safe[0].value;
+    return safe.map(function (item) {
+      return '[' + item.format.replace(/_/g, ' ').toUpperCase() + '] ' + item.value;
+    }).join('\n');
+  }
+
+  async function detectBarcodeResults(options) {
+    var opts = options || {};
+    var Detector = opts.BarcodeDetectorCtor;
+    if (typeof Detector === 'function') {
+      try {
+        var timeoutMs = Math.max(1, Math.min(10000, Math.floor(Number(opts.detectorTimeoutMs) || 2500)));
+        function withDetectorTimeout(promise) {
+          return new Promise(function (resolve, reject) {
+            var settled = false;
+            var timer = setTimeout(function () {
+              if (settled) return;
+              settled = true;
+              reject(new Error('BarcodeDetector timed out'));
+            }, timeoutMs);
+            Promise.resolve(promise).then(function (value) {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve(value);
+            }, function (error) {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              reject(error);
+            });
+          });
+        }
+        var detectorOptions = {};
+        if (typeof Detector.getSupportedFormats === 'function') {
+          var supported = await withDetectorTimeout(Detector.getSupportedFormats());
+          var supportedSet = new Set(Array.isArray(supported) ? supported : []);
+          var formats = BARCODE_FORMATS.filter(function (format) { return supportedSet.has(format); });
+          if (!formats.length) throw new Error('No supported barcode formats');
+          detectorOptions.formats = formats;
+        }
+        var detector = new Detector(detectorOptions);
+        var detected = await withDetectorTimeout(detector.detect(opts.source));
+        return {
+          engine: 'barcode-detector',
+          results: normalizeBarcodeResults(detected, opts.maxResults),
+        };
+      } catch (_) {
+        // 部分 Chromium 声明了 BarcodeDetector 但构造或 detect 仍会失败；继续走 jsQR。
+      }
+    }
+
+    var qr = null;
+    if (
+      typeof opts.jsQRFn === 'function' && opts.imageData && opts.imageData.data &&
+      Number(opts.width) > 0 && Number(opts.height) > 0
+    ) {
+      try {
+        qr = opts.jsQRFn(opts.imageData.data, opts.width, opts.height, { inversionAttempts: 'dontInvert' });
+      } catch (_) {}
+      if (!qr) {
+        try {
+          qr = opts.jsQRFn(opts.imageData.data, opts.width, opts.height, { inversionAttempts: 'attemptBoth' });
+        } catch (_) {}
+      }
+    }
+    return {
+      engine: 'jsqr',
+      results: normalizeBarcodeResults(qr ? [{ rawValue: qr.data, format: 'qr_code' }] : [], opts.maxResults),
+    };
+  }
+
+  function beginBarcodeScan(state) {
+    if (!state) return 0;
+    state.qrRequestId = (Number(state.qrRequestId) || 0) + 1;
+    state.qrResults = [];
+    state.qrData = null;
+    state.qrOpenURL = null;
+    return state.qrRequestId;
+  }
+
+  function commitBarcodeScan(state, requestId, results) {
+    if (!state || state.qrRequestId !== requestId) return false;
+    state.qrResults = normalizeBarcodeResults(results, MAX_BARCODE_RESULTS);
+    state.qrData = state.qrResults.length ? state.qrResults[0].value : null;
+    return true;
+  }
+
+  var RECENT_RECTS_STORAGE_KEY = 'kunkun-shot:recent-rects:v1';
+
+  function finiteNumber(value) {
+    var number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function normalizeRecentRectEntry(entry) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    var x = finiteNumber(entry.x);
+    var y = finiteNumber(entry.y);
+    var width = finiteNumber(entry.width);
+    var height = finiteNumber(entry.height);
+    var displayWidth = finiteNumber(entry.displayWidth);
+    var displayHeight = finiteNumber(entry.displayHeight);
+    if (
+      x === null || y === null || width === null || height === null ||
+      displayWidth === null || displayHeight === null ||
+      width <= 0 || height <= 0 || displayWidth <= 0 || displayHeight <= 0
+    ) return null;
+    return {
+      x: x,
+      y: y,
+      width: width,
+      height: height,
+      displayId: entry.displayId == null ? '' : String(entry.displayId),
+      displayWidth: displayWidth,
+      displayHeight: displayHeight,
+    };
+  }
+
+  function appendRecentRect(records, rect, display, limit) {
+    var max = Math.max(1, Math.min(100, Math.floor(Number(limit) || 10)));
+    var source = Array.isArray(records) ? records : [];
+    var entry = normalizeRecentRectEntry({
+      x: rect && rect.x,
+      y: rect && rect.y,
+      width: rect && rect.width,
+      height: rect && rect.height,
+      displayId: display && display.id,
+      displayWidth: display && display.width,
+      displayHeight: display && display.height,
+    });
+    if (!entry) return source.slice(-max);
+    var previous = normalizeRecentRectEntry(source[source.length - 1]);
+    if (
+      previous &&
+      previous.x === entry.x && previous.y === entry.y &&
+      previous.width === entry.width && previous.height === entry.height &&
+      previous.displayId === entry.displayId &&
+      previous.displayWidth === entry.displayWidth && previous.displayHeight === entry.displayHeight
+    ) return source.slice(-max);
+    return source.concat([entry]).slice(-max);
+  }
+
+  function loadRecentRects(storage, limit) {
+    var max = Math.max(1, Math.min(100, Math.floor(Number(limit) || 10)));
+    try {
+      if (!storage || typeof storage.getItem !== 'function') return [];
+      var raw = storage.getItem(RECENT_RECTS_STORAGE_KEY);
+      if (!raw) return [];
+      var parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.map(normalizeRecentRectEntry).filter(Boolean).slice(-max);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function persistRecentRects(storage, records, limit) {
+    var max = Math.max(1, Math.min(100, Math.floor(Number(limit) || 10)));
+    try {
+      if (!storage || typeof storage.setItem !== 'function') return false;
+      var safe = (Array.isArray(records) ? records : [])
+        .map(normalizeRecentRectEntry)
+        .filter(Boolean)
+        .slice(-max);
+      storage.setItem(RECENT_RECTS_STORAGE_KEY, JSON.stringify(safe));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function resolveRecentRect(entry, display) {
+    var safe = normalizeRecentRectEntry(entry);
+    var displayWidth = finiteNumber(display && display.width);
+    var displayHeight = finiteNumber(display && display.height);
+    if (!safe || displayWidth === null || displayHeight === null || displayWidth <= 0 || displayHeight <= 0) return null;
+    var scaleX = displayWidth / safe.displayWidth;
+    var scaleY = displayHeight / safe.displayHeight;
+    var width = Math.min(displayWidth, safe.width * scaleX);
+    var height = Math.min(displayHeight, safe.height * scaleY);
+    var x = Math.max(0, Math.min(displayWidth - width, safe.x * scaleX));
+    var y = Math.max(0, Math.min(displayHeight - height, safe.y * scaleY));
+    return { x: x, y: y, width: width, height: height };
+  }
+
   // Node 回归测试只加载上面的纯异步契约，不初始化 renderer DOM。
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { submitOverlayResult };
+    module.exports = {
+      submitOverlayResult,
+      resolveInitialOverlayRect,
+      mapOverlayRectToSource,
+      buildOverlayResultGeometry,
+      prepareInlineTranslation,
+      openStructuredRecognition,
+      clearInlineTranslationState,
+      commitInlineTranslationCells,
+      appendRecentRect,
+      loadRecentRects,
+      persistRecentRects,
+      resolveRecentRect,
+      beginBarcodeScan,
+      commitBarcodeScan,
+      calculateBarcodeScanSize,
+      detectBarcodeResults,
+      formatBarcodeResultsForCopy,
+      normalizeBarcodeResults,
+    };
     return;
   }
 
@@ -68,6 +456,9 @@
     lastMouse: { x: 0, y: 0 },
     curColor: null, // {r,g,b} 或 null
     qrData: null,
+    qrResults: [],
+    qrRequestId: 0,
+    qrOpenURL: null,
     ratioLock: 0, // 锁定宽高比(>0)；0=不锁
     rounded: false, // 圆角截图
     axMode: false, // 智能 UI 元素识别
@@ -77,7 +468,7 @@
     // 历史浏览 / 选区历史（PixPin 式 < > / R）
     histItems: null, // 历史列表缓存
     histIdx: -1, // -1=当前截图；>=0 表示正在看第几张历史
-    recentRects: [], // 本会话最近 10 个选区
+    recentRects: [], // 跨截图会话持久化的最近 10 个选区
     rectHistIdx: -1, // 选区历史游标 // 当前选区识别出的二维码内容
 
     // 选区拖动 / 缩放
@@ -102,6 +493,11 @@
     editingTextShape: null, // 正在再编辑的文字标注
     _dragSnapshot: null,
     _dragMoved: false,
+
+    // 原位翻译：DOM 层用于预览，cells 是 composeImage() 的导出数据源；requestId 阻止过期异步结果回写。
+    trLayer: null,
+    trCells: [],
+    trRequestId: 0,
 
     finished: false, // 已提交，防止重复
   };
@@ -146,6 +542,8 @@
   var btnRedo = document.getElementById('btnRedo');
   var btnDelete = document.getElementById('btnDelete');
   var trLang = document.getElementById('trLang'); // 翻译目标语言选择
+  var translateConfigReady = Promise.resolve();
+  var translateTargetChanged = false;
 
   // ---------- 工具函数 ----------
   function clamp(v, a, b) {
@@ -182,6 +580,9 @@
       })
       .catch(function () {});
     if (!payload) return;
+    beginBarcodeScan(S);
+    btnQR.hidden = true;
+    hideQrPanel();
     S.payload = payload;
     S.scaleFactor = payload.scaleFactor || 1;
     S.displayCssW = payload.width || window.innerWidth;
@@ -189,6 +590,9 @@
     S.displayBounds = payload.displayBounds || payload.bounds || { x: 0, y: 0, width: S.displayCssW, height: S.displayCssH };
     S.displayId = payload.displayId;
     S.mode = payload.mode || 'region';
+    S.recentRects = loadRecentRects(window.localStorage, 10);
+    S.rectHistIdx = -1;
+    S.rect = resolveInitialOverlayRect(S.mode, S.displayCssW, S.displayCssH);
 
     // 背景 canvas 用物理像素，CSS 缩放到显示器尺寸（铺满 body）
     var img = new Image();
@@ -199,6 +603,8 @@
       // CSS 尺寸已由样式 100vw/100vh 控制
       bgCtx.drawImage(img, 0, 0);
       S.bgReady = true;
+      // 用户可能在大图完成解码前已经框选；底图就绪后补扫一次。
+      if (S.rect) scanQr();
     };
     img.onerror = function () {
       // 背景加载失败也允许框选，只是没有底图
@@ -206,7 +612,13 @@
     };
     img.src = payload.dataURL;
 
-    layoutMask();
+    if (S.rect) {
+      hint.hidden = true;
+      updateSelectionView();
+      showToolbar();
+    } else {
+      layoutMask();
+    }
   });
 
   // ---------- 蒙层布局：选区外变暗，选区内透明 ----------
@@ -315,7 +727,6 @@
       updateSelectionView();
       showToolbar();
       scanQr();
-      recordRecentRect();
       showTip('已框选元素 ' + Math.round(f.w) + '×' + Math.round(f.h));
       e.preventDefault();
       return;
@@ -375,7 +786,7 @@
     selectionEl.classList.remove('annotating');
     toolbar.hidden = true;
     hint.hidden = true;
-    S.qrData = null;
+    beginBarcodeScan(S);
     btnQR.hidden = true;
     hideQrPanel();
     hideOcrPanel();
@@ -588,7 +999,6 @@
     updateSelectionView();
     showToolbar();
     scanQr();
-    recordRecentRect();
   }
 
   // ================= 工具栏 =================
@@ -688,6 +1098,11 @@
       } else if (action === 'ocr') {
         // P2-9：OCR 就地完成，不另开窗口
         openInlineOCR();
+      } else if (action === 'table' || action === 'formula') {
+        // 使用独立 AI 窗口，不关闭截图编辑器；选区在调用失败时仍可重试。
+        Promise.resolve(openStructuredRecognition(kkapi, composeImage, action))
+          .then(function () { showTip(action === 'table' ? '已打开 AI 表格识别' : '已打开 AI 公式识别'); })
+          .catch(function (err) { showTip('AI 识别打开失败：' + ((err && err.message) || err)); });
       } else if (action === 'ask' || action === 'translate' || action === 'polish') {
         // 翻译 / 问 AI / 润色：在截图层内就地完成，不另开窗口
         openInlineAI(action);
@@ -757,12 +1172,14 @@
     trLang.addEventListener('mousedown', function (e) { e.stopPropagation(); });
     trLang.addEventListener('click', function (e) { e.stopPropagation(); });
     trLang.addEventListener('change', function () {
+      translateTargetChanged = true;
       try { kkapi.setConfig({ translate: { target: trLang.value } }); } catch (_) {}
     });
-    Promise.resolve(kkapi.getConfig())
+    translateConfigReady = Promise.resolve(kkapi.getConfig())
       .then(function (cfg) {
         var t = cfg && cfg.translate && cfg.translate.target;
-        if (t) trLang.value = t;
+        // 配置读取期间若用户已经主动切换，以本次用户选择为准，避免晚到的配置覆盖它。
+        if (t && !translateTargetChanged) trLang.value = t;
       })
       .catch(function () {});
   }
@@ -1643,24 +2060,24 @@
     btnOcrClose.addEventListener('click', hideOcrPanel);
   }
 
-  // ================= 二维码识别（PixPin 式：框选后自动检测）=================
+  // ================= 二维码 / 条码识别（PixPin 式：框选后自动检测）=================
   function scanQr() {
+    var requestId = beginBarcodeScan(S);
+    btnQR.hidden = true;
+    hideQrPanel();
     if (!S.rect || !S.bgReady || !S.bgImage) return;
-    if (typeof jsQR !== 'function') return;
+    var Detector = typeof window.BarcodeDetector === 'function' ? window.BarcodeDetector : null;
+    var qrDecoder = typeof jsQR === 'function' ? jsQR : null;
+    if (!Detector && !qrDecoder) return;
     var phys = dpr();
     var r = S.rect;
     var w = Math.round(r.width * phys);
     var h = Math.round(r.height * phys);
-    if (w < 40 || h < 40) {
-      S.qrData = null;
-      btnQR.hidden = true;
-      return;
-    }
-    // 长边超过 1024 时降采样，避免大选区全分辨率扫描卡顿
-    var MAX = 1024;
-    var sc = Math.min(1, MAX / Math.max(w, h));
-    var cw = Math.max(1, Math.round(w * sc));
-    var ch = Math.max(1, Math.round(h * sc));
+    if (w < 40 || h < 40) return;
+    // 同时限制长边和总像素数，避免超宽/超高选区在渲染进程卡住。
+    var scanSize = calculateBarcodeScanSize(w, h, 1280, 1500000);
+    var cw = scanSize.width;
+    var ch = scanSize.height;
     var tmp = document.createElement('canvas');
     tmp.width = cw;
     tmp.height = ch;
@@ -1670,23 +2087,51 @@
     } catch (_) {
       return;
     }
-    var img = tctx.getImageData(0, 0, cw, ch);
-    var code = null;
     try {
-      code = jsQR(img.data, cw, ch, { inversionAttempts: 'dontInvert' });
-    } catch (_) {}
-    if (!code) {
-      try {
-        code = jsQR(img.data, cw, ch, { inversionAttempts: 'attemptBoth' });
-      } catch (_) {}
+      var img = tctx.getImageData(0, 0, cw, ch);
+      detectBarcodeResults({
+        source: tmp,
+        BarcodeDetectorCtor: Detector,
+        jsQRFn: qrDecoder,
+        imageData: img,
+        width: cw,
+        height: ch,
+        maxResults: MAX_BARCODE_RESULTS,
+      }).then(function (outcome) {
+        if (!commitBarcodeScan(S, requestId, outcome && outcome.results)) return;
+        btnQR.hidden = !S.qrResults.length;
+      }).catch(function () {
+        if (!commitBarcodeScan(S, requestId, [])) return;
+        btnQR.hidden = true;
+      });
+    } catch (_) {
+      // canvas 因内存或安全限制读取失败时，保持无结果即可。
     }
-    S.qrData = code ? String(code.data) : null;
-    btnQR.hidden = !S.qrData;
   }
   function showQrPanel() {
-    if (!S.qrData) return;
-    qrText.textContent = S.qrData;
-    btnQrOpen.hidden = !/^https?:\/\//i.test(S.qrData);
+    if (!S.qrResults.length) return;
+    qrText.textContent = '';
+    S.qrResults.forEach(function (result) {
+      var row = document.createElement('div');
+      row.className = 'qr-result';
+      var format = document.createElement('span');
+      format.className = 'qr-format';
+      format.textContent = result.format.replace(/_/g, ' ').toUpperCase();
+      var value = document.createElement('div');
+      value.className = 'qr-value';
+      value.textContent = result.value;
+      row.appendChild(format);
+      row.appendChild(value);
+      qrText.appendChild(row);
+    });
+    S.qrOpenURL = null;
+    for (var index = 0; index < S.qrResults.length; index += 1) {
+      if (/^https?:\/\//i.test(S.qrResults[index].value)) {
+        S.qrOpenURL = S.qrResults[index].value;
+        break;
+      }
+    }
+    btnQrOpen.hidden = !S.qrOpenURL;
     qrPanel.hidden = false;
   }
   function hideQrPanel() {
@@ -1694,14 +2139,15 @@
   }
   function bindQrPanel() {
     btnQrCopy.addEventListener('click', function () {
-      if (!S.qrData) return;
-      Promise.resolve(kkapi.copyText(S.qrData))
-        .then(function () { showTip('已复制二维码内容'); })
+      var text = formatBarcodeResultsForCopy(S.qrResults);
+      if (!text) return;
+      Promise.resolve(kkapi.copyText(text))
+        .then(function () { showTip(S.qrResults.length > 1 ? '已复制 ' + S.qrResults.length + ' 个条码结果' : '已复制条码内容'); })
         .catch(function () { showTip('复制失败'); });
     });
     btnQrOpen.addEventListener('click', function () {
-      if (!S.qrData || !/^https?:\/\//i.test(S.qrData)) return;
-      Promise.resolve(kkapi.openExternal(S.qrData))
+      if (!S.qrOpenURL) return;
+      Promise.resolve(kkapi.openExternal(S.qrOpenURL))
         .then(function () { hideQrPanel(); })
         .catch(function () { showTip('打开失败'); });
     });
@@ -1726,8 +2172,13 @@
     var clean = !!(opts && opts.clean);
     var phys = dpr();
     var r = S.rect;
-    var outW = Math.max(1, Math.round(r.width * phys));
-    var outH = Math.max(1, Math.round(r.height * phys));
+    var sourceRect = mapOverlayRectToSource(
+      r,
+      { width: S.displayCssW, height: S.displayCssH },
+      { width: bgCanvas.width, height: bgCanvas.height }
+    );
+    var outW = sourceRect ? sourceRect.width : Math.max(1, Math.round(r.width * phys));
+    var outH = sourceRect ? sourceRect.height : Math.max(1, Math.round(r.height * phys));
     var out = document.createElement('canvas');
     out.width = outW;
     out.height = outH;
@@ -1735,7 +2186,7 @@
 
     // 圆角截图：先把整张导出图裁剪成圆角（背景+标注+译文都在圆角内）
     if (S.rounded) {
-      var rad = Math.round((S.roundedRadius || 12) * phys);
+      var rad = Math.round((S.roundedRadius || 12) * Math.min(outW / r.width, outH / r.height));
       try {
         ctx.beginPath();
         if (ctx.roundRect) ctx.roundRect(0, 0, outW, outH, rad);
@@ -1758,8 +2209,8 @@
 
     // 1) 从背景物理像素裁剪选区
     if (S.bgImage && bgCanvas.width > 0) {
-      var srcX = Math.round(r.x * phys);
-      var srcY = Math.round(r.y * phys);
+      var srcX = sourceRect ? sourceRect.x : Math.round(r.x * phys);
+      var srcY = sourceRect ? sourceRect.y : Math.round(r.y * phys);
       try {
         ctx.drawImage(bgCanvas, srcX, srcY, outW, outH, 0, 0, outW, outH);
       } catch (err) {
@@ -1772,9 +2223,14 @@
 
     // 2) 叠加标注（按 phys 放大）
     ctx.imageSmoothingEnabled = true;
+    var annotationScaleX = outW / r.width;
+    var annotationScaleY = outH / r.height;
+    ctx.save();
+    ctx.scale(annotationScaleX, annotationScaleY);
     for (var i = 0; i < S.shapes.length; i++) {
-      drawShape(ctx, S.shapes[i], phys);
+      drawShape(ctx, S.shapes[i], 1);
     }
+    ctx.restore();
 
     // 3) 叠加原位译文层（若已翻译）：把屏幕上的译文格子按相对坐标画进导出图，使保存/复制也含译文。
     //    复刻 DOM 渲染：每行用采样的背景色(c.bg)+对比文字色(c.fg)无缝盖回、字号≈格高*0.7、超宽横向压缩、按格裁剪。
@@ -1860,35 +2316,45 @@
       return;
     }
     commitText();
+    // 只记录用户实际确认时的最终选区；初次框选后可能还会移动/缩放。
+    // 提交失败重试时 appendRecentRect 会去重，避免一条选区被重复写入。
+    recordRecentRect();
     S.finished = true;
 
     var r = S.rect;
-    var rectOut = {
-      x: Math.round(r.x),
-      y: Math.round(r.y),
-      width: Math.round(r.width),
-      height: Math.round(r.height),
-    };
-    var boundsOut = {
-      x: Math.round(S.displayBounds.x + r.x),
-      y: Math.round(S.displayBounds.y + r.y),
-      width: Math.round(r.width),
-      height: Math.round(r.height),
-    };
+    var geometry = buildOverlayResultGeometry(
+      r,
+      { width: S.displayCssW, height: S.displayCssH },
+      { width: bgCanvas.width, height: bgCanvas.height },
+      S.displayBounds
+    );
+    var rectOut = geometry.rect;
+    var boundsOut = geometry.bounds;
 
     // record / long 不需要图像合成
     // OCR 要识别原文：若做过原位翻译，白底译文会盖住原文，先清掉译文层再合成，避免 OCR 读到译文而非原文
     //（copy/save/pin 不清——用户翻译后保存/复制的本就该是带译文的图；与 openInlineAI 对 ask/polish 的处理对称）。
     if (action === 'ocr') clearInlineTranslate();
-    var imageDataURL = action === 'record' || action === 'long' ? null : composeImage();
-
-    var result = {
-      action: action,
-      imageDataURL: imageDataURL,
-      rect: rectOut,
-      bounds: boundsOut,
-      displayId: S.displayId,
-    };
+    var isLiveAction = action === 'record' || action === 'long';
+    var result;
+    if (isLiveAction) {
+      // 实时操作只提交显示器选区，不携带静态图/窗口字段。
+      // 这使主进程可以在 IPC 边界拒绝互斥 payload，防止录屏/长截图误入剪贴板、贴图或历史副作用。
+      result = {
+        action: action,
+        rect: rectOut,
+        displayId: S.displayId,
+      };
+    } else {
+      result = {
+        action: action,
+        imageDataURL: composeImage(),
+        rect: rectOut,
+        bounds: boundsOut,
+        sourceRect: geometry.sourceRect,
+        displayId: S.displayId,
+      };
+    }
     submitOverlayResult(kkapi, result, function (failure) {
       S.finished = false;
       if (failure && failure.completed) {
@@ -1903,7 +2369,7 @@
 
   function doCancel() {
     hideQrPanel();
-    S.qrData = null;
+    beginBarcodeScan(S);
     btnQR.hidden = true;
     if (S.finished) return;
     S.finished = true;
@@ -2049,20 +2515,19 @@
     window.addEventListener('unhandledrejection', function (e) { showTrErr('未处理拒绝: ' + ((e.reason && e.reason.message) || e.reason)); });
   })();
   function clearInlineTranslate() {
-    if (S.trLayer && S.trLayer.parentNode) S.trLayer.parentNode.removeChild(S.trLayer);
-    S.trLayer = null;
+    return clearInlineTranslationState(S);
   }
   async function startInlineTranslate() {
     if (!S.rect || S.rect.width < 3 || S.rect.height < 3) return;
     commitText();
-    var r = { x: S.rect.x, y: S.rect.y, width: S.rect.width, height: S.rect.height };
-    var dataURL = composeImage();
-    if (!dataURL) return;
     if (!kkapi.ocrBoxes || !kkapi.translateLines) {
       if (window.__kkShowErr) window.__kkShowErr('接口缺失：ocrBoxes/translateLines 未暴露，preload 没生效，请彻底重启 app');
       return;
     }
-    clearInlineTranslate();
+    await translateConfigReady;
+    if (!S.rect || S.rect.width < 3 || S.rect.height < 3) return;
+    var r = { x: S.rect.x, y: S.rect.y, width: S.rect.width, height: S.rect.height };
+    var requestId = clearInlineTranslate();
     var layer = document.createElement('div');
     layer.className = 'kk-tr-layer';
     layer.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:90;pointer-events:none;';
@@ -2072,33 +2537,53 @@
     tip.style.cssText = 'position:fixed;z-index:96;left:' + r.x + 'px;top:' + Math.max(2, r.y - 26) + 'px;background:rgba(20,20,22,.92);color:#fff;font:12px/1.5 -apple-system,sans-serif;padding:3px 9px;border-radius:6px;';
     tip.textContent = '正在识别…';
     layer.appendChild(tip);
+    function isCurrentRequest() {
+      return S.trRequestId === requestId && S.trLayer === layer;
+    }
+    function clearCurrentRequestLater(delay) {
+      setTimeout(function () {
+        if (isCurrentRequest()) clearInlineTranslate();
+      }, delay);
+    }
     try {
-      var vr = await kkapi.ocrBoxes({ dataURL: dataURL });
+      var prepared = await prepareInlineTranslation(
+        kkapi,
+        composeImage,
+        trLang ? trLang.value : '中文',
+        function (stage) {
+          if (stage === 'translate' && isCurrentRequest()) tip.textContent = '正在翻译…';
+        }
+      );
+      if (!isCurrentRequest()) return;
+      if (!prepared.dataURL) {
+        tip.textContent = '截图为空';
+        clearCurrentRequestLater(1600);
+        return;
+      }
+      var vr = prepared.vision;
       if (!vr || vr.error || !vr.lines || !vr.lines.length) {
         tip.textContent = vr && vr.error ? '识别失败：' + vr.error : '未识别到文字';
-        setTimeout(clearInlineTranslate, 1600);
+        clearCurrentRequestLater(1600);
         return;
       }
-      tip.textContent = '正在翻译…';
-      var texts = vr.lines.map(function (l) { return l.t; });
-      var tr = await kkapi.translateLines({ lines: texts, target: '中文' });
+      var tr = prepared.translation;
       if (!tr || tr.error) {
         tip.textContent = '翻译失败：' + ((tr && tr.error) || '');
-        setTimeout(clearInlineTranslate, 1600);
+        clearCurrentRequestLater(1600);
         return;
       }
-      var outs = tr.lines || [];
+      if (!commitInlineTranslationCells(S, requestId, prepared.cells)) return;
       if (tip.parentNode) tip.parentNode.removeChild(tip);
-      for (var i = 0; i < vr.lines.length; i++) {
-        var ln = vr.lines[i];
-        var x = r.x + (ln.x / 100) * r.width;
-        var y = r.y + (ln.y / 100) * r.height;
-        var w = (ln.w / 100) * r.width;
-        var h = (ln.h / 100) * r.height;
+      for (var i = 0; i < prepared.cells.length; i++) {
+        var trCell = prepared.cells[i];
+        var x = r.x + (trCell.xp / 100) * r.width;
+        var y = r.y + (trCell.yp / 100) * r.height;
+        var w = (trCell.wp / 100) * r.width;
+        var h = (trCell.hp / 100) * r.height;
         var cell = document.createElement('div');
-        cell.style.cssText = 'position:fixed;overflow:hidden;display:flex;align-items:center;left:' + x + 'px;top:' + y + 'px;width:' + w + 'px;height:' + h + 'px;background:#fff;color:#111;border-radius:2px;box-sizing:border-box;padding:0 1px;white-space:nowrap;';
+        cell.style.cssText = 'position:fixed;overflow:hidden;display:flex;align-items:center;left:' + x + 'px;top:' + y + 'px;width:' + w + 'px;height:' + h + 'px;background:' + trCell.bg + ';color:' + trCell.fg + ';border-radius:2px;box-sizing:border-box;padding:0 1px;white-space:nowrap;';
         var span = document.createElement('span');
-        span.textContent = outs[i] || '';
+        span.textContent = trCell.text;
         span.style.cssText = 'display:inline-block;transform-origin:left center;line-height:1;font-family:-apple-system,BlinkMacSystemFont,sans-serif;';
         span.style.fontSize = Math.max(8, Math.floor(h * 0.7)) + 'px';
         cell.appendChild(span);
@@ -2111,9 +2596,10 @@
         })(span, w - 2);
       }
     } catch (e) {
+      if (!isCurrentRequest()) return;
       tip.textContent = '出错：' + (e && e.message ? e.message : e);
       if (window.__kkShowErr) window.__kkShowErr('翻译流程异常: ' + (e && e.message ? e.message : e));
-      setTimeout(clearInlineTranslate, 2600);
+      clearCurrentRequestLater(2600);
     }
   }
 
@@ -2597,7 +3083,7 @@
     S.selected = null;
     S.numberSeq = 1;
     toolbar.hidden = true;
-    S.qrData = null;
+    beginBarcodeScan(S);
     btnQR.hidden = true;
     hideQrPanel();
     updateSelectionView();
@@ -2674,8 +3160,12 @@
   }
   function recordRecentRect() {
     if (!S.rect) return;
-    S.recentRects.push({ x: S.rect.x, y: S.rect.y, width: S.rect.width, height: S.rect.height });
-    if (S.recentRects.length > 10) S.recentRects.shift();
+    S.recentRects = appendRecentRect(S.recentRects, S.rect, {
+      id: S.displayId,
+      width: S.displayCssW,
+      height: S.displayCssH,
+    }, 10);
+    persistRecentRects(window.localStorage, S.recentRects, 10);
     S.rectHistIdx = -1;
   }
   function applyRecentRect(step) {
@@ -2687,8 +3177,12 @@
     if (idx >= S.recentRects.length) idx = 0;
     if (idx < 0) idx = S.recentRects.length - 1;
     S.rectHistIdx = idx;
-    var r = S.recentRects[idx];
-    S.rect = { x: r.x, y: r.y, width: r.width, height: r.height };
+    var r = resolveRecentRect(S.recentRects[idx], { width: S.displayCssW, height: S.displayCssH });
+    if (!r) {
+      showTip('这条选区历史已损坏');
+      return;
+    }
+    S.rect = r;
     S.shapes = [];
     S.history = [];
     S.redoStack = [];
@@ -2718,6 +3212,7 @@
 
   // 窗口卸载时取消监听
   window.addEventListener('beforeunload', function () {
+    beginBarcodeScan(S);
     if (typeof off === 'function') off();
   });
 })();

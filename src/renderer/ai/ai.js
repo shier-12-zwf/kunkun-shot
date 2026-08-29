@@ -1,6 +1,6 @@
 // AI 面板渲染逻辑。
 // 与主进程交互一律走 window.kkapi（preload 注入），禁止 require / import。
-// 支持四种模式：ask（截图问 AI）/ ocr（识别文字）/ translate（翻译）/ polish（润色）。
+// 表格 / 公式是明确标注的 AI 辅助识别；任务 prompt 由主进程固定，渲染层只传模式。
 (function () {
   'use strict';
 
@@ -10,6 +10,7 @@
   const modeTitle = $('modeTitle');
   const thumbWrap = $('thumbWrap');
   const thumbImg = $('thumbImg');
+  const modeNote = $('modeNote');
   const ocrBlock = $('ocrBlock');
   const ocrText = $('ocrText');
   const ocrCopy = $('ocrCopy');
@@ -21,6 +22,8 @@
   const inputEl = $('input');
   const btnSend = $('btnSend');
   const btnSettings = $('btnSettings');
+  const btnCopyResult = $('btnCopyResult');
+  const btnRetry = $('btnRetry');
   const btnMin = $('btnMin');
   const btnClose = $('btnClose');
 
@@ -42,7 +45,13 @@
     translate: { icon: '🌐', title: '翻译' },
     translateImage: { icon: '🌐', title: '翻译截图' },
     polish: { icon: '✨', title: '润色' },
+    table: { icon: '🤖', title: 'AI 表格识别 · Markdown / CSV' },
+    formula: { icon: '🤖', title: 'AI 公式识别 · LaTeX' },
   };
+
+  function isStructuredRecognitionMode(value) {
+    return value === 'table' || value === 'formula';
+  }
 
   // 翻译截图用的视觉提示词（识别图中文字并翻译）
   const IMAGE_TRANSLATE_PROMPT =
@@ -129,6 +138,7 @@
     streaming = busy;
     btnSend.disabled = busy;
     btnSend.textContent = busy ? '回复中…' : '发送';
+    btnRetry.disabled = busy;
     [ocrTranslate, ocrPolish, ocrAsk].forEach((b) => {
       if (b) b.disabled = busy;
     });
@@ -189,6 +199,7 @@
       liveBodyEl = null;
       currentStreamId = null;
       setBusy(false);
+      if (isStructuredRecognitionMode(mode)) btnRetry.hidden = false;
       return;
     }
     if (ev.error) {
@@ -204,6 +215,7 @@
       currentStreamId = null;
       setBusy(false);
       showError(ev.error);
+      if (isStructuredRecognitionMode(mode)) btnRetry.hidden = false;
       return;
     }
     if (ev.reasoning) {
@@ -223,6 +235,10 @@
     }
     if (ev.done) {
       finishStream();
+      if (isStructuredRecognitionMode(mode)) {
+        btnRetry.hidden = false;
+        btnCopyResult.hidden = !liveText;
+      }
     }
   });
 
@@ -266,6 +282,26 @@
     }
   }
 
+  // 专用结构化识别通道：payload 中没有 prompt，主进程根据严格 mode 白名单选择固定任务。
+  async function startStructuredRecognition() {
+    if (!isStructuredRecognitionMode(mode) || streaming) return;
+    if (!curDataURL) {
+      showError('没有可识别的截图。');
+      btnRetry.hidden = false;
+      return;
+    }
+    btnRetry.hidden = true;
+    btnCopyResult.hidden = true;
+    hidePlaceholder();
+    const id = beginStream();
+    try {
+      await kkapi.recognizeImage({ mode: mode, dataURL: curDataURL, streamId: id });
+    } catch (e) {
+      handleCallError(e);
+      btnRetry.hidden = false;
+    }
+  }
+
   function handleCallError(e) {
     if (liveBodyEl) {
       const w = liveBodyEl.parentNode;
@@ -276,6 +312,7 @@
     currentStreamId = null;
     setBusy(false);
     showError('调用失败：' + (e && e.message ? e.message : e));
+    if (isStructuredRecognitionMode(mode)) btnRetry.hidden = false;
   }
 
   // ---------- OCR 流程 ----------
@@ -368,6 +405,8 @@
     ph.textContent = '结果会显示在这里…';
     resultEl.appendChild(ph);
     setBusy(false);
+    btnRetry.hidden = true;
+    btnCopyResult.hidden = true;
 
     // 顶部标题与图标
     const meta = MODE_META[mode] || MODE_META.ask;
@@ -385,12 +424,15 @@
 
     // OCR 区显隐
     ocrBlock.hidden = mode !== 'ocr';
+    modeNote.hidden = !isStructuredRecognitionMode(mode);
 
     // 输入框提示
     if (mode === 'ocr') {
       inputEl.placeholder = '基于识别文字向 AI 追问，回车发送';
     } else if (mode === 'ask') {
       inputEl.placeholder = '继续追问（针对刚才截图），回车发送';
+    } else if (isStructuredRecognitionMode(mode)) {
+      inputEl.placeholder = '可基于识别结果继续追问，回车发送';
     } else {
       inputEl.placeholder = '输入追问内容，回车发送';
     }
@@ -416,6 +458,8 @@
       startAsk(IMAGE_TRANSLATE_PROMPT, { think: false });
     } else if (mode === 'ocr') {
       runOCR();
+    } else if (isStructuredRecognitionMode(mode)) {
+      startStructuredRecognition();
     } else if (mode === 'translate') {
       hidePlaceholder();
       startTextTask(ds.translatePrompt || '请翻译下面这段文字：', givenText);
@@ -429,6 +473,16 @@
   btnSettings.addEventListener('click', () => {
     try {
       kkapi.openSettings();
+    } catch (_) {}
+  });
+  btnRetry.addEventListener('click', startStructuredRecognition);
+  btnCopyResult.addEventListener('click', async () => {
+    if (!liveText) return;
+    try {
+      await kkapi.copyText(liveText);
+      const old = btnCopyResult.textContent;
+      btnCopyResult.textContent = '已复制 ✓';
+      setTimeout(() => { btnCopyResult.textContent = old; }, 1200);
     } catch (_) {}
   });
   btnMin.addEventListener('click', () => {

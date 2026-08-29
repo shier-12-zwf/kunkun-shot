@@ -15,6 +15,8 @@
       <span class="topbar-title" id="modeTitle">AI 助手</span>
     </div>
     <div class="topbar-right">
+      <button class="text-btn" id="btnCopyResult" title="复制当前识别结果" hidden>复制结果</button>
+      <button class="text-btn retry" id="btnRetry" title="使用同一选区重试" hidden>重试</button>
       <button class="icon-btn" id="btnSettings" title="设置">⚙️</button>
       <button class="icon-btn" id="btnMin" title="最小化">—</button>
       <button class="icon-btn danger" id="btnClose" title="关闭">✕</button>
@@ -24,6 +26,10 @@
   <!-- 截图缩略图（有 dataURL 时显示）-->
   <div class="thumb-wrap" id="thumbWrap" hidden>
     <img class="thumb" id="thumbImg" alt="截图缩略图" />
+  </div>
+
+  <div class="mode-note" id="modeNote" hidden>
+    AI 辅助识别：视觉提供方会直接处理图片；纯文本提供方只会接收本地 OCR 结果，复杂结构可能丢失。
   </div>
 
   <!-- OCR 模式：可编辑文本区 + 操作按钮 -->

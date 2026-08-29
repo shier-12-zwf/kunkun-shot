@@ -78,6 +78,35 @@ body {
   -webkit-app-region: no-drag;
 }
 
+.text-btn {
+  -webkit-app-region: no-drag;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.text-btn:hover {
+  border-color: #cdddfb;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.text-btn.retry {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.text-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .icon-btn {
   -webkit-app-region: no-drag;
   width: 28px;
@@ -120,6 +149,18 @@ body {
   object-fit: contain;
   background: var(--bg);
   box-shadow: var(--card-shadow);
+}
+
+.mode-note {
+  flex: 0 0 auto;
+  margin: 4px 14px 2px;
+  padding: 8px 10px;
+  border: 1px solid #cdddfb;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: #36527f;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 /* ---------- OCR 文本块 ---------- */

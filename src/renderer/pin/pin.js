@@ -10,10 +10,29 @@
   var toolbarEl = document.getElementById('pinToolbar');
   var ctxMenu = document.getElementById('ctxMenu');
   var toastEl = document.getElementById('pinToast');
+  var annotationCanvas = document.getElementById('pinAnnotationCanvas');
+  var annotationToolbar = document.getElementById('pinAnnotationToolbar');
+  var annotationColor = document.getElementById('pinAnnotationColor');
+  var annotationApi = window.PinAnnotations || null;
+  var contentApi = window.PinContentUpdate || null;
+  var annotationDoc = annotationApi ? new annotationApi.AnnotationDocument() : null;
+  var contentUpdater = null;
+  var ocrRequestToken = 0;
+  var closeBarrierMode = ''; // '' | ordinary | application
+  var closeAttempt = null;
+  var applicationClosePreparation = null;
+  var applicationCloseEpoch = 0;
+  var finishActiveAnnotationForClose = function () {
+    if (!annotationDoc || typeof annotationDoc.commitActive !== 'function') return false;
+    var changed = annotationDoc.commitActive();
+    if (changed) redrawAnnotations();
+    return changed;
+  };
 
   // 当前贴图数据
   var state = {
     dataURL: '',
+    sourceDataURL: '',
     bounds: null,
     opacity: 1,
     scale: 1, // 当前缩放倍数（相对初始贴图尺寸）
@@ -30,6 +49,9 @@
     onTop: true, // 置顶
     passthrough: false, // 鼠标穿透
     thumbScale: null, // 缩略图模式前的缩放（R 恢复用）
+    title: '',
+    annotationMode: false,
+    annotationTool: 'pen',
   };
 
   // ---- 轻提示 ----
@@ -57,6 +79,149 @@
     return window.kkapi || null;
   }
 
+  function currentWindowState() {
+    return {
+      opacity: state.opacity,
+      locked: state.locked,
+      onTop: state.onTop,
+      title: state.title,
+    };
+  }
+
+  function notifyPinState(update) {
+    if (!annotationApi) return;
+    var merged = annotationApi.mergePinWindowState(currentWindowState(), update);
+    state.opacity = merged.opacity;
+    state.locked = merged.locked;
+    state.onTop = merged.onTop;
+    state.title = merged.title;
+    // 新版预加载使用 window.kunkun；兼容旧版 window.kkapi。
+    var bridge = (window.kunkun && typeof window.kunkun.pinUpdateState === 'function')
+      ? window.kunkun
+      : api();
+    if (!bridge || typeof bridge.pinUpdateState !== 'function') return;
+    try {
+      Promise.resolve(bridge.pinUpdateState(merged)).catch(function () {});
+    } catch (_) {}
+  }
+
+  function applyWindowState(input) {
+    if (!annotationApi) return;
+    var restored = annotationApi.normalizePinWindowState(input);
+    state.opacity = restored.opacity;
+    state.locked = restored.locked;
+    state.onTop = restored.onTop;
+    state.title = restored.title;
+    wrapEl.style.opacity = String(restored.opacity);
+    document.body.classList.toggle('locked', restored.locked);
+    document.body.classList.toggle('not-on-top', !restored.onTop);
+    var bar = document.getElementById('pinTitle');
+    if (bar) {
+      bar.textContent = restored.title;
+      bar.hidden = !restored.title;
+    }
+  }
+
+  function createContentUpdater(sourceDataURL, initialRevision) {
+    if (!contentApi || !annotationApi) return null;
+    var nextUpdater = contentApi.createOrderedPinContentUpdater({
+      sourceDataURL: sourceDataURL,
+      initialRevision: Number.isSafeInteger(initialRevision) ? initialRevision : 0,
+      compose: function (source, commands) {
+        // composeAnnotatedDataURL 在图片异步解码后才 render，不能直接传可变的当前文档。
+        // 有序更新器已深拷贝 commands，这里用独立文档完成对应 revision 的合成。
+        var snapshotDocument = new annotationApi.AnnotationDocument();
+        snapshotDocument.commands = Array.isArray(commands) ? commands : [];
+        return annotationApi.composeAnnotatedDataURL(source, snapshotDocument);
+      },
+      publish: function (payload) {
+        if (contentUpdater !== nextUpdater) {
+          return Promise.reject(new Error('贴图内容已切换。'));
+        }
+        var bridge = api();
+        if (!bridge || typeof bridge.pinUpdateContent !== 'function') {
+          return Promise.reject(new Error('当前版本不支持贴图内容同步。'));
+        }
+        return Promise.resolve(bridge.pinUpdateContent(payload));
+      },
+    });
+    return nextUpdater;
+  }
+
+  function queueContentUpdate(includeActive) {
+    ocrRequestToken += 1;
+    state.ocrLines = null;
+    state.ocrBusy = false;
+    if (!contentUpdater || !annotationDoc) return Promise.resolve(state.dataURL);
+    return contentUpdater.update(annotationDoc.snapshot(includeActive === true))
+      .then(function (dataURL) {
+        state.dataURL = dataURL;
+        return dataURL;
+      })
+      .catch(function (error) {
+        toast('标注内容同步失败：' + ((error && error.message) || error), 'err');
+        throw error;
+      });
+  }
+
+  function getCurrentDataURL() {
+    if (contentUpdater) {
+      return contentUpdater.flush().then(function (dataURL) {
+        state.dataURL = dataURL;
+        return dataURL;
+      });
+    }
+    if (!annotationApi || !annotationDoc || annotationDoc.isEmpty()) {
+      return Promise.resolve(state.dataURL);
+    }
+    return annotationApi.composeAnnotatedDataURL(state.sourceDataURL || state.dataURL, annotationDoc);
+  }
+
+  // 保留单一导出入口名：复制、保存与其他内容消费者都等待同一条有序队列。
+  function getComposedDataURL() {
+    return getCurrentDataURL();
+  }
+
+  function isCloseBarrierActive() {
+    return closeBarrierMode !== '';
+  }
+
+  function activateCloseBarrier(mode) {
+    var activeWasCommitted = false;
+    if (!closeBarrierMode) {
+      closeBarrierMode = mode;
+      document.body.classList.add('pin-close-pending');
+      // pointer 事件和 IPC 命令在同一个 renderer 事件循环中串行执行。
+      // 先提交眼前这一笔，再开启异步合成；后续标注入口全部由屏障拒绝。
+      activeWasCommitted = finishActiveAnnotationForClose();
+    } else if (mode === 'application') {
+      // 应用退出拥有更强的屏障：普通关闭的异步任务完成后也不能自行关窗，
+      // 必须先让主进程收到最终内容 ACK。
+      closeBarrierMode = 'application';
+    }
+    return activeWasCommitted;
+  }
+
+  function releaseCloseBarrier(mode) {
+    if (closeBarrierMode !== mode) return;
+    closeBarrierMode = '';
+    document.body.classList.remove('pin-close-pending');
+  }
+
+  function publishOrdinaryCloseContent(activeWasCommitted) {
+    // 已提交的 active 笔画从未入过更新队列，必须新增一次最终 revision；
+    // 没有 active 笔画时 flush 既可覆盖所有已入队更新，也避免无意义 revision。
+    if (activeWasCommitted && contentUpdater && annotationDoc) return queueContentUpdate(false);
+    return getCurrentDataURL();
+  }
+
+  function publishApplicationCloseContent() {
+    // 应用退出总是排入一个冻结后的最终快照。这样首次发布失败后，主进程的
+    // “重试”请求也能重新合成，而不是永远停在一个已 reject 的 flush tail。
+    if (contentUpdater && annotationDoc) return queueContentUpdate(false);
+    return getCurrentDataURL();
+  }
+
   // ====== 五个核心动作 ======
   function doCopy() {
     var k = api();
@@ -80,7 +245,8 @@
       return;
     }
     if (!state.dataURL) return;
-    Promise.resolve(k.copyImage(state.dataURL))
+    getComposedDataURL()
+      .then(function (dataURL) { return k.copyImage(dataURL); })
       .then(function () {
         toast('已复制图片', 'ok');
       })
@@ -92,7 +258,8 @@
   function doSave() {
     var k = api();
     if (!k || !state.dataURL) return;
-    Promise.resolve(k.saveImage(state.dataURL))
+    getComposedDataURL()
+      .then(function (dataURL) { return k.saveImage(dataURL); })
       .then(function (res) {
         if (res && res.saved) {
           toast('已保存', 'ok');
@@ -110,23 +277,119 @@
     var k = api();
     if (!k || !state.dataURL) return;
     // 打开 AI 面板进行 OCR
-    Promise.resolve(k.openAIPanel({ mode: 'ocr', dataURL: state.dataURL })).catch(function () {});
+    getCurrentDataURL()
+      .then(function (dataURL) { return k.openAIPanel({ mode: 'ocr', dataURL: dataURL }); })
+      .catch(function (error) { toast('OCR 启动失败：' + ((error && error.message) || error), 'err'); });
   }
 
   function doAsk() {
     var k = api();
     if (!k || !state.dataURL) return;
     // 打开 AI 面板进行问图
-    Promise.resolve(k.openAIPanel({ mode: 'ask', dataURL: state.dataURL })).catch(function () {});
+    getCurrentDataURL()
+      .then(function (dataURL) { return k.openAIPanel({ mode: 'ask', dataURL: dataURL }); })
+      .catch(function (error) { toast('问图启动失败：' + ((error && error.message) || error), 'err'); });
   }
 
-  function doClose() {
+  function confirmDiscardClose(error) {
+    var detail = String((error && error.message) || error || '未知错误').slice(0, 500);
+    return window.confirm(
+      '贴图内容同步失败，放弃未同步内容并关闭吗？\n\n' +
+      detail + '\n\n确定：放弃并关闭\n取消：保留贴图，稍后重试'
+    );
+  }
+
+  function doClose(options) {
+    options = options && typeof options === 'object' ? options : {};
+    var interactive = options.interactive !== false;
     var k = api();
-    if (k && typeof k.closeSelf === 'function') {
-      k.closeSelf();
-    } else {
-      window.close();
+    function closeNow() {
+      if (k && typeof k.closeSelf === 'function') k.closeSelf();
+      else window.close();
     }
+    if (closeBarrierMode === 'application') return Promise.resolve(false);
+    if (closeAttempt) return closeAttempt;
+
+    var activeWasCommitted = activateCloseBarrier('ordinary');
+    var attempt = Promise.resolve()
+      .then(function () { return publishOrdinaryCloseContent(activeWasCommitted); })
+      .then(function () {
+        // prepare-close 可能在普通关闭等待 IPC 时到达。此时由应用退出
+        // 协议接管，不能在回执前提前销毁 renderer。
+        if (closeBarrierMode !== 'ordinary') return false;
+        closeNow();
+        return true;
+      }, function (error) {
+        toast('关闭失败：贴图内容尚未同步', 'err');
+        if (closeBarrierMode !== 'ordinary') return false;
+        var discard = false;
+        if (interactive) {
+          try { discard = confirmDiscardClose(error); } catch (_) { discard = false; }
+        }
+        // confirm 同 prompt 一样可能运行原生嵌套事件循环。若确认框打开期间
+        // 收到 prepare-close，应用退出协议已经接管，不能再抢先销毁窗口。
+        if (closeBarrierMode !== 'ordinary') return false;
+        if (discard) {
+          closeNow();
+          return true;
+        }
+        // 批量关闭不在多个窗口同时弹确认框；失败的窗口留下并
+        // 恢复可编辑，用户可再次点关闭进行重试或明确放弃。
+        releaseCloseBarrier('ordinary');
+        return false;
+      });
+    closeAttempt = attempt;
+    attempt.then(function () {
+      if (closeAttempt === attempt) closeAttempt = null;
+    }, function () {
+      if (closeAttempt === attempt) closeAttempt = null;
+    });
+    return attempt;
+  }
+
+  function prepareApplicationClose(requestId) {
+    var k = api();
+    if (!k || typeof k.pinCloseReady !== 'function') return;
+    function sendCloseReady(payload) {
+      try {
+        // 重试时旧 requestId 可能已被主进程替换。这只是过期 ACK，
+        // 不应在 renderer 里形成未处理的 Promise rejection。
+        return Promise.resolve(k.pinCloseReady(payload)).catch(function () {});
+      } catch (_) {
+        return Promise.resolve();
+      }
+    }
+    activateCloseBarrier('application');
+    var closeEpoch = applicationCloseEpoch;
+    if (!applicationClosePreparation) {
+      var preparation = Promise.resolve().then(publishApplicationCloseContent);
+      applicationClosePreparation = preparation;
+      // 发布失败后保持屏障，但允许主进程的下一个 prepare-close
+      // 请求真正重试最终快照。
+      preparation.catch(function () {
+        if (applicationClosePreparation === preparation) applicationClosePreparation = null;
+      });
+    }
+    var pending = applicationClosePreparation;
+    Promise.resolve(pending)
+      .then(function () {
+        if (closeBarrierMode !== 'application' || closeEpoch !== applicationCloseEpoch) return;
+        return sendCloseReady({ requestId: requestId, ok: true });
+      }, function (error) {
+        if (closeBarrierMode !== 'application' || closeEpoch !== applicationCloseEpoch) return;
+        return sendCloseReady({
+          requestId: requestId,
+          ok: false,
+          error: String((error && error.message) || error || '未知错误').slice(0, 1000),
+        });
+      });
+  }
+
+  function cancelApplicationClose() {
+    if (closeBarrierMode !== 'application') return;
+    applicationCloseEpoch += 1;
+    applicationClosePreparation = null;
+    releaseCloseBarrier('application');
   }
 
   // ====== 贴图内选字（PixPin 式：OCR 行级坐标 → 悬停高亮 → 点击复制）======
@@ -198,7 +461,7 @@
     const input = document.getElementById('pinTitleInput');
     if (!input) return;
     input.hidden = false;
-    input.value = '';
+    input.value = state.title || '';
     input.focus();
   }
   function commitTitle() {
@@ -207,22 +470,25 @@
     if (!input || !bar) return;
     const v = input.value.trim();
     input.hidden = true;
-    if (v) {
-      bar.textContent = v;
-      bar.hidden = false;
-    }
+    state.title = v.slice(0, 120);
+    bar.textContent = state.title;
+    bar.hidden = !state.title;
+    notifyPinState({ title: state.title });
   }
   function toggleLock() {
     state.locked = !state.locked;
     document.body.classList.toggle('locked', state.locked);
+    notifyPinState({ locked: state.locked });
     toast(state.locked ? '已锁定（L 解锁）' : '已解锁', state.locked ? '' : 'ok');
   }
   function toggleOnTop() {
     state.onTop = !state.onTop;
+    document.body.classList.toggle('not-on-top', !state.onTop);
     var k = api();
     if (k && typeof k.setPinState === 'function') {
       Promise.resolve(k.setPinState({ onTop: state.onTop })).catch(function () {});
     }
+    notifyPinState({ onTop: state.onTop });
     toast(state.onTop ? '已置顶' : '已取消置顶');
   }
   function toggleTextSelect() {
@@ -230,6 +496,7 @@
       exitTextSelect();
       return;
     }
+    if (state.annotationMode) setAnnotationMode(false);
     var k = api();
     if (!k || typeof k.ocrBoxes !== 'function') {
       toast('当前版本不支持贴图选字', 'err');
@@ -254,9 +521,12 @@
     }
     if (state.ocrBusy) return;
     state.ocrBusy = true;
+    var requestToken = ++ocrRequestToken;
     toast('正在识别文字…');
-    Promise.resolve(k.ocrBoxes({ dataURL: state.dataURL }))
+    getCurrentDataURL()
+      .then(function (dataURL) { return k.ocrBoxes({ dataURL: dataURL }); })
       .then(function (res) {
+        if (requestToken !== ocrRequestToken) return;
         state.ocrBusy = false;
         var lines = res && Array.isArray(res.lines) ? res.lines : [];
         state.ocrLines = lines;
@@ -264,6 +534,7 @@
         toast(lines.length ? '点击文字即可复制 · S 退出' : '未识别到文字', lines.length ? 'ok' : 'err');
       })
       .catch(function (err) {
+        if (requestToken !== ocrRequestToken) return;
         state.ocrBusy = false;
         toast('识别失败：' + ((err && err.message) || err), 'err');
       });
@@ -289,6 +560,12 @@
           }
         } else if (msg.cmd === 'save') {
           doSave();
+        } else if (msg.cmd === 'close') {
+          doClose({ interactive: false });
+        } else if (msg.cmd === 'prepare-close') {
+          prepareApplicationClose(msg.requestId);
+        } else if (msg.cmd === 'cancel-prepare-close') {
+          cancelApplicationClose();
         }
       });
     }
@@ -329,6 +606,189 @@
     });
   }
 
+  // ====== 贴图标注（命令模型 + 独立透明画布）======
+  function annotationStyle(tool) {
+    var rect = annotationCanvas ? annotationCanvas.getBoundingClientRect() : null;
+    var unit = rect ? Math.max(1, Math.min(rect.width, rect.height)) : 400;
+    return {
+      color: annotationColor ? annotationColor.value : '#ff3b30',
+      width: (tool === 'eraser' ? 18 : 4) / unit,
+      fontSize: 22 / unit,
+    };
+  }
+
+  function annotationPoint(e) {
+    var rect = annotationCanvas.getBoundingClientRect();
+    return {
+      x: rect.width ? (e.clientX - rect.left) / rect.width : 0,
+      y: rect.height ? (e.clientY - rect.top) / rect.height : 0,
+    };
+  }
+
+  function redrawAnnotations() {
+    if (!annotationCanvas || !annotationDoc) return;
+    var ctx = annotationCanvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, annotationCanvas.width, annotationCanvas.height);
+    annotationDoc.render(ctx, annotationCanvas.width, annotationCanvas.height, true);
+  }
+
+  function syncAnnotationCanvas() {
+    if (!annotationCanvas || annotationCanvas.hidden) return;
+    var rect = annotationCanvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    var ratio = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    var width = Math.max(1, Math.round(rect.width * ratio));
+    var height = Math.max(1, Math.round(rect.height * ratio));
+    if (annotationCanvas.width !== width || annotationCanvas.height !== height) {
+      annotationCanvas.width = width;
+      annotationCanvas.height = height;
+    }
+    redrawAnnotations();
+  }
+
+  function updateAnnotationToolUI() {
+    if (!annotationToolbar) return;
+    annotationToolbar.querySelectorAll('[data-pin-tool]').forEach(function (button) {
+      button.classList.toggle('active', button.getAttribute('data-pin-tool') === state.annotationTool);
+    });
+    if (annotationCanvas) {
+      annotationCanvas.style.cursor = state.annotationTool === 'text' ? 'text' : 'crosshair';
+    }
+  }
+
+  function setAnnotationMode(enabled) {
+    if (isCloseBarrierActive()) return;
+    if (!annotationDoc || !annotationCanvas || state.kind !== 'image') {
+      if (enabled) toast('只有图片贴图可以标注', 'err');
+      return;
+    }
+    state.annotationMode = Boolean(enabled);
+    if (state.annotationMode && state.selectMode) exitTextSelect();
+    document.body.classList.toggle('annotation-mode', state.annotationMode);
+    annotationCanvas.hidden = !state.annotationMode && annotationDoc.isEmpty();
+    annotationToolbar.hidden = !state.annotationMode;
+    var button = document.getElementById('btnAnnotate');
+    if (button) button.classList.toggle('active', state.annotationMode);
+    if (state.annotationMode) {
+      syncAnnotationCanvas();
+      updateAnnotationToolUI();
+      toast('标注模式 · Esc 退出', 'ok');
+    } else {
+      annotationDoc.cancel();
+      redrawAnnotations();
+    }
+  }
+
+  function toggleAnnotation() {
+    setAnnotationMode(!state.annotationMode);
+  }
+
+  function editAnnotations(action) {
+    if (isCloseBarrierActive()) return;
+    if (!annotationDoc) return;
+    var changed = false;
+    if (action === 'undo') changed = annotationDoc.undo();
+    else if (action === 'redo') changed = annotationDoc.redo();
+    else if (action === 'clear') changed = annotationDoc.clear();
+    if (!changed) return;
+    annotationCanvas.hidden = !state.annotationMode && annotationDoc.isEmpty();
+    redrawAnnotations();
+    queueContentUpdate().catch(function () {});
+  }
+
+  function bindAnnotations() {
+    if (!annotationDoc || !annotationCanvas || !annotationToolbar) return;
+    var activePointer = null;
+
+    finishActiveAnnotationForClose = function () {
+      var pointerId = activePointer;
+      activePointer = null;
+      if (
+        pointerId != null &&
+        annotationCanvas.releasePointerCapture &&
+        annotationCanvas.hasPointerCapture &&
+        annotationCanvas.hasPointerCapture(pointerId)
+      ) {
+        annotationCanvas.releasePointerCapture(pointerId);
+      }
+      if (!annotationDoc || typeof annotationDoc.commitActive !== 'function') return false;
+      var changed = annotationDoc.commitActive();
+      redrawAnnotations();
+      return changed;
+    };
+
+    annotationToolbar.addEventListener('click', function (e) {
+      if (isCloseBarrierActive()) return;
+      var toolButton = e.target.closest ? e.target.closest('[data-pin-tool]') : null;
+      var editButton = e.target.closest ? e.target.closest('[data-pin-edit]') : null;
+      if (toolButton) {
+        state.annotationTool = toolButton.getAttribute('data-pin-tool');
+        updateAnnotationToolUI();
+      } else if (editButton) {
+        editAnnotations(editButton.getAttribute('data-pin-edit'));
+      }
+      e.stopPropagation();
+    });
+
+    annotationCanvas.addEventListener('pointerdown', function (e) {
+      if (isCloseBarrierActive()) return;
+      if (!state.annotationMode || e.button !== 0) return;
+      var point = annotationPoint(e);
+      if (state.annotationTool === 'text') {
+        var text = window.prompt('输入标注文字');
+        // 原生 prompt 可能运行嵌套事件循环；若期间收到 prepare-close，
+        // 返回后不得再把文本追加到已冻结的文档。
+        if (isCloseBarrierActive()) return;
+        if (annotationDoc.addText(point, text || '', annotationStyle('text'))) {
+          redrawAnnotations();
+          queueContentUpdate().catch(function () {});
+        }
+        return;
+      }
+      if (!annotationDoc.begin(state.annotationTool, point, annotationStyle(state.annotationTool))) return;
+      activePointer = e.pointerId;
+      if (annotationCanvas.setPointerCapture) annotationCanvas.setPointerCapture(e.pointerId);
+      redrawAnnotations();
+      e.preventDefault();
+    });
+
+    annotationCanvas.addEventListener('pointermove', function (e) {
+      if (isCloseBarrierActive()) return;
+      if (activePointer !== e.pointerId) return;
+      annotationDoc.update(annotationPoint(e));
+      redrawAnnotations();
+      e.preventDefault();
+    });
+
+    function finishPointer(e) {
+      if (isCloseBarrierActive()) return;
+      if (activePointer !== e.pointerId) return;
+      var changed = annotationDoc.finish(annotationPoint(e));
+      if (annotationCanvas.releasePointerCapture && annotationCanvas.hasPointerCapture && annotationCanvas.hasPointerCapture(e.pointerId)) {
+        annotationCanvas.releasePointerCapture(e.pointerId);
+      }
+      activePointer = null;
+      redrawAnnotations();
+      if (changed) queueContentUpdate().catch(function () {});
+      e.preventDefault();
+    }
+    annotationCanvas.addEventListener('pointerup', finishPointer);
+    annotationCanvas.addEventListener('pointercancel', function (e) {
+      if (isCloseBarrierActive()) return;
+      if (activePointer !== e.pointerId) return;
+      activePointer = null;
+      annotationDoc.cancel();
+      redrawAnnotations();
+    });
+
+    if (typeof ResizeObserver === 'function') {
+      new ResizeObserver(syncAnnotationCanvas).observe(wrapEl);
+    } else {
+      window.addEventListener('resize', syncAnnotationCanvas);
+    }
+  }
+
   // 动作分发表（右键菜单与工具栏共用）
   var ACTIONS = {
     copy: doCopy,
@@ -340,6 +800,7 @@
     passthrough: togglePassthrough,
     title: promptTitle,
     textSel: toggleTextSelect,
+    annotate: toggleAnnotation,
     zoomIn: zoomIn,
     zoomOut: zoomOut,
     zoomReset: zoomReset,
@@ -354,6 +815,7 @@
       btnOcr: 'ocr',
       btnAsk: 'ask',
       btnText: 'textSel',
+      btnAnnotate: 'annotate',
       btnClose: 'close',
     };
     Object.keys(map).forEach(function (id) {
@@ -390,6 +852,7 @@
       'wheel',
       function (e) {
         e.preventDefault();
+        if (state.annotationMode) return;
         if (state.locked) return; // 锁定：不缩放不调透明度
         if (e.ctrlKey) {
           doPinchZoom(e);
@@ -410,6 +873,7 @@
     state.opacity = next;
     // 改图片容器透明度（不动 body，避免连工具栏一起糊掉影响阅读）
     wrapEl.style.opacity = String(next);
+    notifyPinState({ opacity: next });
     toast('透明度 ' + Math.round(next * 100) + '%');
   }
 
@@ -459,7 +923,7 @@
     wrapEl.addEventListener('mousedown', function (e) {
       if (e.button !== 0) return; // 仅左键
       // 锁定 / 选字模式下点击不触发窗口拖动
-      if (state.locked || state.selectMode) return;
+      if (state.locked || state.selectMode || state.annotationMode) return;
       // Ctrl+左键：准备拖出内容
       if (e.ctrlKey || e.metaKey) {
         dragOutArmed = true;
@@ -483,9 +947,16 @@
           dragOutFired = true;
           var k2 = api();
           if (k2 && typeof k2.pinStartDrag === 'function') {
-            try { k2.pinStartDrag(); } catch (_) {}
+            getCurrentDataURL()
+              .then(function () { return k2.pinStartDrag(); })
+              .then(function (result) {
+                if (result && result.ok === false) throw new Error(result.error || '无法拖出贴图。');
+              })
+              .catch(function (error) {
+                toast('拖出失败：' + ((error && error.message) || error), 'err');
+              });
           }
-          toast('已开始拖出（松手即投放）');
+          toast('正在准备已合成的贴图…');
         }
         return;
       }
@@ -509,7 +980,7 @@
   function bindCloseGestures() {
     // 双击图片区关闭（选字模式下双击文字块不关闭窗口）
     wrapEl.addEventListener('dblclick', function (e) {
-      if (state.selectMode) {
+      if (state.selectMode || state.annotationMode) {
         e.preventDefault();
         return;
       }
@@ -530,11 +1001,20 @@
           hideCtxMenu();
           return;
         }
+        if (state.annotationMode) {
+          setAnnotationMode(false);
+          return;
+        }
         if (state.selectMode) {
           exitTextSelect();
           return;
         }
         doClose();
+        return;
+      }
+      if (state.annotationMode && (e.metaKey || e.ctrlKey) && String(e.key).toLowerCase() === 'z') {
+        e.preventDefault();
+        editAnnotations(e.shiftKey ? 'redo' : 'undo');
         return;
       }
       if (pinKeyMatches(e, PKEYS.lock)) {
@@ -636,6 +1116,7 @@
   // ====== 接收初始化 payload ======
   function applyInit(payload) {
     if (!payload) return;
+    if (payload.state) applyWindowState(payload.state);
     if (payload.text) {
       state.kind = 'text';
       state.text = payload.text;
@@ -669,13 +1150,21 @@
       imgEl.hidden = true;
     }
     if (payload.dataURL) {
-      if (state.dataURL && state.dataURL !== payload.dataURL) {
+      if (state.sourceDataURL && state.sourceDataURL !== payload.dataURL) {
         // 换了新图：退出选字模式并清空 OCR 缓存，避免旧坐标/旧文字张冠李戴
         exitTextSelect();
         state.ocrLines = null;
         state.ocrBusy = false;
+        setAnnotationMode(false);
+        annotationDoc = annotationApi ? new annotationApi.AnnotationDocument() : null;
+        if (annotationCanvas) annotationCanvas.hidden = true;
       }
+      ocrRequestToken += 1;
+      state.ocrLines = null;
+      state.ocrBusy = false;
+      state.sourceDataURL = payload.dataURL;
       state.dataURL = payload.dataURL;
+      contentUpdater = createContentUpdater(payload.dataURL, payload.contentRevision);
       imgEl.src = payload.dataURL;
     }
     if (payload.bounds) {
@@ -698,6 +1187,7 @@
     bindOcrLayer();
     bindPinCmd();
     bindFileClick();
+    bindAnnotations();
 
     var k = api();
     if (k && typeof k.getConfig === 'function') {

@@ -25,11 +25,36 @@ const C = require('../shared/channels');
 const config = require('./config');
 const deepseek = require('./deepseek');
 const ocr = require('./ocr');
+const { createAIRecognitionHandler } = require('./ai-recognition');
 const media = require('./media');
+const {
+  exportImage,
+  saveImageViaDialog,
+  quickSaveImage,
+  normalizeImageExportPreferences,
+  preferredExtensionForFormat,
+} = require('./image-export');
 const windows = require('./windows');
 const history = require('./history');
 const tempFiles = require('./temp-files');
 const pasteboardPreserver = require('./pasteboard-preserver');
+const {
+  shouldAutoSaveOverlayHistory,
+  historyTypeForImageSaveRole,
+  persistRecordingHistory,
+} = require('./history-semantics');
+const {
+  replaceShortcutBindings,
+  applyConfigPatchTransaction,
+} = require('./shortcut-transaction');
+const { selectDisplaySource, serializeCaptureSources } = require('./capture-source-matcher');
+const { createCaptureCoordinator } = require('./capture-coordinator');
+const { normalizeOverlayResultEnvelope } = require('./overlay-result-contract');
+const { createTimedCaptureScheduler } = require('./timed-capture-scheduler');
+const { parseLaunchAction } = require('./launch-actions');
+const { createLaunchActionRunner } = require('./launch-action-runner');
+const { createPinWorkspaceStore } = require('./pin-workspace-store');
+const { normalizePinContentUpdate } = require('../shared/pin-content-update');
 const {
   requireImageDataURL,
   normalizeCaptureRect,
@@ -44,6 +69,7 @@ const {
   normalizePinStateFlags,
   normalizeProviderTestTarget,
   normalizeRecordingPayload,
+  normalizeOCRLanguage,
 } = require('./ipc-validation');
 const { spawn } = require('child_process');
 const axprobe = require('./axprobe');
@@ -128,14 +154,20 @@ function checkScreenPermission(promptIfDenied) {
 
 // 保存一张图到历史并广播刷新
 function saveToHistory(dataURL, type) {
+  let item = null;
   try {
-    const item = history.add(dataURL, type);
-    if (item) windows.broadcast(C.HISTORY_CHANGED);
-    return item;
+    item = history.add(dataURL, type);
   } catch (e) {
     console.error('[history] 保存失败：', e.message);
     return null;
   }
+  // 广播失败不能抹掉“历史已经落盘”的事实，否则 quickSave finalizer 会误以为未入库并再写一次。
+  if (item) {
+    try { windows.broadcast(C.HISTORY_CHANGED); } catch (e) {
+      console.error('[history] 已保存，但刷新广播失败：', e && e.message ? e.message : e);
+    }
+  }
+  return item;
 }
 
 // 仅当用户开启「自动保存历史」时才入库；默认只有手动「保存到本地」才进历史。
@@ -236,6 +268,187 @@ function aiProvider(needVision) {
 }
 
 let tray = null;
+let pinWorkspaceStore = null;
+let pinWorkspaceSaveTimer = null;
+let pinWorkspaceClosing = false;
+let quitPreparationInFlight = null;
+let quitPrepared = false;
+
+function savePinWorkspaceNow({ throwOnError = false } = {}) {
+  if (pinWorkspaceSaveTimer) {
+    clearTimeout(pinWorkspaceSaveTimer);
+    pinWorkspaceSaveTimer = null;
+  }
+  if (!pinWorkspaceStore) return 0;
+  try {
+    return windows.savePinWorkspace(pinWorkspaceStore);
+  } catch (error) {
+    console.error('[pin-workspace] 保存失败：', error && error.message ? error.message : error);
+    if (throwOnError) throw error;
+    return 0;
+  }
+}
+
+function schedulePinWorkspaceSave() {
+  if (!pinWorkspaceStore || pinWorkspaceClosing) return;
+  if (pinWorkspaceSaveTimer) clearTimeout(pinWorkspaceSaveTimer);
+  pinWorkspaceSaveTimer = setTimeout(savePinWorkspaceNow, 250);
+  if (pinWorkspaceSaveTimer && typeof pinWorkspaceSaveTimer.unref === 'function') pinWorkspaceSaveTimer.unref();
+}
+
+async function askAboutQuitRisk(message, detail) {
+  const result = await dialog.showMessageBox({
+    type: 'warning',
+    title: '退出前需要确认',
+    message,
+    detail,
+    buttons: ['重试', '取消退出', '仍然退出'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  });
+  if (result.response === 0) return 'retry';
+  if (result.response === 2) return 'discard';
+  return 'cancel';
+}
+
+async function prepareApplicationQuit() {
+  // 交互式选窗会启动 screencapture 子进程。退出时先使当前代数
+  // 失效，再等待 Abort 清理（包括 SIGTERM 后的 SIGKILL 兜底）完成。
+  for (;;) {
+    const captureStopped = await captureCoordinator.cancelPendingAndWait('app-quit', 2000);
+    if (captureStopped) break;
+    const choice = await askAboutQuitRisk(
+      '正在进行的窗口截图未能完全停止。',
+      '系统选窗子进程仍在退出清理中。'
+    );
+    if (choice === 'retry') continue;
+    if (choice === 'cancel') {
+      windows.cancelPinClosePreparation();
+      return false;
+    }
+    break;
+  }
+
+  // renderer 中的标注合成是异步的：必须先收到每张贴图的回执，再从
+  // 主进程快照工作区。超时/渲染崩溃不会默默丢数据，由用户选择重试或退出。
+  for (;;) {
+    const flushResult = await windows.preparePinsForClose({ timeoutMs: 5000 });
+    if (flushResult.ok) break;
+    const failures = flushResult.results
+      .filter((item) => !item.ok)
+      .slice(0, 5)
+      .map((item) => `贴图 ${item.webContentsId}: ${item.error || '同步失败'}`);
+    if (flushResult.results.filter((item) => !item.ok).length > failures.length) {
+      failures.push('还有更多贴图未能完成同步。');
+    }
+    const choice = await askAboutQuitRisk(
+      '有贴图尚未完成最终内容同步。',
+      failures.join('\n') || '贴图内容同步失败。'
+    );
+    if (choice === 'retry') continue;
+    if (choice === 'cancel') {
+      windows.cancelPinClosePreparation();
+      return false;
+    }
+    break;
+  }
+
+  // 工作区写入失败不能像定时自动保存那样只记日志。普通退出必须给用户
+  // 可恢复的选择；只有明确点击“仍然退出”才会放弃这次落盘。
+  for (;;) {
+    try {
+      savePinWorkspaceNow({ throwOnError: true });
+      break;
+    } catch (error) {
+      const choice = await askAboutQuitRisk(
+        '贴图工作区保存失败。',
+        String((error && error.message) || error || '未知错误').slice(0, 2000)
+      );
+      if (choice === 'retry') continue;
+      if (choice === 'cancel') {
+        windows.cancelPinClosePreparation();
+        return false;
+      }
+      break;
+    }
+  }
+
+  // 录屏的媒体数据只在 recorder renderer 里，不能依靠 close 事件在应用退出时
+  // 保护。非 idle/saved/canceled 状态要求明确放弃，默认选项是返回录屏。
+  if (!windows.canCloseRecorder()) {
+    const state = windows.getRecorderState();
+    const result = await dialog.showMessageBox({
+      type: 'warning',
+      title: '录屏尚未安全保存',
+      message: '当前录屏仍在进行、处理或等待重试。',
+      detail: `当前状态：${state && state.state ? state.state : 'unknown'}\n强制退出会放弃尚未写入磁盘的录屏。`,
+      buttons: ['返回录屏', '放弃录屏并退出'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (result.response !== 1) {
+      windows.cancelPinClosePreparation();
+      windows.focusRecorder();
+      return false;
+    }
+  }
+
+  return true;
+}
+
+if (typeof windows.onPinWorkspaceChanged === 'function') {
+  windows.onPinWorkspaceChanged(() => schedulePinWorkspaceSave());
+}
+
+const timedCaptureScheduler = createTimedCaptureScheduler({
+  onFire: async ({ mode }, control) => {
+    // 定时任务只负责决定何时开始捕获，完成、复制与保存仍由统一编辑器确认。
+    return startCapture(mode, { trigger: 'timed', signal: control.signal });
+  },
+  onError: (error) => {
+    const message = (error && error.message) || String(error);
+    console.error('[timed-capture] 失败：', message);
+    try { dialog.showErrorBox('定时截图失败', message); } catch (_) {}
+  },
+});
+
+const launchActionRunner = createLaunchActionRunner({
+  startCapture,
+  captureWindow: doWindowCapture,
+  scheduleTimedCapture: (payload) => timedCaptureScheduler.schedule(payload),
+});
+
+async function handleLaunchArguments(argv) {
+  let action;
+  try {
+    action = parseLaunchAction(argv);
+  } catch (error) {
+    const message = (error && error.message) || String(error);
+    console.error('[launch-action] 参数无效：', message);
+    try { dialog.showErrorBox('自动截图参数无效', message); } catch (_) {}
+    // 参数虽无效，但已识别为自动化请求；不得退回“打开设置”掩盖错误。
+    return { handled: true, ok: false, error: message };
+  }
+  if (!action) return { handled: false, ok: true };
+
+  try {
+    const outcome = await launchActionRunner.run(action);
+    const result = outcome.result;
+    if (result && result.ok === false && result.canceled !== true) {
+      const message = result.error || '自动截图未能启动。';
+      try { dialog.showErrorBox('自动截图失败', message); } catch (_) {}
+      return { ...outcome, ok: false, error: message };
+    }
+    return { ...outcome, ok: true };
+  } catch (error) {
+    const message = (error && error.message) || String(error);
+    console.error('[launch-action] 执行失败：', message);
+    try { dialog.showErrorBox('自动截图失败', message); } catch (_) {}
+    return { handled: true, ok: false, error: message };
+  }
+}
 
 // Renderer 按窗口职责分权：即使某个本地页面因将来的 XSS/依赖漏洞被注入，也只能调用
 // 自己正常工作所需的能力。所有 invoke 通道必须显式列出；遗漏即在注册时失败，绝不默认放行。
@@ -264,6 +477,8 @@ const IPC_ROLE_ALLOWLIST = {
 
   [C.PIN_CREATE]: [],
   [C.PIN_SET_STATE]: ['pin'],
+  [C.PIN_UPDATE_CONTENT]: ['pin'],
+  [C.PIN_CLOSE_READY]: ['pin'],
   [C.PIN_START_DRAG]: ['pin'],
   [C.OPEN_PATH]: ['pin'],
 
@@ -273,6 +488,7 @@ const IPC_ROLE_ALLOWLIST = {
   [C.TRANSLATE_TEXT]: ['overlay'],
 
   [C.DEEPSEEK_ASK_IMAGE]: ['main', 'overlay', 'ai'],
+  [C.AI_RECOGNIZE_IMAGE]: ['ai'],
   [C.DEEPSEEK_CHAT]: ['main', 'overlay', 'ai'],
   [C.DEEPSEEK_CANCEL]: ['main', 'overlay', 'ai'],
   [C.DEEPSEEK_TEST]: ['main'],
@@ -280,6 +496,7 @@ const IPC_ROLE_ALLOWLIST = {
 
   [C.TRANSLATE_POPUP_CLOSE]: ['translate-popup'],
   [C.RECORD_SAVE]: ['recorder'],
+  [C.RECORD_STATE]: ['recorder'],
   [C.OPEN_EXTERNAL]: ['overlay'],
 
   [C.OPEN_MAIN]: ['popover'],
@@ -288,6 +505,7 @@ const IPC_ROLE_ALLOWLIST = {
   [C.CAPTURE_FULLSCREEN_NOW]: ['main', 'popover'],
   [C.CAPTURE_WINDOW]: ['main', 'popover'],
   [C.CAPTURE_TIMED]: ['main'],
+  [C.CAPTURE_TIMED_CANCEL]: ['main'],
 
   [C.HISTORY_LIST]: ['main', 'overlay', 'popover'],
   [C.HISTORY_GET]: ['main', 'overlay', 'popover'],
@@ -314,16 +532,8 @@ async function grabDisplay() {
       height: Math.round(display.size.height * sf),
     },
   });
-  let src = sources.find((s) => String(s.display_id) === String(display.id));
-  if (!src) {
-    // 修复(多显示器抓错屏)：部分 macOS 上 screen source 的 display_id 为空串，无法直接匹配，
-    // 直接退回 sources[0]（主屏）会导致「截图层开在光标所在副屏、背景图却是主屏」的错位。
-    // 与 CAPTURE_REGION 一致地按「该显示器在 getAllDisplays 里的序号」取同序号 source（两者顺序通常一致），
-    // 仍无匹配才退回首个。
-    const di = screen.getAllDisplays().findIndex((d) => String(d.id) === String(display.id));
-    src = (di >= 0 && sources[di]) || sources[0];
-  }
-  if (!src) throw new Error('未获取到屏幕源，请检查「屏幕录制」权限。');
+  const src = selectDisplaySource(sources, display, screen.getAllDisplays());
+  if (!src || !src.thumbnail) throw new Error('屏幕源没有可用画面，请检查「屏幕录制」权限。');
   return {
     display,
     dataURL: src.thumbnail.toDataURL(),
@@ -335,24 +545,132 @@ async function grabDisplay() {
   };
 }
 
-async function startCapture(mode) {
-  if (windows.getOverlay()) windows.closeOverlay();
-  // 屏幕录制权限未授权：弹原生引导（可一键跳系统设置），避免黑屏/空截图
-  if (!checkScreenPermission(true)) return;
-  try {
-    const g = await grabDisplay();
-    windows.createOverlay(g.display, {
-      dataURL: g.dataURL,
-      scaleFactor: g.scaleFactor,
-      displayId: g.displayId,
-      sourceId: g.sourceId,
-      width: g.width,
-      height: g.height,
-      mode: mode || 'region',
+function grabWindowFrame({ signal } = {}) {
+  return new Promise((resolve, reject) => {
+    if (process.platform !== 'darwin') {
+      reject(new Error('交互式窗口截图目前仅支持 macOS'));
+      return;
+    }
+    if (signal && signal.aborted) {
+      resolve(null);
+      return;
+    }
+    const tmp = tempFiles.createPrivateTempPath('kkshot-window', 'png');
+    let child;
+    let settled = false;
+    let aborted = false;
+    let forceKillTimer = null;
+    const cleanup = () => {
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      forceKillTimer = null;
+      tempFiles.cleanupTempPath(tmp);
+    };
+    const finish = (error, frame) => {
+      if (settled) return;
+      settled = true;
+      if (signal) signal.removeEventListener('abort', onAbort);
+      cleanup();
+      if (error) reject(error);
+      else resolve(frame);
+    };
+    const onAbort = () => {
+      aborted = true;
+      if (child && !child.killed) {
+        try { child.kill('SIGTERM'); } catch (_) {}
+      }
+      // screencapture 在系统选窗面板异常时可能不响应 SIGTERM。不让已取消任务
+      // 永久占住 coordinator；宽限后强制结束并回收私有临时文件。
+      forceKillTimer = setTimeout(() => {
+        if (settled) return;
+        try { if (child) child.kill('SIGKILL'); } catch (_) {}
+        finish(null, null);
+      }, 750);
+      if (forceKillTimer && typeof forceKillTimer.unref === 'function') forceKillTimer.unref();
+    };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+
+    try {
+      child = spawn('screencapture', ['-w', '-x', '-o', tmp]);
+    } catch (error) {
+      finish(error);
+      return;
+    }
+    child.once('error', (error) => finish(error));
+    child.once('close', () => {
+      if (aborted || (signal && signal.aborted)) {
+        finish(null, null);
+        return;
+      }
+      try {
+        if (!fs.existsSync(tmp)) {
+          finish(null, null);
+          return;
+        }
+        const dataURL = 'data:image/png;base64,' + fs.readFileSync(tmp).toString('base64');
+        const image = validatedNativeImage(dataURL);
+        const size = image.getSize();
+        const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+        finish(null, {
+          display,
+          dataURL,
+          pixelWidth: size.width,
+          pixelHeight: size.height,
+          displayId: display.id,
+        });
+      } catch (error) {
+        finish(error);
+      }
     });
+  });
+}
+
+const captureCoordinator = createCaptureCoordinator({
+  getEditorState: () => {
+    const editor = windows.getOverlay();
+    const open = !!editor && !editor.isDestroyed();
+    // 目前 overlay 没有独立 dirty IPC；保守把任何已打开编辑器视为不可覆盖。
+    return { open, dirty: open };
+  },
+  captureFrame: ({ mode, signal }) => (
+    mode === 'window' ? grabWindowFrame({ signal }) : grabDisplay()
+  ),
+  openEditor: (frame, { mode }) => {
+    if (mode === 'window') {
+      return windows.createImageEditor(frame.display, {
+        dataURL: frame.dataURL,
+        pixelWidth: frame.pixelWidth,
+        pixelHeight: frame.pixelHeight,
+        mode: 'image',
+        captureType: 'window',
+        displayId: frame.displayId,
+      });
+    }
+    return windows.createOverlay(frame.display, {
+      dataURL: frame.dataURL,
+      scaleFactor: frame.scaleFactor,
+      displayId: frame.displayId,
+      sourceId: frame.sourceId,
+      width: frame.width,
+      height: frame.height,
+      mode,
+    });
+  },
+});
+
+async function startCapture(mode, options = {}) {
+  const safeMode = mode == null ? 'region' : mode;
+  if (quitPreparationInFlight || quitPrepared) {
+    return { ok: false, canceled: true, reason: 'app-quit', mode: safeMode };
+  }
+  if (!['region', 'long', 'record', 'ocr', 'fullscreen', 'window'].includes(safeMode)) {
+    return { ok: false, error: '截图模式无效。' };
+  }
+  try {
+    return await captureCoordinator.start(safeMode, options);
   } catch (e) {
     console.error('[capture] 失败：', e);
     dialog.showErrorBox('截图失败', `${e.message}\n\n如果在 macOS 上，请到「系统设置 → 隐私与安全性 → 屏幕录制」里授权本应用。`);
+    return { ok: false, error: e.message || String(e) };
   }
 }
 
@@ -526,41 +844,14 @@ async function triggerGlobalTranslate() {
   }
 }
 
-// 立即整屏截图 → 复制 + 存历史
+// 立即整屏截图 → 进入统一编辑器；确认动作后才复制或存历史。
 async function doFullscreenNow() {
-  const g = await grabDisplay();
-  clipboard.writeImage(nativeImage.createFromDataURL(g.dataURL));
-  return autoSaveToHistory(g.dataURL, 'fullscreen');
+  return startCapture('fullscreen');
 }
 
-// 交互式窗口截图（macOS screencapture -w）→ 复制 + 存历史
-function doWindowCapture() {
-  return new Promise((resolve) => {
-    if (process.platform !== 'darwin') {
-      return resolve({ ok: false, error: '交互式窗口截图目前仅支持 macOS' });
-    }
-    const tmp = tempFiles.createPrivateTempPath('kkshot-window', 'png');
-    const p = spawn('screencapture', ['-w', '-x', '-o', tmp]);
-    let settled = false;
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      tempFiles.cleanupTempPath(tmp);
-      resolve(result);
-    };
-    p.on('error', (e) => finish({ ok: false, error: e.message }));
-    p.on('close', () => {
-      try {
-        if (!fs.existsSync(tmp)) return finish({ ok: false, error: '已取消' });
-        const dataURL = 'data:image/png;base64,' + fs.readFileSync(tmp).toString('base64');
-        clipboard.writeImage(nativeImage.createFromDataURL(dataURL));
-        const item = autoSaveToHistory(dataURL, 'window');
-        finish({ ok: true, item });
-      } catch (err) {
-        finish({ ok: false, error: err.message });
-      }
-    });
-  });
+// 交互式窗口截图（macOS screencapture -w）→ 进入统一编辑器。
+function doWindowCapture(options = {}) {
+  return startCapture('window', options);
 }
 
 // ---------- 大图降采样（P2-6/B8）：发送给视觉 API 前压缩，避免超限/烧 token ----------
@@ -615,35 +906,19 @@ function downscaleDataURL(dataURL, maxSide) {
 async function saveImageWithDialog(dataURL, suggestName) {
   const cfg = config.get();
   const dir = cfg.general.saveDir || app.getPath('pictures');
-  const name = suggestName || `困困截图-${Date.now()}.png`;
-  const { canceled, filePath } = await dialog.showSaveDialog({
-    title: '保存图片',
-    defaultPath: path.join(dir, name),
-    filters: [
-      { name: 'PNG 图片（无损，支持透明）', extensions: ['png'] },
-      { name: 'JPEG 图片（更小，不支持透明）', extensions: ['jpg', 'jpeg'] },
-      { name: 'WebP 图片（体积小）', extensions: ['webp'] },
-    ],
-  });
-  if (canceled || !filePath) return { saved: false };
-  const ext = path.extname(filePath || '').toLowerCase();
-  let tmp = null;
-  try {
-    if (ext === '.jpg' || ext === '.jpeg' || ext === '.webp') {
-      // 先写临时 PNG（原始质量），再用 ffmpeg 转目标格式
-      tmp = tempFiles.createPrivateTempPath('kkshot-image', 'png');
-      media.saveImageFile(dataURL, tmp);
-      await media.convertImage(tmp, filePath, ext === '.webp' ? ['-quality', '86'] : ['-q:v', '3']);
-    } else {
-      media.saveImageFile(dataURL, filePath);
-    }
-    return { saved: true, path: filePath };
-  } catch (err) {
-    dialog.showErrorBox('保存图片失败', (err && err.message) || String(err));
-    return { saved: false, error: (err && err.message) || String(err) };
-  } finally {
-    if (tmp) tempFiles.cleanupTempPath(tmp);
-  }
+  return saveImageViaDialog(
+    {
+      dataURL,
+      config: cfg,
+      defaultDirectory: dir,
+      suggestName: suggestName || `困困截图-${Date.now()}.png`,
+    },
+    {
+      showSaveDialog: (options) => dialog.showSaveDialog(options),
+      showErrorBox: (title, message) => dialog.showErrorBox(title, message),
+      exportImage,
+    },
+  );
 }
 
 // ---------- IPC ----------
@@ -670,15 +945,30 @@ function registerIpc() {
   ipcMain.handle(C.CONFIG_GET, () => config.publicView()); // H2：渲染层只拿掩码视图，Key 不出主进程
   ipcMain.handle(C.CONFIG_SET, (e, patch) => {
     const safePatch = normalizeConfigPatch(patch, windows.getTrustedRole(e.sender.id));
-    const merged = config.set(safePatch);
-    registerShortcuts();
+    const outcome = applyConfigPatchTransaction({
+      patch: safePatch,
+      getConfig: () => config.get(),
+      setConfig: (nextPatch) => config.set(nextPatch),
+      getPublicConfig: () => config.publicView(),
+      applyShortcuts: (next, previous) => registerShortcuts(next, previous),
+    });
+    // 快捷键冲突时 outcome 是结构化失败，并且配置/真实绑定已回滚；
+    // 不得再返回普通 config 让设置页误报“已保存”。
+    if (outcome && outcome.ok === false) return outcome;
     applyLoginItem();
-    return merged;
+    return outcome;
   });
 
   ipcMain.handle(C.WINDOW_CLOSE_SELF, (e) => {
+    if (windows.getTrustedRole(e.sender.id) === 'recorder') {
+      return windows.requestRecorderClose(e.sender.id);
+    }
     const w = BrowserWindow.fromWebContents(e.sender);
-    if (w && !w.isDestroyed()) w.close();
+    if (w && !w.isDestroyed()) {
+      w.close();
+      return { ok: true };
+    }
+    return { ok: false };
   });
   ipcMain.handle(C.WINDOW_MINIMIZE_SELF, (e) => {
     const w = BrowserWindow.fromWebContents(e.sender);
@@ -710,14 +1000,15 @@ function registerIpc() {
 
   ipcMain.handle(C.CAPTURE_TRIGGER, (_e, mode) => {
     const safeMode = mode == null ? 'region' : mode;
-    if (!['region', 'long', 'record', 'ocr'].includes(safeMode)) throw new Error('截图模式无效。');
+    if (!['region', 'long', 'record', 'ocr', 'fullscreen'].includes(safeMode)) throw new Error('截图模式无效。');
     return startCapture(safeMode);
   });
   ipcMain.handle(C.CAPTURE_REGION, async (_e, payload) => {
     const { rect, displayId } = payload && typeof payload === 'object' ? payload : {};
-    const display =
-      screen.getAllDisplays().find((d) => String(d.id) === String(displayId)) ||
-      screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    if (!checkScreenPermission(false)) throw new Error('屏幕录制权限未开启。');
+    const displays = screen.getAllDisplays();
+    const display = displays.find((d) => String(d.id) === String(displayId));
+    if (!display) throw new Error('目标显示器已断开，请重新开始长截图。');
     const safeRect = normalizeCaptureRect(rect, display.size);
     const sf = display.scaleFactor || 1;
     const sources = await desktopCapturer.getSources({
@@ -727,13 +1018,7 @@ function registerIpc() {
         height: Math.round(display.size.height * sf),
       },
     });
-    let src = sources.find((s) => String(s.display_id) === String(display.id));
-    if (!src) {
-      // 部分 macOS 上 screen source 的 display_id 为空串，无法直接匹配 →
-      // 退而用「该显示器在 getAllDisplays 里的序号」对应 sources 的同序号（两者顺序通常一致），最后才退回首个。
-      const di = screen.getAllDisplays().findIndex((d) => String(d.id) === String(display.id));
-      src = (di >= 0 && sources[di]) || sources[0];
-    }
+    const src = selectDisplaySource(sources, display, displays);
     // 屏幕源可能为空（屏幕录制权限被中途撤销 / 多屏热插拔瞬间）。长截图逐帧调用此通道，
     // 不保护会在 src 为 undefined 时抛 TypeError 静默搞挂整个长截图流程，故与 grabDisplay 一致地给出清晰错误。
     if (!src || !src.thumbnail) throw new Error('未获取到屏幕源，请检查「屏幕录制」权限是否开启。');
@@ -746,18 +1031,26 @@ function registerIpc() {
     return crop.toDataURL();
   });
   ipcMain.handle(C.CAPTURE_GET_SOURCES, async () => {
+    if (!checkScreenPermission(false)) throw new Error('屏幕录制权限未开启。');
     const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } });
-    return sources.map((s) => ({ id: s.id, name: s.name, display_id: s.display_id }));
+    return serializeCaptureSources(sources);
   });
 
-  ipcMain.handle(C.OVERLAY_CANCEL, () => windows.closeOverlay());
+  ipcMain.handle(C.OVERLAY_CANCEL, () => {
+    captureCoordinator.cancelPending('overlay-canceled');
+    windows.closeOverlay();
+    return { ok: true };
+  });
   ipcMain.handle(C.OVERLAY_RESULT, async (_e, result) => {
-    const { action, imageDataURL, bounds, displayId, rect } = result || {};
+    let action = '';
     try {
+      const normalized = normalizeOverlayResultEnvelope(result);
+      ({ action } = normalized);
+      const { imageDataURL, bounds, displayId, rect } = normalized;
+      const captureType = windows.getOverlayCaptureType(_e.sender.id);
+      if (!captureType) throw new Error('截图编辑上下文已失效，请重新截图。');
       const cfg = config.get();
-      const allowedActions = new Set(['copy', 'save', 'quickSave', 'pin', 'ocr', 'ask', 'translate', 'record', 'long']);
-      if (!allowedActions.has(action)) throw new Error('未知的截图操作。');
-      const isLiveCapture = action === 'record' || action === 'long';
+      const isLiveCapture = normalized.kind === 'live';
       let image = null;
       let safeBounds = null;
       let safeRect = null;
@@ -769,7 +1062,7 @@ function registerIpc() {
         image = validatedNativeImage(imageDataURL);
         if (bounds != null) safeBounds = normalizePinBounds(bounds);
       }
-      let savedToHistory = false; // save 动作是否已真正存盘并入历史，用于避免与下面自动入历史重复
+      let savedToHistory = false; // 当前动作是否已真正入历史，用于避免与下面自动入历史重复
       switch (action) {
         case 'copy':
           clipboard.writeImage(image);
@@ -783,18 +1076,22 @@ function registerIpc() {
               error: r && r.error ? r.error : undefined,
             };
           }
-          saveToHistory(imageDataURL, 'region');
-          savedToHistory = true;
+          savedToHistory = !!saveToHistory(imageDataURL, captureType);
           break;
         }
         case 'quickSave': {
           // 快速保存：免对话框直接存到保存目录，并弹系统通知。
           // 写盘失败抛给统一错误分支，不确认成功，overlay 会保留并可重试。
           const dir = cfg.general.saveDir || app.getPath('pictures');
-          const file = path.join(dir, `困困截图-${Date.now()}.png`);
-          media.saveImageFile(imageDataURL, file);
-          saveToHistory(imageDataURL, 'region');
-          savedToHistory = true;
+          const exported = await quickSaveImage({
+            dataURL: imageDataURL,
+            config: cfg,
+            defaultDirectory: dir,
+            timestamp: Date.now(),
+          }, { exportImage });
+          const file = exported.path;
+          // 历史库始终保留截图阶段的原始 PNG data URL，不因磁盘导出格式而二次压缩。
+          savedToHistory = !!saveToHistory(imageDataURL, captureType);
           if (Notification.isSupported()) {
             new Notification({ title: '困困截图', body: '已快速保存：' + file }).show();
           }
@@ -814,7 +1111,7 @@ function registerIpc() {
           break;
         case 'record': {
           const dd = displayData;
-          windows.createRecorder({
+          const recorderResult = windows.createRecorder({
             rect: safeRect,
             displayBounds: dd.bounds,
             scaleFactor: dd.scaleFactor,
@@ -823,7 +1120,12 @@ function registerIpc() {
             displayIndex: screen.getAllDisplays().findIndex((d) => String(d.id) === String(displayId)),
             fps: cfg.recording.fps,
             toGif: cfg.recording.toGif,
+            systemAudio: cfg.recording.systemAudio,
+            microphone: cfg.recording.microphone,
           });
+          if (recorderResult.busy) {
+            return { ok: true, busy: true, state: recorderResult.state };
+          }
           break;
         }
         case 'long': {
@@ -839,16 +1141,17 @@ function registerIpc() {
         default:
           break;
       }
-      if (cfg.capture.copyAfterCapture && imageDataURL && action !== 'copy') {
+      if (normalized.kind === 'static' && cfg.capture.copyAfterCapture && action !== 'copy') {
         clipboard.writeImage(image);
       }
       // 自动贴图：截完把图钉到屏幕原位。pin 动作本身即贴图、record/long 无静态图，均跳过。
-      if (cfg.capture.autoPin && imageDataURL && safeBounds && action !== 'pin') {
+      if (normalized.kind === 'static' && cfg.capture.autoPin && safeBounds && action !== 'pin') {
         windows.createPin({ dataURL: imageDataURL, bounds: safeBounds });
       }
-      // 自动入历史（仅当开启「自动保存历史」）。save 成功后已入库，跳过避免重复。
-      if (imageDataURL && !(action === 'save' && savedToHistory)) {
-        autoSaveToHistory(imageDataURL, action === 'pin' ? 'pin' : 'region');
+      // 所有已明确入库的动作（save / quickSave）都必须跳过自动入历史，
+      // guard 只看真实持久化状态，不再硬编码单一 action。
+      if (normalized.kind === 'static' && shouldAutoSaveOverlayHistory({ imageDataURL, savedToHistory })) {
+        autoSaveToHistory(imageDataURL, action === 'pin' ? 'pin' : captureType);
       }
       return { ok: true };
     } catch (err) {
@@ -873,10 +1176,13 @@ function registerIpc() {
     const img = clipboard.readImage();
     return img.isEmpty() ? null : img.toDataURL();
   });
-  ipcMain.handle(C.IMAGE_SAVE, async (_e, dataURL) => {
+  ipcMain.handle(C.IMAGE_SAVE, async (e, dataURL) => {
     validatedNativeImage(dataURL);
     const r = await saveImageWithDialog(dataURL);
-    if (r && r.saved) saveToHistory(dataURL, 'region'); // 主动保存到本地 → 入历史
+    if (r && r.saved) {
+      const role = windows.getTrustedRole(e.sender.id);
+      saveToHistory(dataURL, historyTypeForImageSaveRole(role)); // 长截图/贴图保留真实类型
+    }
     return r;
   });
 
@@ -900,7 +1206,7 @@ function registerIpc() {
     windows.createPin({ dataURL, bounds: normalizePinBounds(bounds) });
     return { ok: true };
   });
-  // 贴图窗状态：置顶切换 / 鼠标穿透（作用调用方自己的窗口；主进程按 sender 定位）
+  // 贴图窗状态：置顶 / 透明度 / 锁定 / 标题会进入工作区持久化；鼠标穿透仅属当前会话。
   ipcMain.handle(C.PIN_SET_STATE, (e, flags) => {
     try {
       flags = normalizePinStateFlags(flags);
@@ -910,20 +1216,39 @@ function registerIpc() {
     const w = BrowserWindow.fromWebContents(e.sender);
     if (!w || w.isDestroyed()) return { ok: false };
     try {
-      if (typeof flags.onTop === 'boolean') {
-        w.setAlwaysOnTop(flags.onTop, 'floating');
-      }
       if (typeof flags.ignoreMouse === 'boolean') {
         w.setIgnoreMouseEvents(flags.ignoreMouse, { forward: true });
-        if (flags.ignoreMouse) {
-          passthroughPins.add(w.webContents.id);
-          ensurePassthroughShortcut();
-        } else {
-          passthroughPins.delete(w.webContents.id);
-          if (!passthroughPins.size) clearPassthroughShortcut();
-        }
+        passthroughShortcutLifecycle.setPinPassthrough(w.webContents.id, flags.ignoreMouse);
       }
-      return { ok: true };
+      const workspacePatch = { ...flags };
+      delete workspacePatch.ignoreMouse;
+      const state = Object.keys(workspacePatch).length
+        ? windows.updatePinWorkspaceState(w.webContents.id, workspacePatch)
+        : windows.getPinPayload(w.webContents.id) && windows.getPinPayload(w.webContents.id).state;
+      return { ok: true, state: state || {} };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+  });
+
+  // 贴图标注后的合成图由主进程按 revision 原子接收；工作区持久化、
+  // OCR / AI / 拖拽都因此只会看到已确认的最新内容。
+  ipcMain.handle(C.PIN_UPDATE_CONTENT, (e, rawUpdate) => {
+    try {
+      const update = normalizePinContentUpdate(rawUpdate, (dataURL) => {
+        validatedNativeImage(dataURL);
+        return dataURL;
+      });
+      const result = windows.updatePinContent(e.sender.id, update);
+      return { ok: true, revision: result.revision };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+  });
+
+  ipcMain.handle(C.PIN_CLOSE_READY, (e, rawReply) => {
+    try {
+      return windows.acknowledgePinClose(e.sender.id, rawReply);
     } catch (err) {
       return { ok: false, error: (err && err.message) || String(err) };
     }
@@ -954,11 +1279,8 @@ function registerIpc() {
     const dataURL = payload && payload.dataURL;
     validatedNativeImage(dataURL);
     const cfg = config.get();
-    const lang = (payload && payload.lang) || cfg.ocr.lang;
+    const lang = normalizeOCRLanguage((payload && payload.lang) || cfg.ocr.lang);
     const engine = (payload && payload.engine) || (cfg.ocr && cfg.ocr.engine) || 'local';
-    if (typeof lang !== 'string' || lang.length > 128 || !/^[a-z][a-z0-9_]*(?:\+[a-z][a-z0-9_]*){0,4}$/i.test(lang)) {
-      throw new Error('OCR 语言代码无效。');
-    }
     if (!['local', 'model'].includes(engine)) throw new Error('OCR 引擎无效。');
     // 大模型模式：严格使用当前选择所映射的视觉提供方；纯文本提供方只在本地 OCR，绝不改投别家。
     if (engine !== 'local') {
@@ -1033,6 +1355,19 @@ function registerIpc() {
         return { error: (err && err.message) || String(err) };
       }
     });
+    ipcMain.handle(C.AI_RECOGNIZE_IMAGE, createAIRecognitionHandler({
+      streamChannel: C.DEEPSEEK_STREAM,
+      aiProvider,
+      getLanguage: () => config.get().ocr.lang,
+      downscaleDataURL: (dataURL, maxSide) => {
+        validatedNativeImage(dataURL);
+        return downscaleDataURL(dataURL, maxSide);
+      },
+      imageMessage: deepseek.imageMessage,
+      recognize: (dataURL, language) => ocr.recognize(dataURL, language),
+      streamWithAbort,
+    }));
+
     ipcMain.handle(C.DEEPSEEK_ASK_IMAGE, async (e, payload) => {
     const dataURL = payload && payload.dataURL;
     validatedNativeImage(dataURL);
@@ -1199,7 +1534,7 @@ function registerIpc() {
               { name: 'MP4 视频（H.264，兼容性更好）', extensions: ['mp4'] },
             ],
       });
-      if (canceled || !filePath) return { saved: false };
+      if (canceled || !filePath) return { saved: false, canceled: true };
       try {
         if (wantGif) {
           await media.convertToGif(tmp, filePath, safeFps || cfg.recording.fps, trimArgs);
@@ -1210,13 +1545,32 @@ function registerIpc() {
         } else {
           media.copyFileAtomic(tmp, filePath);
         }
-        return { saved: true, path: filePath };
+        // 录屏是一种独立的历史类型，不得完全消失于图片历史之外。
+        // 受管副本写入失败不能否定用户导出已成功的事实，但会返回 historySaved=false
+        // 并记录日志，避免为了历史副本让录屏窗口误以为整个保存失败。
+        const historyItem = await persistRecordingHistory(filePath, {
+          addMedia: (source, type) => history.addMedia(source, type),
+          broadcast: () => windows.broadcast(C.HISTORY_CHANGED),
+          onError: (error) => console.error(
+            '[history] 录屏已导出，但受管历史副本写入失败：',
+            (error && error.message) || String(error),
+          ),
+        });
+        return { saved: true, path: filePath, historySaved: !!historyItem };
       } catch (err) {
         dialog.showErrorBox('保存录屏失败', err.message);
         return { saved: false, error: err.message };
       }
     } finally {
       tempFiles.cleanupTempPath(tmp);
+    }
+  });
+
+  ipcMain.handle(C.RECORD_STATE, (e, payload) => {
+    try {
+      return windows.updateRecorderState(e.sender.id, payload);
+    } catch (error) {
+      return { ok: false, error: (error && error.message) || String(error) };
     }
   });
 
@@ -1296,39 +1650,27 @@ function registerIpc() {
   // ---- 新捕获模式 ----
   ipcMain.handle(C.CAPTURE_FULLSCREEN_NOW, async () => {
     try {
-      const item = await doFullscreenNow();
-      return { ok: true, item };
+      return await doFullscreenNow();
     } catch (e) {
       return { ok: false, error: e.message };
     }
   });
   ipcMain.handle(C.CAPTURE_WINDOW, () => doWindowCapture());
   ipcMain.handle(C.CAPTURE_TIMED, (_e, payload) => {
-    const rawDelay = Number(payload && payload.delay);
-    const delay = Math.min(300, Math.max(0, Number.isFinite(rawDelay) ? rawDelay : 0)) * 1000; // P3-2：上限 300s，防 setTimeout 溢出
-    const mode = (payload && payload.mode) || 'region';
-    if (!['region', 'fullscreen'].includes(mode)) throw new Error('定时截图模式无效。');
-    setTimeout(() => {
-      if (mode === 'fullscreen') {
-        grabDisplay()
-          .then((g) => {
-            clipboard.writeImage(nativeImage.createFromDataURL(g.dataURL));
-            autoSaveToHistory(g.dataURL, 'timed');
-          })
-          .catch((err) => {
-            // P3-4：不再静默吞错
-            console.error('[timed-capture] 失败：', err && err.message ? err.message : err);
-            dialog.showErrorBox('定时截图失败', (err && err.message) || String(err));
-          });
-      } else {
-        startCapture('region');
-      }
-    }, delay);
-    return { ok: true };
+    const job = timedCaptureScheduler.schedule(payload);
+    return { ok: true, ...job };
+  });
+  ipcMain.handle(C.CAPTURE_TIMED_CANCEL, (_e, jobId) => {
+    if (typeof jobId !== 'string' || jobId.length > 128 || !/^[a-zA-Z0-9_-]+$/.test(jobId)) {
+      throw new Error('定时截图任务标识无效。');
+    }
+    return { ok: timedCaptureScheduler.cancel(jobId) };
   });
 
   // ---- 历史记录 ----
-  ipcMain.handle(C.HISTORY_LIST, () => history.list());
+  ipcMain.handle(C.HISTORY_LIST, (_e, options) => history.list({
+    includeMedia: !!(options && options.includeMedia === true),
+  }));
   ipcMain.handle(C.HISTORY_GET, (_e, id) => history.get(normalizeHistoryId(id)));
   ipcMain.handle(C.HISTORY_DELETE, (_e, id) => {
     const ok = history.remove(normalizeHistoryId(id));
@@ -1346,11 +1688,31 @@ function registerIpc() {
     return ok;
   });
   ipcMain.handle(C.HISTORY_EXPORT, async (_e, id) => {
-    const got = history.get(normalizeHistoryId(id));
+    const safeId = normalizeHistoryId(id);
+    const got = history.get(safeId);
     if (!got) return { saved: false };
+    if (got.item && got.item.kind === 'media') {
+      const source = history.filePathOf(safeId);
+      if (!source) return { saved: false };
+      const ext = path.extname(source).toLowerCase();
+      const cfg = config.get();
+      const { canceled, filePath } = await dialog.showSaveDialog({
+        title: '导出录屏',
+        defaultPath: path.join(cfg.general.saveDir || app.getPath('videos') || app.getPath('downloads'), `困困录屏-${Date.now()}${ext}`),
+        filters: [{ name: '录屏文件', extensions: [ext.slice(1)] }],
+      });
+      if (canceled || !filePath) return { saved: false };
+      try {
+        media.copyFileAtomic(source, filePath);
+        return { saved: true, path: filePath };
+      } catch (err) {
+        dialog.showErrorBox('导出录屏失败', (err && err.message) || String(err));
+        return { saved: false, error: (err && err.message) || String(err) };
+      }
+    }
     return saveImageWithDialog(got.dataURL, `困困截图-${Date.now()}.png`);
   });
-  // 批量导出：只弹一次目录选择框，把所有选中图片写进该目录（避免逐张弹保存框）。
+  // 批量导出：只弹一次目录选择框，图片与录屏都从受管历史副本导出。
   ipcMain.handle(C.HISTORY_EXPORT_MANY, async (_e, ids) => {
     const safeIds = normalizeHistoryIds(ids);
     if (!safeIds.length) return { saved: false, count: 0 };
@@ -1362,11 +1724,27 @@ function registerIpc() {
     });
     if (canceled || !filePaths || !filePaths[0]) return { saved: false, count: 0 };
     const dir = filePaths[0];
+    const imagePreferences = normalizeImageExportPreferences(cfg);
+    const imageExtension = preferredExtensionForFormat(imagePreferences.format);
     let count = 0;
     for (const id of safeIds) {
       try {
         const got = history.get(id);
-        if (got && got.dataURL) { media.saveImageFile(got.dataURL, path.join(dir, `困困截图-${id}.png`)); count++; }
+        if (got && got.item && got.item.kind === 'media') {
+          const source = history.filePathOf(id);
+          if (source) {
+            media.copyFileAtomic(source, path.join(dir, `困困录屏-${id}${path.extname(source).toLowerCase()}`));
+            count++;
+          }
+        } else if (got && got.dataURL) {
+          await exportImage({
+            dataURL: got.dataURL,
+            outputPath: path.join(dir, `困困截图-${id}.${imageExtension}`),
+            format: imagePreferences.format,
+            quality: imagePreferences.quality,
+          });
+          count++;
+        }
       } catch (err) { console.error('[history] 批量导出单张失败', id, err); }
     }
     return { saved: count > 0, count, dir };
@@ -1381,30 +1759,90 @@ function boundsToDisplay(displayId) {
 }
 
 // ---------- 贴图鼠标穿透兜底（穿透后窗口收不到键盘，用临时全局快捷键恢复）----------
-let passthroughShortcut = false;
-const passthroughPins = new Set();
-function ensurePassthroughShortcut() {
-  if (passthroughShortcut) return;
-  try {
-    passthroughShortcut = globalShortcut.register('CommandOrControl+Alt+P', () => {
-      windows.pinSnapshots().forEach(({ win }) => {
-        try {
-          win.setIgnoreMouseEvents(false, { forward: true });
-          win.webContents.send(C.PIN_CMD, { cmd: 'passthrough-off' });
-        } catch (_) {}
-      });
+function createPassthroughShortcutLifecycle({
+  registerShortcut,
+  unregisterShortcut,
+  restoreAllPins,
+  accelerator = 'CommandOrControl+Alt+P',
+} = {}) {
+  if (typeof registerShortcut !== 'function' || typeof unregisterShortcut !== 'function' || typeof restoreAllPins !== 'function') {
+    throw new TypeError('穿透快捷键生命周期依赖无效。');
+  }
+
+  const passthroughPins = new Set();
+  let shortcutRegistered = false;
+
+  function clearShortcut() {
+    if (!shortcutRegistered) return;
+    try {
+      unregisterShortcut(accelerator);
+    } catch (_) {
+      // Electron 正在退出或快捷键已被系统清走时也要收敛本地状态。
+    } finally {
+      shortcutRegistered = false;
+    }
+  }
+
+  function restoreAndRelease() {
+    try {
+      restoreAllPins();
+    } finally {
       passthroughPins.clear();
-      clearPassthroughShortcut();
+      clearShortcut();
+    }
+  }
+
+  function ensureShortcut() {
+    if (shortcutRegistered) return true;
+    try {
+      shortcutRegistered = registerShortcut(accelerator, restoreAndRelease) === true;
+    } catch (_) {
+      shortcutRegistered = false;
+    }
+    return shortcutRegistered;
+  }
+
+  function removePin(webContentsId) {
+    passthroughPins.delete(webContentsId);
+    if (!passthroughPins.size) clearShortcut();
+  }
+
+  return {
+    setPinPassthrough(webContentsId, enabled) {
+      if (enabled) {
+        passthroughPins.add(webContentsId);
+        return ensureShortcut();
+      }
+      removePin(webContentsId);
+      return true;
+    },
+    removePin,
+    // registerShortcuts() 调用 unregisterAll() 后，Electron 的真实注册已清空；必须先
+    // 丢弃本地布尔状态并立即恢复兜底键，随后普通配置快捷键才能安全地避开该冲突。
+    onGlobalShortcutsReset() {
+      shortcutRegistered = false;
+      return passthroughPins.size ? ensureShortcut() : true;
+    },
+    dispose() {
+      passthroughPins.clear();
+      clearShortcut();
+    },
+  };
+}
+
+const passthroughShortcutLifecycle = createPassthroughShortcutLifecycle({
+  registerShortcut: (accelerator, callback) => globalShortcut.register(accelerator, callback),
+  unregisterShortcut: (accelerator) => globalShortcut.unregister(accelerator),
+  restoreAllPins: () => {
+    windows.pinSnapshots().forEach(({ win }) => {
+      try {
+        win.setIgnoreMouseEvents(false, { forward: true });
+        win.webContents.send(C.PIN_CMD, { cmd: 'passthrough-off' });
+      } catch (_) {}
     });
-  } catch (_) {}
-}
-function clearPassthroughShortcut() {
-  if (!passthroughShortcut) return;
-  try {
-    globalShortcut.unregister('CommandOrControl+Alt+P');
-  } catch (_) {}
-  passthroughShortcut = false;
-}
+  },
+});
+windows.onPinRemoved((webContentsId) => passthroughShortcutLifecycle.removePin(webContentsId));
 
 // 全部贴图保存为一个目录
 async function pinSaveAll() {
@@ -1455,33 +1893,48 @@ function parseColorText(t) {
 }
 
 // ---------- 全局快捷键 ----------
-function registerShortcuts() {
-  globalShortcut.unregisterAll();
-  const sc = config.get().shortcuts;
-  const bind = (accel, fn) => {
-    if (!accel) return;
-    try {
-      // register 在快捷键被系统 / 其他 app 占用时不抛异常、而是返回 false，
-      // 会出现「设了快捷键但全程无效」却毫无感知。这里检查返回值并告警。
-      const ok = globalShortcut.register(accel, fn);
-      if (!ok) console.warn('[shortcut] 注册无效（可能已被系统或其他应用占用）:', accel);
-    } catch (e) {
-      console.error('[shortcut] 注册失败', accel, e.message);
-    }
-  };
-  bind(sc.capture, () => startCapture('region'));
-  bind(sc.ocr, () => startCapture('ocr'));
-  bind(sc.longShot, () => startCapture('long'));
-  bind(sc.record, () => startCapture('record'));
-  bind(sc.pinClipboard, () => pinFromClipboard());
-  bind(sc.pinRestore, () => {
-    if (!windows.restoreLastPin()) {
-      dialog.showMessageBox({ type: 'info', message: '没有可恢复的贴图', detail: '关闭过的贴图会保留最近 10 条，可用此快捷键恢复。' });
-    }
-  });
+function shortcutBindings(sc) {
+  const bindings = [
+    { key: 'capture', accelerator: sc.capture, callback: () => startCapture('region') },
+    { key: 'ocr', accelerator: sc.ocr, callback: () => startCapture('ocr') },
+    { key: 'longShot', accelerator: sc.longShot, callback: () => startCapture('long') },
+    { key: 'record', accelerator: sc.record, callback: () => startCapture('record') },
+    { key: 'pinClipboard', accelerator: sc.pinClipboard, callback: () => pinFromClipboard() },
+    {
+      key: 'pinRestore',
+      accelerator: sc.pinRestore,
+      callback: () => {
+        if (!windows.restoreLastPin()) {
+          dialog.showMessageBox({ type: 'info', message: '没有可恢复的贴图', detail: '关闭过的贴图会保留最近 10 条，可用此快捷键恢复。' });
+        }
+      },
+    },
+  ];
   if (process.platform === 'darwin') {
-    bind(sc.translate, () => { triggerGlobalTranslate().catch(() => {}); });
+    bindings.push({
+      key: 'translate',
+      accelerator: sc.translate,
+      callback: () => { triggerGlobalTranslate().catch(() => {}); },
+    });
   }
+  return bindings;
+}
+
+function registerShortcuts(nextShortcuts, previousShortcuts) {
+  const next = nextShortcuts || config.get().shortcuts;
+  const previous = previousShortcuts ? shortcutBindings(previousShortcuts) : [];
+  const result = replaceShortcutBindings({
+    reset: () => globalShortcut.unregisterAll(),
+    // 穿透恢复键必须每次在普通可配置快捷键之前重注册；
+    // 若用户配置撞了这个保留键，新配置会失败并回滚，脱困能力仍优先。
+    restoreReserved: () => passthroughShortcutLifecycle.onGlobalShortcutsReset(),
+    register: (accelerator, callback) => globalShortcut.register(accelerator, callback),
+  }, shortcutBindings(next), previous);
+  if (!result.ok) {
+    const failed = result.error && result.error.failed && result.error.failed[0];
+    console.error('[shortcut] 快捷键替换失败，已尝试回滚：', failed || result.error);
+  }
+  return result;
 }
 
 function applyLoginItem() {
@@ -1547,11 +2000,29 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  // 再次启动（双击已在运行的 app）→ 打开/聚焦设置页，给出可见反馈
-  app.on('second-instance', () => windows.openSettings());
+  // 第二实例可能在首实例仍初始化 IPC/托盘时抵达：先排队，初始化完成后按到达顺序处理。
+  let resolveLaunchHandlingReady;
+  const launchHandlingReady = new Promise((resolve) => { resolveLaunchHandlingReady = resolve; });
+  let secondInstanceQueue = Promise.resolve();
+  app.on('second-instance', (_event, argv) => {
+    secondInstanceQueue = secondInstanceQueue.then(async () => {
+      await launchHandlingReady;
+      const outcome = await handleLaunchArguments(argv);
+      // 普通重复双击仍给出可见反馈；带自动化参数时只执行指定动作。
+      if (!outcome.handled) windows.openSettings();
+    }).catch((error) => {
+      console.error('[second-instance] 处理失败：', error);
+    });
+  });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     config.get();
+    pinWorkspaceClosing = false;
+    pinWorkspaceStore = createPinWorkspaceStore({
+      rootDir: path.join(app.getPath('userData'), 'pin-workspace'),
+    });
+    const restoredPins = windows.restorePinWorkspace(pinWorkspaceStore);
+    if (restoredPins) console.log(`[pin-workspace] 已恢复 ${restoredPins} 张贴图。`);
     // 注册 kkthumb://img/<id> 协议：把请求映射到磁盘上的历史缩略图文件，供历史/首页画廊按需加载。
     // 只读、只服务 history 目录内的缩略图，路径由 history.thumbPathOf 校验，不接受任意路径注入。
     protocol.handle('kkthumb', async (req) => {
@@ -1598,9 +2069,17 @@ if (!gotLock) {
       registerShortcuts();
       applyLoginItem();
     }
+    const initialLaunch = process.env.KK_SMOKE
+      ? { handled: false, ok: true }
+      : await handleLaunchArguments(process.argv);
+    resolveLaunchHandlingReady();
     // 启动即打开桌面主窗口（快捷截图首页）——可在设置里关闭（纯托盘驻留）。
     // （KK_SMOKE 自检模式下由自检流程自行开窗，这里跳过避免重复）
-    if (!process.env.KK_SMOKE && config.get().general.openMainAtLaunch !== false) windows.createMain('capture');
+    if (
+      !process.env.KK_SMOKE
+      && !initialLaunch.handled
+      && config.get().general.openMainAtLaunch !== false
+    ) windows.createMain('capture');
 
     // macOS：屏幕录制权限——启动只做无打扰检测；真正未授权时，用户触发截图会在 startCapture 弹原生引导
     if (process.platform === 'darwin' && !process.env.KK_SMOKE) {
@@ -1645,6 +2124,7 @@ if (!gotLock) {
         displayBounds: d.bounds,
         scaleFactor: d.scaleFactor || 1,
         displayId: d.id,
+        displayIndex: screen.getAllDisplays().findIndex((item) => String(item.id) === String(d.id)),
         fps: 12,
         toGif: true,
       });
@@ -1687,6 +2167,12 @@ if (!gotLock) {
         app.exit(0);
       }, 3500);
     }
+  }).catch((error) => {
+    // 防止初始化失败时第二实例队列永久悬挂；同时给出可诊断的原生错误。
+    resolveLaunchHandlingReady();
+    const message = (error && error.message) || String(error);
+    console.error('[startup] 初始化失败：', error);
+    try { dialog.showErrorBox('困困截图启动失败', message); } catch (_) {}
   });
 
   // 托盘应用：关掉所有窗口也不退出
@@ -1699,7 +2185,35 @@ if (!gotLock) {
     windows.createMain();
   });
 
+  app.on('before-quit', (event) => {
+    if (quitPrepared) return;
+    event.preventDefault();
+    if (quitPreparationInFlight) return;
+    quitPreparationInFlight = prepareApplicationQuit()
+      .then((ready) => {
+        quitPreparationInFlight = null;
+        if (!ready) {
+          windows.cancelPinClosePreparation();
+          return;
+        }
+        quitPrepared = true;
+        app.quit();
+      })
+      .catch((error) => {
+        quitPreparationInFlight = null;
+        windows.cancelPinClosePreparation();
+        const message = (error && error.message) || String(error);
+        console.error('[quit] 退出准备失败：', error);
+        try { dialog.showErrorBox('未能安全退出', `${message}\n\n应用已保持运行，请重试或先手动保存。`); } catch (_) {}
+      });
+  });
+
   app.on('will-quit', () => {
+    pinWorkspaceClosing = true;
+    timedCaptureScheduler.cancelAll();
+    captureCoordinator.cancelPending('app-quit');
+    savePinWorkspaceNow();
+    passthroughShortcutLifecycle.dispose();
     globalShortcut.unregisterAll();
     windows.closeAll();
     tempFiles.cleanupAll();
@@ -1712,3 +2226,5 @@ if (!gotLock) {
     }
   });
 }
+
+module.exports = { createPassthroughShortcutLifecycle };

@@ -11,6 +11,7 @@ const {
   normalizeTranslationRequest,
   normalizeChatRequest,
   normalizeProviderBaseUrl,
+  normalizeOCRLanguage,
   normalizeConfigPatch,
   normalizePinStateFlags,
   normalizeProviderTestTarget,
@@ -101,11 +102,28 @@ test('configuration patches are schema-bound and role-scoped', () => {
   assert.deepEqual(normalizeConfigPatch({ recording: { fps: 999 } }, 'main'), { recording: { fps: 60 } });
 });
 
+test('OCR language input is a fixed fail-closed selection, not an arbitrary language-code string', () => {
+  for (const lang of ['chi_sim+eng', 'chi_sim', 'eng']) {
+    assert.equal(normalizeOCRLanguage(lang), lang);
+    assert.deepEqual(normalizeConfigPatch({ ocr: { lang } }, 'main'), { ocr: { lang } });
+  }
+
+  for (const lang of ['jpn', 'chi_sim+jpn', 'eng+chi_sim', 'chi_sim+eng+chi_sim', '', ' chi_sim ']) {
+    assert.throws(() => normalizeOCRLanguage(lang), /OCR.*语言/);
+    assert.throws(() => normalizeConfigPatch({ ocr: { lang } }, 'main'), /ocr\.lang|OCR.*语言/i);
+  }
+});
+
 test('pin state and provider test selectors reject unexpected renderer input', () => {
   assert.deepEqual(normalizePinStateFlags({ onTop: true }), { onTop: true });
   assert.deepEqual(normalizePinStateFlags({ ignoreMouse: false }), { ignoreMouse: false });
+  assert.deepEqual(
+    normalizePinStateFlags({ opacity: 0.1, locked: true, title: 'Reference' }),
+    { opacity: 0.3, locked: true, title: 'Reference' }
+  );
   assert.throws(() => normalizePinStateFlags(null), /贴图状态/);
   assert.throws(() => normalizePinStateFlags({ onTop: 'yes' }), /布尔/);
+  assert.throws(() => normalizePinStateFlags({ title: 'x'.repeat(513) }), /标题/);
   assert.throws(() => normalizePinStateFlags({ onTop: true, surprise: true }), /未知/);
 
   assert.equal(normalizeProviderTestTarget(undefined), undefined);
