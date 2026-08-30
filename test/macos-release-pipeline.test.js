@@ -10,9 +10,10 @@ const packageJson = require('../package.json');
 test('local and formal macOS packaging commands are explicitly separated', () => {
   assert.equal(packageJson.scripts.dist, 'npm run dist:mac:local');
   assert.match(packageJson.scripts['dist:mac'], /dist:mac:local/);
-  assert.match(packageJson.scripts['dist:mac:local'], /CSC_IDENTITY_AUTO_DISCOVERY=false/);
-  assert.match(packageJson.scripts['dist:mac:local'], /--config\.mac\.identity=null/);
-  assert.match(packageJson.scripts['dist:mac:local'], /--config\.mac\.notarize=false/);
+  assert.equal(packageJson.scripts['dist:mac:local'], 'node scripts/build-macos-local-signed.js');
+  assert.match(packageJson.scripts['dist:mac:adhoc'], /CSC_IDENTITY_AUTO_DISCOVERY=false/);
+  assert.match(packageJson.scripts['dist:mac:adhoc'], /--config\.mac\.identity=null/);
+  assert.match(packageJson.scripts['dist:mac:adhoc'], /--config\.mac\.notarize=false/);
   assert.equal(packageJson.scripts['dist:mac:release'], 'node scripts/build-macos-release.js');
   assert.equal(packageJson.scripts['verify:mac:release'], 'node scripts/verify-macos-release.js');
 

@@ -49,6 +49,13 @@ const {
 } = require('./shortcut-transaction');
 const { selectDisplaySource, serializeCaptureSources } = require('./capture-source-matcher');
 const { createCaptureCoordinator } = require('./capture-coordinator');
+const {
+  ScreenPermissionError,
+  isScreenPermissionError,
+  readScreenPermissionStatus,
+  requireScreenCaptureAttempt,
+} = require('./screen-permission');
+const { classifyWindowCaptureClose } = require('./window-capture-close');
 const { normalizeOverlayResultEnvelope } = require('./overlay-result-contract');
 const { createTimedCaptureScheduler } = require('./timed-capture-scheduler');
 const { parseLaunchAction } = require('./launch-actions');
@@ -120,36 +127,75 @@ async function streamWithAbort(streamId, sender, opts, send) {
   }
 }
 
-// macOS 屏幕录制权限（TCC）检查。未授权时可弹原生引导对话框，并一键跳转「系统设置 › 隐私 › 屏幕录制」。
-// 返回 true=已授权；false=未授权（此时截图/长截图/录屏会黑屏或空白）。
-function checkScreenPermission(promptIfDenied) {
-  if (process.platform !== 'darwin') return true;
-  let status = 'granted';
+function currentScreenPermissionStatus() {
+  if (process.platform !== 'darwin') return 'granted';
+  return readScreenPermissionStatus(systemPreferences, console);
+}
+
+// not-determined/unknown 必须让真实捕获 API 继续执行：只有真实请求才能触发 macOS 首次授权。
+// 只有系统明确返回 denied/restricted 时才在调用前阻断。
+async function getScreenCaptureSources(options) {
+  if (process.platform !== 'darwin') return desktopCapturer.getSources(options);
+  requireScreenCaptureAttempt(currentScreenPermissionStatus());
   try {
-    status = systemPreferences.getMediaAccessStatus('screen');
-  } catch (_) {}
-  if (status === 'granted') return true;
-  if (promptIfDenied) {
-    try {
-      const r = dialog.showMessageBoxSync({
-        type: 'warning',
-        title: '需要「屏幕录制」权限',
-        message: '困困截图工具需要「屏幕录制」权限，才能截图 / 长截图 / 录屏。',
-        detail:
-          '请在「系统设置 › 隐私与安全性 › 屏幕录制」里勾选「困困截图工具」，然后重新尝试。\n首次授权后可能需要重启本应用才会生效。',
-        buttons: ['打开系统设置', '稍后'],
-        defaultId: 0,
-        cancelId: 1,
-        noLink: true,
-      });
-      if (r === 0) {
-        shell
-          .openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
-          .catch(() => {});
-      }
-    } catch (_) {}
+    return await desktopCapturer.getSources(options);
+  } catch (error) {
+    const status = currentScreenPermissionStatus();
+    if (status === 'denied' || status === 'restricted') {
+      throw new ScreenPermissionError(status, error);
+    }
+    throw error;
   }
-  return false;
+}
+
+function requireUsableCaptureImage(image, message) {
+  let usable = false;
+  try {
+    const size = image && typeof image.getSize === 'function' ? image.getSize() : null;
+    usable = !!image
+      && typeof image.isEmpty === 'function'
+      && !image.isEmpty()
+      && !!size
+      && size.width > 0
+      && size.height > 0;
+  } catch (_) {}
+  if (usable) return image;
+
+  const status = currentScreenPermissionStatus();
+  if (status === 'denied' || status === 'restricted') {
+    throw new ScreenPermissionError(status);
+  }
+  const error = new Error(message);
+  error.code = 'SCREEN_CAPTURE_EMPTY';
+  throw error;
+}
+
+function showScreenPermissionDialog(status) {
+  const restricted = status === 'restricted';
+  const response = dialog.showMessageBoxSync({
+    type: 'warning',
+    title: '需要「屏幕录制」权限',
+    message: restricted
+      ? '屏幕录制权限受到系统策略限制。'
+      : '困困截图工具还没有获得当前版本可用的「屏幕录制」权限。',
+    detail: restricted
+      ? '请联系此 Mac 的管理员检查隐私与安全性策略。'
+      : '请在「系统设置 › 隐私与安全性 › 屏幕与系统录音」中开启「困困截图工具」。如果开关已经打开，请退出并重新打开应用，让当前进程重新读取授权。',
+    buttons: restricted
+      ? ['打开系统设置', '取消']
+      : ['打开系统设置', '已授权，重启应用', '取消'],
+    defaultId: 0,
+    cancelId: restricted ? 1 : 2,
+    noLink: true,
+  });
+  if (response === 0) {
+    shell
+      .openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
+      .catch((error) => console.error('[screen-permission] 打开系统设置失败：', error));
+  } else if (!restricted && response === 1) {
+    relaunchAfterSafeQuit = true;
+    app.quit();
+  }
 }
 
 // 保存一张图到历史并广播刷新
@@ -273,6 +319,7 @@ let pinWorkspaceSaveTimer = null;
 let pinWorkspaceClosing = false;
 let quitPreparationInFlight = null;
 let quitPrepared = false;
+let relaunchAfterSafeQuit = false;
 
 function savePinWorkspaceNow({ throwOnError = false } = {}) {
   if (pinWorkspaceSaveTimer) {
@@ -438,7 +485,9 @@ async function handleLaunchArguments(argv) {
     const result = outcome.result;
     if (result && result.ok === false && result.canceled !== true) {
       const message = result.error || '自动截图未能启动。';
-      try { dialog.showErrorBox('自动截图失败', message); } catch (_) {}
+      if (result.dialogShown !== true) {
+        try { dialog.showErrorBox('自动截图失败', message); } catch (_) {}
+      }
       return { ...outcome, ok: false, error: message };
     }
     return { ...outcome, ok: true };
@@ -519,13 +568,12 @@ const IPC_ROLE_ALLOWLIST = {
 // ---------- 屏幕捕获 ----------
 // 抓取光标所在显示器的整屏，返回截图层需要的数据。
 async function grabDisplay() {
-  // 权限单点收口：所有「整屏抓取」都经此函数（区域/全屏/定时全屏/截图前蒙版）。未授权时弹原生引导并中止，
-  // 避免黑屏/空截图。注：长截图逐帧走 CAPTURE_REGION（不经此函数），故不会每帧弹窗。
-  if (!checkScreenPermission(true)) throw new Error('SCREEN_PERMISSION_DENIED');
+  // 所有「整屏抓取」都经此函数。首次状态为 not-determined 时必须实际调用捕获 API，
+  // 让 macOS 显示授权请求；denied/restricted 才会在 helper 内失败关闭。
   const point = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(point);
   const sf = display.scaleFactor || 1;
-  const sources = await desktopCapturer.getSources({
+  const sources = await getScreenCaptureSources({
     types: ['screen'],
     thumbnailSize: {
       width: Math.round(display.size.width * sf),
@@ -533,10 +581,16 @@ async function grabDisplay() {
     },
   });
   const src = selectDisplaySource(sources, display, screen.getAllDisplays());
-  if (!src || !src.thumbnail) throw new Error('屏幕源没有可用画面，请检查「屏幕录制」权限。');
+  if (!src) {
+    requireUsableCaptureImage(null, '没有找到与当前显示器匹配的屏幕源。');
+  }
+  const thumbnail = requireUsableCaptureImage(
+    src.thumbnail,
+    '屏幕源返回了空画面，请重试或重新连接显示器。'
+  );
   return {
     display,
-    dataURL: src.thumbnail.toDataURL(),
+    dataURL: thumbnail.toDataURL(),
     scaleFactor: sf,
     displayId: display.id,
     sourceId: src.id,
@@ -555,11 +609,18 @@ function grabWindowFrame({ signal } = {}) {
       resolve(null);
       return;
     }
+    try {
+      requireScreenCaptureAttempt(currentScreenPermissionStatus());
+    } catch (error) {
+      reject(error);
+      return;
+    }
     const tmp = tempFiles.createPrivateTempPath('kkshot-window', 'png');
     let child;
     let settled = false;
     let aborted = false;
     let forceKillTimer = null;
+    let stderr = '';
     const cleanup = () => {
       if (forceKillTimer) clearTimeout(forceKillTimer);
       forceKillTimer = null;
@@ -590,20 +651,52 @@ function grabWindowFrame({ signal } = {}) {
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
 
     try {
-      child = spawn('screencapture', ['-w', '-x', '-o', tmp]);
+      child = spawn('/usr/sbin/screencapture', ['-w', '-x', '-o', tmp], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
     } catch (error) {
       finish(error);
       return;
     }
+    if (child.stderr) {
+      child.stderr.on('data', (chunk) => {
+        if (stderr.length >= 4096) return;
+        stderr += String(chunk || '').slice(0, 4096 - stderr.length);
+      });
+    }
     child.once('error', (error) => finish(error));
-    child.once('close', () => {
+    child.once('close', (code, closeSignal) => {
       if (aborted || (signal && signal.aborted)) {
         finish(null, null);
         return;
       }
       try {
-        if (!fs.existsSync(tmp)) {
-          finish(null, null);
+        const hasFile = fs.existsSync(tmp) && fs.statSync(tmp).size > 0;
+        const closeOutcome = classifyWindowCaptureClose({
+          code,
+          signal: closeSignal,
+          hasFile,
+          stderr,
+        });
+        if (closeOutcome.kind !== 'success') {
+          // TCC 拒绝有时也会表现为退出码 1 且无 stderr。先保留权限错误，
+          // 再把 macOS 交互选窗的 Esc/无选区结果当作正常取消。
+          const status = currentScreenPermissionStatus();
+          if (status === 'denied' || status === 'restricted') {
+            finish(new ScreenPermissionError(status));
+            return;
+          }
+          if (closeOutcome.kind === 'canceled') {
+            finish(null, null);
+            return;
+          }
+          const detail = closeOutcome.detail;
+          const error = new Error(
+            `窗口截图未完成（退出码 ${code == null ? 'unknown' : code}`
+              + `${closeSignal ? `，信号 ${closeSignal}` : ''}）${detail ? `：${detail}` : ''}`
+          );
+          error.code = 'WINDOW_CAPTURE_FAILED';
+          finish(error);
           return;
         }
         const dataURL = 'data:image/png;base64,' + fs.readFileSync(tmp).toString('base64');
@@ -669,8 +762,19 @@ async function startCapture(mode, options = {}) {
     return await captureCoordinator.start(safeMode, options);
   } catch (e) {
     console.error('[capture] 失败：', e);
-    dialog.showErrorBox('截图失败', `${e.message}\n\n如果在 macOS 上，请到「系统设置 → 隐私与安全性 → 屏幕录制」里授权本应用。`);
-    return { ok: false, error: e.message || String(e) };
+    if (isScreenPermissionError(e)) {
+      showScreenPermissionDialog(e.status);
+      return {
+        ok: false,
+        error: e.message || '屏幕录制权限未开启。',
+        code: e.code,
+        status: e.status,
+        dialogShown: true,
+      };
+    }
+    const message = e && e.message ? e.message : String(e);
+    dialog.showErrorBox('截图失败', message);
+    return { ok: false, error: message, code: e && e.code, dialogShown: true };
   }
 }
 
@@ -1005,13 +1109,12 @@ function registerIpc() {
   });
   ipcMain.handle(C.CAPTURE_REGION, async (_e, payload) => {
     const { rect, displayId } = payload && typeof payload === 'object' ? payload : {};
-    if (!checkScreenPermission(false)) throw new Error('屏幕录制权限未开启。');
     const displays = screen.getAllDisplays();
     const display = displays.find((d) => String(d.id) === String(displayId));
     if (!display) throw new Error('目标显示器已断开，请重新开始长截图。');
     const safeRect = normalizeCaptureRect(rect, display.size);
     const sf = display.scaleFactor || 1;
-    const sources = await desktopCapturer.getSources({
+    const sources = await getScreenCaptureSources({
       types: ['screen'],
       thumbnailSize: {
         width: Math.round(display.size.width * sf),
@@ -1019,20 +1122,24 @@ function registerIpc() {
       },
     });
     const src = selectDisplaySource(sources, display, displays);
-    // 屏幕源可能为空（屏幕录制权限被中途撤销 / 多屏热插拔瞬间）。长截图逐帧调用此通道，
-    // 不保护会在 src 为 undefined 时抛 TypeError 静默搞挂整个长截图流程，故与 grabDisplay 一致地给出清晰错误。
-    if (!src || !src.thumbnail) throw new Error('未获取到屏幕源，请检查「屏幕录制」权限是否开启。');
-    const crop = src.thumbnail.crop({
+    if (!src) requireUsableCaptureImage(null, '未获取到目标显示器的屏幕源。');
+    const thumbnail = requireUsableCaptureImage(
+      src.thumbnail,
+      '屏幕源返回了空画面，请重试或重新连接显示器。'
+    );
+    const crop = thumbnail.crop({
       x: Math.round(safeRect.x * sf),
       y: Math.round(safeRect.y * sf),
       width: Math.round(safeRect.width * sf),
       height: Math.round(safeRect.height * sf),
     });
-    return crop.toDataURL();
+    return requireUsableCaptureImage(crop, '截取区域为空，请重新选择截图范围。').toDataURL();
   });
   ipcMain.handle(C.CAPTURE_GET_SOURCES, async () => {
-    if (!checkScreenPermission(false)) throw new Error('屏幕录制权限未开启。');
-    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } });
+    const sources = await getScreenCaptureSources({
+      types: ['screen'],
+      thumbnailSize: { width: 0, height: 0 },
+    });
     return serializeCaptureSources(sources);
   });
 
@@ -2081,10 +2188,12 @@ if (!gotLock) {
       && config.get().general.openMainAtLaunch !== false
     ) windows.createMain('capture');
 
-    // macOS：屏幕录制权限——启动只做无打扰检测；真正未授权时，用户触发截图会在 startCapture 弹原生引导
+    // macOS：启动只记录明确阻断状态。not-determined 不得被当成拒绝；
+    // 用户首次触发真实捕获时才由 macOS 显示系统授权请求。
     if (process.platform === 'darwin' && !process.env.KK_SMOKE) {
-      if (!checkScreenPermission(false)) {
-        console.warn('[权限] 屏幕录制未授权，触发截图时会弹出引导对话框。');
+      const screenPermissionStatus = currentScreenPermissionStatus();
+      if (screenPermissionStatus === 'denied' || screenPermissionStatus === 'restricted') {
+        console.warn(`[权限] 屏幕录制状态为 ${screenPermissionStatus}，触发截图时会显示一次引导。`);
       }
     }
 
@@ -2193,14 +2302,20 @@ if (!gotLock) {
       .then((ready) => {
         quitPreparationInFlight = null;
         if (!ready) {
+          relaunchAfterSafeQuit = false;
           windows.cancelPinClosePreparation();
           return;
         }
         quitPrepared = true;
+        if (relaunchAfterSafeQuit) {
+          relaunchAfterSafeQuit = false;
+          app.relaunch();
+        }
         app.quit();
       })
       .catch((error) => {
         quitPreparationInFlight = null;
+        relaunchAfterSafeQuit = false;
         windows.cancelPinClosePreparation();
         const message = (error && error.message) || String(error);
         console.error('[quit] 退出准备失败：', error);

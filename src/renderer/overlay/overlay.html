@@ -60,23 +60,11 @@
       <button class="tool-btn" data-tool="rect" title="矩形">
         <svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="1"/></svg>
       </button>
-      <button class="tool-btn" data-tool="ellipse" title="椭圆">
-        <svg viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="8" ry="6"/></svg>
-      </button>
       <button class="tool-btn" data-tool="arrow" title="箭头">
         <svg viewBox="0 0 24 24"><path d="M5 19 L19 5 M19 5 L11 5 M19 5 L19 13"/></svg>
       </button>
-      <button class="tool-btn" data-tool="line" title="直线">
-        <svg viewBox="0 0 24 24"><path d="M5 19 L19 5"/></svg>
-      </button>
       <button class="tool-btn" data-tool="pen" title="画笔">
         <svg viewBox="0 0 24 24"><path d="M4 20 C8 12 10 10 14 8 C16 7 18 6 20 4"/></svg>
-      </button>
-      <button class="tool-btn" data-tool="highlight" title="荧光笔（半透明高亮）">
-        <svg viewBox="0 0 24 24"><path d="M4 20 C8 12 10 10 14 8 C16 7 18 6 20 4" stroke-width="3" opacity="0.7"/><path d="M4 18 L10 12"/></svg>
-      </button>
-      <button class="tool-btn" data-tool="polyline" title="折线（单击加点 · 双击/Enter 完成 · Esc 取消）">
-        <svg viewBox="0 0 24 24"><path d="M4 19 L9 6 L14 13 L20 4"/></svg>
       </button>
       <button class="tool-btn" data-tool="text" title="文字">
         <svg viewBox="0 0 24 24"><path d="M5 6 H19 M12 6 V19 M9 19 H15"/></svg>
@@ -84,9 +72,34 @@
       <button class="tool-btn" data-tool="mosaic" title="马赛克">
         <svg viewBox="0 0 24 24"><path d="M4 4h5v5H4z M14 4h5v5h-5z M9 9h5v5H9z M4 14h5v5H4z M14 14h5v5h-5z"/></svg>
       </button>
-      <button class="tool-btn" data-tool="number" title="序号笔">
-        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><text x="12" y="16" class="num-glyph">1</text></svg>
+      <button
+        class="tool-btn toolbar-menu-trigger"
+        id="btnToolMore"
+        type="button"
+        title="更多标注工具"
+        aria-label="更多标注工具"
+        aria-expanded="false"
+        aria-controls="annotationMenu"
+      >
+        <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
       </button>
+      <div class="toolbar-menu annotation-menu" id="annotationMenu" role="group" aria-label="更多标注工具" hidden>
+        <button class="tool-btn toolbar-menu-item" data-tool="ellipse" type="button" title="椭圆">
+          <svg viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="8" ry="6"/></svg><span>椭圆</span>
+        </button>
+        <button class="tool-btn toolbar-menu-item" data-tool="line" type="button" title="直线">
+          <svg viewBox="0 0 24 24"><path d="M5 19 L19 5"/></svg><span>直线</span>
+        </button>
+        <button class="tool-btn toolbar-menu-item" data-tool="highlight" type="button" title="荧光笔（半透明高亮）">
+          <svg viewBox="0 0 24 24"><path d="M4 20 C8 12 10 10 14 8 C16 7 18 6 20 4" stroke-width="3" opacity="0.7"/><path d="M4 18 L10 12"/></svg><span>荧光笔</span>
+        </button>
+        <button class="tool-btn toolbar-menu-item" data-tool="polyline" type="button" title="折线（单击加点 · 双击/Enter 完成 · Esc 取消）">
+          <svg viewBox="0 0 24 24"><path d="M4 19 L9 6 L14 13 L20 4"/></svg><span>折线</span>
+        </button>
+        <button class="tool-btn toolbar-menu-item" data-tool="number" type="button" title="序号笔">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><text x="12" y="16" class="num-glyph">1</text></svg><span>序号笔</span>
+        </button>
+      </div>
     </div>
 
     <span class="divider"></span>
@@ -109,24 +122,6 @@
 
     <span class="divider"></span>
 
-    <!-- 选框形态：比例锁定 / 圆角（PixPin 式） -->
-    <div class="tool-group">
-      <button class="tool-btn" id="btnRatioLock" title="锁定宽高比（按当前比例调整选框）">
-        <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
-      </button>
-      <button class="tool-btn" id="btnRounded" title="圆角截图">
-        <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="5"/></svg>
-      </button>
-      <button class="tool-btn" id="btnAx" title="智能识别 UI 元素（悬停高亮，点击框选）">
-        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 3v18 M16 3v18 M3 8h18 M3 16h18" opacity="0.5"/></svg>
-      </button>
-      <button class="tool-btn" id="btnFrame" title="边框/阴影（点击切换：无 → 边框 → 阴影）">
-        <svg viewBox="0 0 24 24"><rect x="5" y="6" width="14" height="12" rx="2"/><path d="M5 6l14 12M19 6L5 18" opacity="0"/><path d="M8 4h8 M4 8v8" opacity="0.6"/></svg>
-      </button>
-    </div>
-
-    <span class="divider"></span>
-
     <!-- 撤销 / 重做 -->
     <div class="tool-group">
       <button class="tool-btn" id="btnUndo" title="撤销 (Ctrl/Cmd+Z)">
@@ -144,61 +139,92 @@
 
     <!-- 动作按钮 -->
     <div class="tool-group" id="actionGroup">
-      <button class="action-btn" data-action="ocr" title="OCR 识别文字">
+      <button class="action-btn" data-action="ocr" title="OCR 识别文字" aria-label="OCR 识别文字">
         <svg viewBox="0 0 24 24"><path d="M4 8V5h3 M20 8V5h-3 M4 16v3h3 M20 16v3h-3 M8 12h8"/></svg>
         <span>OCR</span>
       </button>
-      <button class="action-btn" data-action="table" title="AI 表格识别（输出 Markdown / CSV）">
-        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 9h18 M9 4v16 M15 4v16 M3 14h18"/></svg>
-        <span>AI 表格</span>
-      </button>
-      <button class="action-btn" data-action="formula" title="AI 公式识别（输出 LaTeX）">
-        <svg viewBox="0 0 24 24"><path d="M5 5h13 M5 19h13 M8 5l-3 7 3 7 M12 9l6 6 M18 9l-6 6"/></svg>
-        <span>AI 公式</span>
-      </button>
-      <button class="action-btn" id="btnQR" data-action="qr" title="识别到二维码或条码后出现" hidden>
-        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3z M20 14h1 M14 20h1 M18 18h3v3h-3"/></svg>
-        <span>条码</span>
-      </button>
-      <button class="action-btn" data-action="ask" title="问 AI">
+      <button class="action-btn" data-action="ask" title="问 AI" aria-label="问 AI">
         <svg viewBox="0 0 24 24"><path d="M12 4a8 8 0 0 0-8 8c0 1.6.5 3 1.3 4.2L4 20l4-1.2A8 8 0 1 0 12 4z"/><path d="M9.5 10a2.5 2.5 0 1 1 3.4 2.3c-.6.3-.9.7-.9 1.4"/><circle cx="12" cy="16.5" r=".6"/></svg>
-        <span>问AI</span>
+        <span>问 AI</span>
       </button>
-      <button class="action-btn" data-action="translate" title="翻译图中文字（译文原位盖回，目标语言见右侧选择）">
-        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18 M12 3c3 3 3 15 0 18 M12 3c-3 3-3 15 0 18"/></svg>
-        <span>翻译</span>
+      <button
+        class="action-btn toolbar-menu-trigger"
+        id="btnActionMore"
+        type="button"
+        title="更多截图、识别、处理与保存功能"
+        aria-label="更多截图、识别、处理与保存功能"
+        aria-expanded="false"
+        aria-controls="actionMenu"
+      >
+        <svg viewBox="0 0 24 24"><path d="M12 3l1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2L12 3z M18.5 14l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z M5.5 13l.9 2.6 2.6.9-2.6.9-.9 2.6-.9-2.6-2.6-.9 2.6-.9.9-2.6z"/></svg>
+        <span>更多</span>
       </button>
-      <select id="trLang" class="tr-lang" title="翻译目标语言">
-        <option value="中文">中文</option>
-        <option value="英语">英语</option>
-        <option value="日语">日语</option>
-        <option value="韩语">韩语</option>
-        <option value="法语">法语</option>
-        <option value="德语">德语</option>
-        <option value="西班牙语">西语</option>
-        <option value="俄语">俄语</option>
-      </select>
-      <button class="action-btn" data-action="polish" title="润色图中文字（提取并润色，结果在面板显示）">
-        <svg viewBox="0 0 24 24"><path d="M4 20l4-1 9-9-3-3-9 9-1 4z M14 6l3 3 M4 4h3 M5.5 2.5v3"/></svg>
-        <span>润色</span>
-      </button>
-      <button class="action-btn" data-action="pin" title="贴图钉屏">
+      <div class="toolbar-menu action-menu" id="actionMenu" role="group" aria-label="更多截图与处理选项" hidden>
+        <span class="toolbar-menu-heading">截图选项</span>
+        <button class="tool-btn toolbar-menu-item selection-option-btn" id="btnRatioLock" type="button" aria-pressed="false" title="锁定宽高比（按当前比例调整选框）">
+          <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span>比例锁定</span>
+        </button>
+        <button class="tool-btn toolbar-menu-item selection-option-btn" id="btnRounded" type="button" aria-pressed="false" title="圆角截图">
+          <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="5"/></svg><span>圆角截图</span>
+        </button>
+        <button class="tool-btn toolbar-menu-item selection-option-btn" id="btnAx" type="button" aria-pressed="false" title="智能识别 UI 元素（悬停高亮，点击框选）">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 3v18 M16 3v18 M3 8h18 M3 16h18" opacity="0.5"/></svg><span>智能框选</span>
+        </button>
+        <button class="tool-btn toolbar-menu-item selection-option-btn" id="btnFrame" type="button" aria-pressed="false" title="边框/阴影（点击切换：无 → 边框 → 阴影）">
+          <svg viewBox="0 0 24 24"><rect x="5" y="6" width="14" height="12" rx="2"/><path d="M5 6l14 12M19 6L5 18" opacity="0"/><path d="M8 4h8 M4 8v8" opacity="0.6"/></svg><span>边框 / 阴影</span>
+        </button>
+        <span class="toolbar-menu-heading">识别与保存</span>
+        <button class="action-btn toolbar-menu-item" data-action="table" type="button" title="AI 表格识别（输出 Markdown / CSV）">
+          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 9h18 M9 4v16 M15 4v16 M3 14h18"/></svg>
+          <span>AI 表格</span>
+        </button>
+        <button class="action-btn toolbar-menu-item" data-action="formula" type="button" title="AI 公式识别（输出 LaTeX）">
+          <svg viewBox="0 0 24 24"><path d="M5 5h13 M5 19h13 M8 5l-3 7 3 7 M12 9l6 6 M18 9l-6 6"/></svg>
+          <span>AI 公式</span>
+        </button>
+        <button class="action-btn toolbar-menu-item" id="btnQR" data-action="qr" type="button" title="识别到二维码或条码后出现" hidden>
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3z M20 14h1 M14 20h1 M18 18h3v3h-3"/></svg>
+          <span>条码结果</span>
+        </button>
+        <button class="action-btn toolbar-menu-item" data-action="translate" type="button" title="翻译图中文字（译文原位盖回）">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18 M12 3c3 3 3 15 0 18 M12 3c-3 3-3 15 0 18"/></svg>
+          <span>原位翻译</span>
+        </button>
+        <button class="action-btn toolbar-menu-item" data-action="polish" type="button" title="润色图中文字（提取并润色，结果在面板显示）">
+          <svg viewBox="0 0 24 24"><path d="M4 20l4-1 9-9-3-3-9 9-1 4z M14 6l3 3 M4 4h3 M5.5 2.5v3"/></svg>
+          <span>文字润色</span>
+        </button>
+        <button class="action-btn toolbar-menu-item" data-action="save" type="button" title="保存到文件">
+          <svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z M8 4v5h7V4 M8 14h8v6H8z"/></svg>
+          <span>保存到文件</span>
+        </button>
+        <button class="action-btn toolbar-menu-item" data-action="quickSave" type="button" title="快速保存（免对话框，直接存到保存目录）">
+          <svg viewBox="0 0 24 24"><path d="M13 2L4.5 13.5H11L9.5 22 19 10h-6.5z"/></svg>
+          <span>快速保存</span>
+        </button>
+        <label class="translate-target" title="翻译目标语言">
+          <span>翻译为</span>
+          <select id="trLang" class="tr-lang" aria-label="翻译目标语言">
+            <option value="中文">中文</option>
+            <option value="英语">英语</option>
+            <option value="日语">日语</option>
+            <option value="韩语">韩语</option>
+            <option value="法语">法语</option>
+            <option value="德语">德语</option>
+            <option value="西班牙语">西语</option>
+            <option value="俄语">俄语</option>
+          </select>
+        </label>
+      </div>
+      <button class="action-btn" data-action="pin" title="贴图钉屏" aria-label="贴图钉屏">
         <svg viewBox="0 0 24 24"><path d="M14 3l7 7-3 1-3 3-1 5-4-4-5 5 5-5-4-4 5-1 3-3z"/></svg>
         <span>贴图</span>
       </button>
-      <button class="action-btn" data-action="save" title="保存到文件">
-        <svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z M8 4v5h7V4 M8 14h8v6H8z"/></svg>
-        <span>保存</span>
-      </button>
-      <button class="action-btn" data-action="quickSave" title="快速保存（免对话框，直接存到保存目录）">
-        <svg viewBox="0 0 24 24"><path d="M13 2L4.5 13.5H11L9.5 22 19 10h-6.5z"/></svg>
-        <span>快存</span>
-      </button>
-      <button class="action-btn primary" data-action="copy" title="复制到剪贴板 (Enter)">
+      <button class="action-btn primary" data-action="copy" title="复制到剪贴板 (Enter)" aria-label="复制到剪贴板">
         <svg viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="12" rx="1"/><path d="M5 16V4h11"/></svg>
         <span>复制</span>
       </button>
-      <button class="action-btn danger" data-action="cancel" title="取消 (Esc)">
+      <button class="action-btn danger icon-only" data-action="cancel" title="取消 (Esc)" aria-label="取消截图">
         <svg viewBox="0 0 24 24"><path d="M6 6 L18 18 M18 6 L6 18"/></svg>
       </button>
     </div>

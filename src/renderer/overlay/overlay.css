@@ -228,7 +228,9 @@ body {
   z-index: 40;
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 4px;
+  max-width: calc(100vw - 4px);
   padding: 6px 8px;
   background: var(--panel);
   border: 1px solid var(--border);
@@ -238,12 +240,15 @@ body {
 }
 
 .tool-group {
+  position: relative;
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 2px;
 }
 
 .divider {
+  flex: 0 0 auto;
   width: 1px;
   height: 22px;
   background: var(--border);
@@ -252,6 +257,7 @@ body {
 
 /* 图标按钮通用 */
 .tool-btn {
+  flex: 0 0 auto;
   width: 30px;
   height: 30px;
   display: flex;
@@ -299,6 +305,7 @@ body {
 
 /* 颜色块 */
 .color-btn {
+  flex: 0 0 auto;
   width: 20px;
   height: 20px;
   border-radius: 50%;
@@ -317,6 +324,7 @@ body {
 
 /* 粗细 */
 .width-btn {
+  flex: 0 0 auto;
   width: 26px;
   height: 26px;
   display: flex;
@@ -347,6 +355,7 @@ body {
 .action-btn {
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 4px;
   height: 30px;
   padding: 0 9px;
@@ -355,14 +364,23 @@ body {
   background: transparent;
   color: var(--text);
   font-size: 13px;
+  line-height: 1;
   font-family: var(--font);
+  white-space: nowrap;
+  word-break: keep-all;
   cursor: pointer;
   transition: background 0.12s, color 0.12s;
+}
+.action-btn > span {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  word-break: keep-all;
 }
 .action-btn:hover {
   background: var(--panel-2);
 }
 .action-btn svg {
+  flex: 0 0 auto;
   width: 17px;
   height: 17px;
   fill: none;
@@ -385,6 +403,11 @@ body {
 .action-btn.danger:hover {
   background: #fef2f2;
 }
+.action-btn.icon-only {
+  width: 32px;
+  padding: 0;
+  justify-content: center;
+}
 /* 默认高亮项（由 mode 决定，按 Enter 执行） */
 .action-btn.default-action {
   outline: 2px solid var(--accent);
@@ -395,8 +418,115 @@ body {
   outline-color: #fff;
 }
 
+/* 低频能力放入就地弹层，避免几十个按钮把单行工具栏撑满整屏。 */
+.toolbar-menu-trigger {
+  position: relative;
+  list-style: none;
+}
+.toolbar-menu-trigger[aria-expanded="true"] {
+  background: #eff6ff;
+  color: var(--accent);
+}
+.toolbar-menu-trigger.has-active-option {
+  color: var(--accent);
+}
+.toolbar-menu-trigger.has-active-option::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--panel);
+}
+.toolbar-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  z-index: 3;
+  display: grid;
+  gap: 4px;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  cursor: default;
+}
+.toolbar-menu[hidden] {
+  display: none;
+}
+.toolbar.menu-opens-up .toolbar-menu {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
+.toolbar-menu-item {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  justify-content: flex-start;
+  padding: 0 10px;
+  white-space: nowrap;
+  word-break: keep-all;
+}
+.toolbar-menu-item > span {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  word-break: keep-all;
+}
+.toolbar-menu-heading {
+  grid-column: 1 / -1;
+  padding: 3px 6px 1px;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  word-break: keep-all;
+}
+.annotation-menu {
+  left: 0;
+  grid-template-columns: repeat(2, minmax(96px, 1fr));
+  min-width: 216px;
+}
+.annotation-menu .tool-btn svg {
+  flex: 0 0 auto;
+}
+.action-menu {
+  right: 0;
+  left: auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 288px;
+}
+.action-menu .toolbar-menu-item {
+  font-size: 13px;
+}
+.action-menu .tool-btn svg {
+  flex: 0 0 auto;
+}
+.translate-target {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 36px;
+  padding: 4px 4px 0 10px;
+  border-top: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 /* 翻译目标语言选择（工具栏内，紧邻「翻译」按钮） */
 .tr-lang {
+  flex: 0 0 auto;
   height: 30px;
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -405,11 +535,32 @@ body {
   font-size: 12px;
   font-family: var(--font);
   padding: 0 4px;
+  white-space: nowrap;
+  word-break: keep-all;
   cursor: pointer;
   outline: none;
 }
 .tr-lang:hover {
   background: var(--panel);
+}
+
+/* 极窄显示器仍优先保证所有图标可达；完整中文名称保留在 title 与弹层中。 */
+@media (max-width: 1080px) {
+  .toolbar {
+    gap: 2px;
+    padding-inline: 5px;
+  }
+  .divider {
+    margin-inline: 2px;
+  }
+  #actionGroup > .action-btn:not(.toolbar-menu-item) {
+    width: 30px;
+    padding-inline: 0;
+    justify-content: center;
+  }
+  #actionGroup > .action-btn:not(.toolbar-menu-item) > span {
+    display: none;
+  }
 }
 
 /* ===== 截图层内联 AI 浮窗（翻译就地 / 问AI） ===== */

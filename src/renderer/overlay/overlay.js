@@ -541,6 +541,10 @@
   var btnUndo = document.getElementById('btnUndo');
   var btnRedo = document.getElementById('btnRedo');
   var btnDelete = document.getElementById('btnDelete');
+  var btnToolMore = document.getElementById('btnToolMore');
+  var annotationMenu = document.getElementById('annotationMenu');
+  var btnActionMore = document.getElementById('btnActionMore');
+  var actionMenu = document.getElementById('actionMenu');
   var trLang = document.getElementById('trLang'); // 翻译目标语言选择
   var translateConfigReady = Promise.resolve();
   var translateTargetChanged = false;
@@ -708,11 +712,16 @@
       closeAIPanel();
       return;
     }
+    // 弹层打开时，第一次点到工具栏外只负责收起弹层，避免这一击意外重画选区。
+    if (hasOpenToolbarMenu() && !toolbar.contains(e.target)) {
+      closeToolbarMenus();
+      return;
+    }
     // 点在工具栏 / 文字输入框上 → 不处理框选
     if (toolbar.contains(e.target) || e.target === textInput) return;
 
     // 智能识别模式：有高亮元素时，点击 = 直接框选该元素
-    if (S.axMode && S.axFrame && !S.rect) {
+    if (S.axMode && S.axFrame) {
       var f = S.axFrame;
       S.rect = { x: f.x, y: f.y, width: f.w, height: f.h };
       S.shapes = [];
@@ -720,9 +729,7 @@
       S.redoStack = [];
       S.selected = null;
       S.numberSeq = 1;
-      S.axMode = false;
-      btnAx.classList.remove('active');
-      hideAx();
+      disableAx();
       if (typeof clearInlineTranslate === 'function') clearInlineTranslate();
       updateSelectionView();
       showToolbar();
@@ -1002,6 +1009,86 @@
   }
 
   // ================= 工具栏 =================
+  function toolbarMenuEntries() {
+    return [
+      { trigger: btnToolMore, menu: annotationMenu },
+      { trigger: btnActionMore, menu: actionMenu },
+    ];
+  }
+
+  function setToolbarMenu(entry, open) {
+    if (!entry || !entry.trigger || !entry.menu) return;
+    entry.menu.hidden = !open;
+    entry.trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) positionOpenToolbarMenu();
+  }
+
+  function closeToolbarMenus(exceptMenu) {
+    var entries = toolbarMenuEntries();
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].menu !== exceptMenu) setToolbarMenu(entries[i], false);
+    }
+  }
+
+  function hasOpenToolbarMenu() {
+    var entries = toolbarMenuEntries();
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].menu && !entries[i].menu.hidden) return true;
+    }
+    return false;
+  }
+
+  function toggleToolbarMenu(trigger, menu) {
+    if (!trigger || !menu) return;
+    var willOpen = menu.hidden;
+    closeToolbarMenus(willOpen ? menu : null);
+    setToolbarMenu({ trigger: trigger, menu: menu }, willOpen);
+  }
+
+  function positionOpenToolbarMenu() {
+    if (!toolbar || toolbar.hidden) return;
+    var entries = toolbarMenuEntries();
+    var menu = null;
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].menu && !entries[i].menu.hidden) {
+        menu = entries[i].menu;
+        break;
+      }
+    }
+    if (!menu) {
+      toolbar.classList.remove('menu-opens-up');
+      return;
+    }
+
+    // Measure the menu at its natural height, then choose the side that can
+    // contain it. If neither side is tall enough, cap the menu to the larger
+    // space and let it scroll instead of letting it leave the screen.
+    menu.style.maxHeight = 'none';
+    toolbar.classList.remove('menu-opens-up');
+    var toolbarRect = toolbar.getBoundingClientRect();
+    var naturalHeight = menu.getBoundingClientRect().height;
+    var edge = 2;
+    var gap = 8;
+    var spaceAbove = Math.max(0, toolbarRect.top - gap - edge);
+    var spaceBelow = Math.max(0, window.innerHeight - toolbarRect.bottom - gap - edge);
+    var openUp = naturalHeight > spaceBelow && (naturalHeight <= spaceAbove || spaceAbove > spaceBelow);
+    toolbar.classList.toggle('menu-opens-up', openUp);
+    menu.style.maxHeight = Math.floor(openUp ? spaceAbove : spaceBelow) + 'px';
+  }
+
+  function updateActionOptionsIndicator() {
+    if (!btnActionMore || !actionMenu) return;
+    var hasActiveOption = !!actionMenu.querySelector('.selection-option-btn.active');
+    btnActionMore.classList.toggle('has-active-option', hasActiveOption);
+  }
+
+  function setSelectionOptionActive(button, active) {
+    if (!button) return;
+    button.classList.toggle('active', !!active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    updateActionOptionsIndicator();
+  }
+
   function showToolbar() {
     // record / long 模式不需要标注与工具栏，选完直接提交
     if (S.mode === 'record') {
@@ -1012,6 +1099,7 @@
       finishAction('long');
       return;
     }
+    closeToolbarMenus();
     toolbar.hidden = false;
     positionToolbar();
     applyDefaultAction();
@@ -1042,6 +1130,15 @@
     toolbar.style.left = left + 'px';
     toolbar.style.top = top + 'px';
     toolbar.style.visibility = 'visible';
+    positionOpenToolbarMenu();
+  }
+
+  // QR/barcode detection can add a menu item after the menu is already open.
+  // Recompute the available height whenever a menu item's visibility changes.
+  if (actionMenu && typeof MutationObserver === 'function') {
+    new MutationObserver(function () {
+      if (!actionMenu.hidden) positionOpenToolbarMenu();
+    }).observe(actionMenu, { subtree: true, attributes: true, attributeFilter: ['hidden'] });
   }
 
   // 根据 mode 设定默认高亮动作
@@ -1061,8 +1158,25 @@
     e.stopPropagation();
   });
   toolbar.addEventListener('click', function (e) {
+    if (e.target.closest('#btnToolMore')) {
+      toggleToolbarMenu(btnToolMore, annotationMenu);
+      return;
+    }
+    if (e.target.closest('#btnActionMore')) {
+      toggleToolbarMenu(btnActionMore, actionMenu);
+      return;
+    }
+    // 选区选项各自维护状态；菜单保持展开，便于连续配置多个选项。
+    var selectionOptionBtn = e.target.closest('.selection-option-btn');
+    if (selectionOptionBtn) {
+      updateActionOptionsIndicator();
+      // 智能框选需要立刻回到画布悬停识别；其它选项保持菜单展开，方便连续配置。
+      if (selectionOptionBtn === btnAx && S.axMode) closeToolbarMenus();
+      return;
+    }
     var toolBtn = e.target.closest('.tool-btn[data-tool]');
     if (toolBtn) {
+      closeToolbarMenus();
       selectTool(toolBtn.getAttribute('data-tool'));
       return;
     }
@@ -1091,6 +1205,7 @@
     var actBtn = e.target.closest('.action-btn[data-action]');
     if (actBtn) {
       var action = actBtn.getAttribute('data-action');
+      closeToolbarMenus();
       if (action === 'cancel') {
         doCancel();
       } else if (action === 'qr') {
@@ -1128,6 +1243,8 @@
     for (var i = 0; i < btns.length; i++) {
       btns[i].classList.toggle('active', btns[i].getAttribute('data-tool') === S.tool);
     }
+    var hiddenToolSelected = annotationMenu && annotationMenu.querySelector('.tool-btn[data-tool].active');
+    if (btnToolMore) btnToolMore.classList.toggle('active', !!hiddenToolSelected);
     selectionEl.classList.toggle('annotating', !!S.tool);
     // 选择工具用默认箭头光标（覆盖 annotating 的十字光标）；其它工具回退到样式表
     annoCanvas.style.cursor = S.tool === 'select' ? 'default' : '';
@@ -2824,6 +2941,11 @@
 
     if (keyMatches(e, KEYS.cancel)) {
       e.preventDefault();
+      // 更多菜单优先收起；再次按 Esc 才继续关闭面板或取消截图。
+      if (hasOpenToolbarMenu()) {
+        closeToolbarMenus();
+        return;
+      }
       // 折线绘制中：Esc 先取消当前折线
       if (S.cur && S.cur.type === 'polyline') {
         cancelPolyline();
@@ -2840,6 +2962,11 @@
         closeAIPanel();
         return;
       }
+      if (S.axMode) {
+        disableAx();
+        showTip('已退出智能框选');
+        return;
+      }
       // 有选中标注时，Esc 先取消选中而非关闭截图
       if (S.tool === 'select' && S.selected) {
         setSelected(null);
@@ -2848,6 +2975,15 @@
       doCancel();
       return;
     }
+
+    // 让工具栏按钮/下拉框自行处理 Enter、Space 与方向键，避免误执行默认截图动作或选区微调。
+    var toolbarControl = e.target && e.target.closest ? e.target.closest('button, select, input, textarea') : null;
+    if (toolbarControl && toolbar.contains(toolbarControl)) {
+      var isEditableControl = toolbarControl.tagName === 'SELECT' || toolbarControl.tagName === 'INPUT' || toolbarControl.tagName === 'TEXTAREA';
+      var isControlKey = e.key === 'Enter' || e.key === ' ' || e.key.indexOf('Arrow') === 0;
+      if (isEditableControl || isControlKey) return;
+    }
+
     if (keyMatches(e, KEYS.confirm)) {
       e.preventDefault();
       // 折线绘制中：Enter 完成折线
@@ -2996,12 +3132,17 @@
     S.axFrame = null;
     axHighlight.hidden = true;
   }
+  function disableAx() {
+    S.axMode = false;
+    setSelectionOptionActive(btnAx, false);
+    hideAx();
+  }
   function toggleAx() {
-    S.axMode = !S.axMode;
-    btnAx.classList.toggle('active', S.axMode);
-    if (!S.axMode) {
-      hideAx();
+    if (S.axMode) {
+      disableAx();
     } else {
+      S.axMode = true;
+      setSelectionOptionActive(btnAx, true);
       S.axErrShown = false;
       hideAx();
       showTip('UI识别已开：悬停高亮元素，点击框选（仅 macOS）');
@@ -3016,7 +3157,7 @@
     };
   }
   async function probeAx(e) {
-    if (!S.axMode || S.axBusy || S.finished || S.aiOpen || S.rect || S.selecting || S.dragMode || S.drawing) return;
+    if (!S.axMode || S.axBusy || S.finished || S.aiOpen || S.selecting || S.dragMode || S.drawing) return;
     var now = Date.now();
     if (now - S.axLast < 150) return; // 节流 150ms
     S.axLast = now;
@@ -3024,7 +3165,7 @@
     try {
       var r = await kkapi.axAtPoint({ x: e.screenX, y: e.screenY });
       S.axBusy = false;
-      if (!S.axMode || S.rect) return;
+      if (!S.axMode) return;
       if (r && r.error) {
         if (!S.axErrShown) {
           S.axErrShown = true;
@@ -3055,8 +3196,9 @@
   // 边框/阴影三态（PixPin 式：无 → 边框 → 阴影）
   btnFrame.addEventListener('click', function () {
     S.frameStyle = (S.frameStyle + 1) % 3;
-    btnFrame.classList.toggle('active', S.frameStyle > 0);
+    setSelectionOptionActive(btnFrame, S.frameStyle > 0);
     btnFrame.title = ['边框/阴影（当前：无）', '边框/阴影（当前：边框）', '边框/阴影（当前：阴影）'][S.frameStyle];
+    btnFrame.setAttribute('aria-label', btnFrame.title);
     showTip(['已关闭边框/阴影', '已开启边框', '已开启阴影'][S.frameStyle]);
   });
 
@@ -3067,11 +3209,11 @@
     } else {
       S.ratioLock = S.rect && S.rect.height > 0 ? S.rect.width / S.rect.height : 1;
     }
-    btnRatioLock.classList.toggle('active', !!S.ratioLock);
+    setSelectionOptionActive(btnRatioLock, !!S.ratioLock);
   });
   btnRounded.addEventListener('click', function () {
     S.rounded = !S.rounded;
-    btnRounded.classList.toggle('active', S.rounded);
+    setSelectionOptionActive(btnRounded, S.rounded);
     updateSelectionView(); // 选区预览同步圆角
   });
   // ================= 截图历史浏览 / 选区历史（PixPin 式 < > / R）=================
@@ -3200,6 +3342,8 @@
   // 右键 → 取消
   document.addEventListener('contextmenu', function (e) {
     e.preventDefault();
+    if (hasOpenToolbarMenu()) { closeToolbarMenus(); return; }
+    if (S.axMode) { disableAx(); showTip('已退出智能框选'); return; }
     // 内联 AI 面板打开时，右键应只关面板（与 Esc 一致），不要取消整张截图、丢掉选区和标注。
     if (S.aiOpen) { closeAIPanel(); return; }
     doCancel();

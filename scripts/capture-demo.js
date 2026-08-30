@@ -24,7 +24,13 @@ const TEMP_ROOT = fs.mkdtempSync(TEMP_PREFIX);
 const STAGE_DIR = path.join(TEMP_ROOT, 'stage');
 const FRAME_DIR = path.join(TEMP_ROOT, 'frames');
 const PRELOAD_PATH = path.join(TEMP_ROOT, 'demo-preload.cjs');
-const VIEWPORT = { width: 1600, height: 1000 };
+const viewportMatch = String(process.env.KK_DEMO_VIEWPORT || '').match(/^(\d+)x(\d+)$/i);
+const VIEWPORT = viewportMatch
+  ? { width: Number(viewportMatch[1]), height: Number(viewportMatch[2]) }
+  : { width: 1600, height: 1000 };
+if (VIEWPORT.width < 800 || VIEWPORT.height < 600) {
+  throw new Error(`Demo viewport is too small: ${VIEWPORT.width}x${VIEWPORT.height}`);
+}
 
 fs.mkdirSync(STAGE_DIR, { recursive: true, mode: 0o700 });
 fs.mkdirSync(FRAME_DIR, { recursive: true, mode: 0o700 });
@@ -172,12 +178,15 @@ const DEMO_IMAGES = [
 
 function createPreloadSource() {
   const images = JSON.stringify(DEMO_IMAGES);
+  const viewport = JSON.stringify(VIEWPORT);
   return `'use strict';
 const { contextBridge } = require('electron');
 const kindArg = process.argv.find((arg) => arg.indexOf('--kk-demo-kind=') === 0) || '--kk-demo-kind=main';
 const kind = kindArg.slice('--kk-demo-kind='.length);
 const images = ${images};
+const viewport = ${viewport};
 const listeners = { stream: [], history: [], nav: [] };
+const telemetry = { finishCapture: 0, cancelCapture: 0 };
 const config = {
   shortcuts: {
     capture: 'CommandOrControl+Shift+A',
@@ -228,7 +237,7 @@ const api = {
   setConfig: async () => clone(config),
   onInit: (cb) => {
     const payload = kind === 'overlay'
-      ? { dataURL: images[0], width: 1600, height: 1000, scaleFactor: 1, displayId: 'public-demo', displayBounds: { x: 0, y: 0, width: 1600, height: 1000 }, mode: 'region' }
+      ? { dataURL: images[0], width: viewport.width, height: viewport.height, scaleFactor: 1, displayId: 'public-demo', displayBounds: { x: 0, y: 0, width: viewport.width, height: viewport.height }, mode: 'region' }
       : { page: kind === 'ai' ? 'ai' : 'capture' };
     const timer = setTimeout(() => cb(clone(payload)), 0);
     return () => clearTimeout(timer);
@@ -249,8 +258,9 @@ const api = {
   captureTimed: async () => ({ ok: true }),
   captureRegion: async () => images[0],
   getSources: async () => [],
-  finishCapture: async () => ({ ok: true }),
-  cancelCapture: async () => ({ ok: true }),
+  finishCapture: async () => { telemetry.finishCapture += 1; return { ok: true }; },
+  cancelCapture: async () => { telemetry.cancelCapture += 1; return { ok: true }; },
+  getDemoTelemetry: async () => clone(telemetry),
   copyImage: async () => ({ ok: true }),
   copyText: async () => ({ ok: true }),
   readClipboardImage: async () => null,
@@ -262,7 +272,7 @@ const api = {
   pinStartDrag: async () => ({ ok: true }),
   runOCR: async () => ({ text: 'Privacy-safe demo\\nCapture → Annotate → Review' }),
   ocrBoxes: async () => ({ boxes: [] }),
-  axAtPoint: async () => null,
+  axAtPoint: async () => ({ frame: { x: 120, y: 100, w: 420, h: 260 } }),
   translateLines: async () => ({ text: '' }),
   askImage: async (payload) => {
     emitStream(payload.streamId, ['这是一个隐私安全的公开演示画布。', '截图工具已经完成选区和标注，', '你可以继续使用 OCR、翻译、总结或问图。']);
@@ -456,6 +466,186 @@ async function captureOverlay(frames) {
   }
 }
 
+async function probeOverlayToolbar() {
+  const win = await createDemoWindow('overlay', path.join('overlay', 'overlay.html'), {
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+  });
+  try {
+    await waitFor(win, `document.getElementById('bgCanvas') && document.getElementById('bgCanvas').width === 1600`);
+    const start = { x: Math.round(VIEWPORT.width * 0.16), y: Math.round(VIEWPORT.height * 0.14) };
+    const end = { x: Math.round(VIEWPORT.width * 0.82), y: Math.round(VIEWPORT.height * 0.64) };
+    await dispatchMouse(win, null, 'mousedown', start.x, start.y, 1);
+    await dispatchMouse(win, null, 'mousemove', end.x, end.y, 1);
+    await dispatchMouse(win, null, 'mouseup', end.x, end.y, 0);
+    await waitFor(win, `!document.getElementById('toolbar').hidden`);
+
+    const measure = async (menuId) => win.webContents.executeJavaScript(`(() => {
+      const roundRect = (rect) => ({
+        left: Math.round(rect.left * 100) / 100,
+        top: Math.round(rect.top * 100) / 100,
+        right: Math.round(rect.right * 100) / 100,
+        bottom: Math.round(rect.bottom * 100) / 100,
+        width: Math.round(rect.width * 100) / 100,
+        height: Math.round(rect.height * 100) / 100
+      });
+      const visible = (node) => {
+        const style = getComputedStyle(node);
+        return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0;
+      };
+      const root = ${JSON.stringify(menuId)} ? document.getElementById(${JSON.stringify(menuId)}) : document.getElementById('toolbar');
+      const labels = Array.from(root.querySelectorAll('span'))
+        .filter((span) => visible(span) && span.textContent.trim())
+        .map((span) => {
+          const range = document.createRange();
+          range.selectNodeContents(span);
+          const lineRects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
+          const owner = span.closest('button, label') || span.parentElement;
+          const labelRect = span.getBoundingClientRect();
+          const ownerRect = owner.getBoundingClientRect();
+          return {
+            text: span.textContent.trim(),
+            lineCount: lineRects.length,
+            clipped: labelRect.left < ownerRect.left - 0.5 || labelRect.right > ownerRect.right + 0.5 || labelRect.top < ownerRect.top - 0.5 || labelRect.bottom > ownerRect.bottom + 0.5,
+            whiteSpace: getComputedStyle(span).whiteSpace
+          };
+        });
+      const toolbar = document.getElementById('toolbar');
+      const menu = ${JSON.stringify(menuId)} ? document.getElementById(${JSON.stringify(menuId)}) : null;
+      return {
+        viewport: { width: innerWidth, height: innerHeight },
+        toolbar: roundRect(toolbar.getBoundingClientRect()),
+        toolbarScrollWidth: toolbar.scrollWidth,
+        menu: menu && visible(menu) ? roundRect(menu.getBoundingClientRect()) : null,
+        menuClientHeight: menu && visible(menu) ? menu.clientHeight : null,
+        menuScrollHeight: menu && visible(menu) ? menu.scrollHeight : null,
+        menuOverflowY: menu && visible(menu) ? getComputedStyle(menu).overflowY : null,
+        labels,
+        actions: Array.from(toolbar.querySelectorAll('[data-action]'), (node) => node.dataset.action).sort()
+      };
+    })()`, true);
+
+    const base = await measure('');
+    await win.webContents.executeJavaScript(`document.getElementById('btnActionMore').click()`, true);
+    const action = await measure('actionMenu');
+    await win.webContents.executeJavaScript(`document.getElementById('btnToolMore').click()`, true);
+    const annotation = await measure('annotationMenu');
+
+    const keyboardGuard = await win.webContents.executeJavaScript(`(() => {
+      document.getElementById('btnToolMore').click();
+      const button = document.getElementById('btnActionMore');
+      button.focus();
+      const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+      button.dispatchEvent(event);
+      return { defaultPrevented: event.defaultPrevented, expanded: button.getAttribute('aria-expanded') };
+    })()`, true);
+    await delay(20);
+    const keyboardTelemetry = await win.webContents.executeJavaScript(`window.kkapi.getDemoTelemetry()`, true);
+
+    const options = await win.webContents.executeJavaScript(`(() => {
+      const more = document.getElementById('btnActionMore');
+      const ratio = document.getElementById('btnRatioLock');
+      const rounded = document.getElementById('btnRounded');
+      const frame = document.getElementById('btnFrame');
+      const ax = document.getElementById('btnAx');
+      more.click();
+      ratio.click();
+      const ratioOn = ratio.getAttribute('aria-pressed') === 'true' && more.classList.contains('has-active-option');
+      ratio.click();
+      rounded.click();
+      const roundedOn = rounded.getAttribute('aria-pressed') === 'true' && more.classList.contains('has-active-option');
+      rounded.click();
+      frame.click();
+      const frameBorder = frame.getAttribute('aria-pressed') === 'true' && frame.title.includes('当前：边框');
+      frame.click();
+      const frameShadow = frame.getAttribute('aria-pressed') === 'true' && frame.title.includes('当前：阴影');
+      frame.click();
+      const frameOff = frame.getAttribute('aria-pressed') === 'false';
+      ax.click();
+      return {
+        ratioOn,
+        roundedOn,
+        frameBorder,
+        frameShadow,
+        frameOff,
+        axOn: ax.getAttribute('aria-pressed') === 'true',
+        actionMenuClosedForAx: document.getElementById('actionMenu').hidden
+      };
+    })()`, true);
+    await dispatchMouse(win, null, 'mousemove', 200, 150, 0);
+    await waitFor(win, `!document.getElementById('axHighlight').hidden`);
+    await dispatchMouse(win, null, 'mousedown', 200, 150, 1);
+    await dispatchMouse(win, null, 'mouseup', 200, 150, 0);
+    const axSelection = await win.webContents.executeJavaScript(`(() => {
+      const rect = document.getElementById('selection').getBoundingClientRect();
+      return {
+        rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
+        axPressed: document.getElementById('btnAx').getAttribute('aria-pressed'),
+        toolbarVisible: !document.getElementById('toolbar').hidden
+      };
+    })()`, true);
+
+    // Exercise the difficult case from the real overlay: a short display, a
+    // small selection in the vertical middle, and a QR item appearing after
+    // the action menu has already opened.
+    const middleStart = { x: VIEWPORT.width - 190, y: Math.round(VIEWPORT.height * 0.36) };
+    const middleEnd = { x: VIEWPORT.width - 20, y: middleStart.y + 60 };
+    await dispatchMouse(win, null, 'mousedown', middleStart.x, middleStart.y, 1);
+    await dispatchMouse(win, null, 'mousemove', middleEnd.x, middleEnd.y, 1);
+    await dispatchMouse(win, null, 'mouseup', middleEnd.x, middleEnd.y, 0);
+    await waitFor(win, `!document.getElementById('toolbar').hidden`);
+    await win.webContents.executeJavaScript(`(() => {
+      document.getElementById('btnActionMore').click();
+      document.getElementById('btnQR').hidden = false;
+    })()`, true);
+    await delay(30);
+    const middleAction = await measure('actionMenu');
+
+    const failures = [];
+    const expectedActions = ['ask', 'cancel', 'copy', 'formula', 'ocr', 'pin', 'polish', 'qr', 'quickSave', 'save', 'table', 'translate'];
+    if (JSON.stringify(base.actions) !== JSON.stringify(expectedActions)) failures.push(`action contract changed: ${base.actions.join(',')}`);
+    if (base.toolbar.left < 1 || base.toolbar.right > base.viewport.width - 1) failures.push(`toolbar leaves viewport: ${JSON.stringify(base.toolbar)}`);
+    if (base.toolbar.height > 46) failures.push(`toolbar is no longer a compact single row: ${base.toolbar.height}px`);
+    if (base.toolbar.width > Math.min(1000, base.viewport.width - 4)) failures.push(`toolbar is too wide: ${base.toolbar.width}px`);
+    if (base.toolbarScrollWidth > Math.ceil(base.toolbar.width) + 1) failures.push(`toolbar content overflows: ${base.toolbarScrollWidth}/${base.toolbar.width}`);
+    for (const sample of [base, action, annotation]) {
+      for (const label of sample.labels) {
+        if (label.lineCount !== 1 || label.clipped || label.whiteSpace !== 'nowrap') {
+          failures.push(`label layout failed for ${label.text}: ${JSON.stringify(label)}`);
+        }
+      }
+    }
+    for (const sample of [action, annotation]) {
+      if (!sample.menu) failures.push('toolbar menu did not open');
+      else if (sample.menu.left < 1 || sample.menu.top < 1 || sample.menu.right > sample.viewport.width - 1 || sample.menu.bottom > sample.viewport.height - 1) {
+        failures.push(`toolbar menu leaves viewport: ${JSON.stringify(sample.menu)}`);
+      }
+      if (Math.abs(sample.toolbar.width - base.toolbar.width) > 0.5) failures.push('opening a menu changed toolbar width');
+    }
+    if (!middleAction.menu || middleAction.menu.left < 1 || middleAction.menu.top < 1 || middleAction.menu.right > middleAction.viewport.width - 1 || middleAction.menu.bottom > middleAction.viewport.height - 1) {
+      failures.push(`middle selection menu leaves viewport: ${JSON.stringify(middleAction.menu)}`);
+    }
+    if (middleAction.menuScrollHeight > middleAction.menuClientHeight && middleAction.menuOverflowY !== 'auto') {
+      failures.push(`constrained menu is not scrollable: ${JSON.stringify({ client: middleAction.menuClientHeight, scroll: middleAction.menuScrollHeight, overflow: middleAction.menuOverflowY })}`);
+    }
+    if (keyboardGuard.defaultPrevented || keyboardTelemetry.finishCapture || keyboardTelemetry.cancelCapture) {
+      failures.push(`toolbar keyboard focus triggered a capture action: ${JSON.stringify({ keyboardGuard, keyboardTelemetry })}`);
+    }
+    for (const [name, passed] of Object.entries(options)) {
+      if (!passed) failures.push(`toolbar option interaction failed: ${name}`);
+    }
+    if (axSelection.rect.x !== 120 || axSelection.rect.y !== 100 || axSelection.rect.width !== 420 || axSelection.rect.height !== 260) {
+      failures.push(`smart selection did not replace the current region: ${JSON.stringify(axSelection.rect)}`);
+    }
+    if (axSelection.axPressed !== 'false' || !axSelection.toolbarVisible) failures.push(`smart selection did not return to the toolbar: ${JSON.stringify(axSelection)}`);
+    if (failures.length) throw new Error(failures.join(' | '));
+    return { viewport: base.viewport, toolbar: base.toolbar, actionMenu: action.menu, annotationMenu: annotation.menu, middleActionMenu: middleAction.menu, options, axSelection };
+  } finally {
+    win.destroy();
+  }
+}
+
 async function captureAi(frames) {
   const win = await createDemoWindow('ai', path.join('main', 'main.html'));
   try {
@@ -585,6 +775,11 @@ function cleanupTemp() {
 async function main() {
   fs.writeFileSync(PRELOAD_PATH, createPreloadSource(), { mode: 0o600 });
   await app.whenReady();
+  if (process.argv.includes('--check-overlay-toolbar')) {
+    const report = await probeOverlayToolbar();
+    process.stdout.write(`OVERLAY_TOOLBAR_CHECK ${JSON.stringify(report)}\n`);
+    return;
+  }
   const frames = [];
   await captureMain(frames);
   await captureOverlay(frames);

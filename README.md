@@ -132,7 +132,7 @@ env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron scripts/capture-demo.js
 
 自动测试无法替代屏幕权限、多显示器、全局快捷键、OCR、录屏、贴图拖拽和 Apple 分发链路的真机验证。准备发布时请逐项执行 [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md)，并把实际证据写入发布说明。
 
-`npm run dist:mac:local`（`dist:mac` 为兼容别名）只生成明确无签名、无公证的本地测试包。`npm run dist:mac:release` 才是失败关闭的正式签名与公证入口，并会在构建后验证产物。凭据、操作和真机证据要求见 [macOS 发布指南](docs/MACOS_RELEASE.md)。仓库目前提供的是流水线与校验逻辑，没有可用来证明已发布的 Apple 凭据、签名/公证记录或经验证的正式产物。
+`npm run dist:mac:local`（`dist`、`dist:mac` 为兼容别名）默认使用本机配置的固定代码签名证书生成稳定本地包，并在构建后验证签名。该路径不公证、不启用 Hardened Runtime，目的是让同一台 Mac 上的开发安装在更新后继续匹配屏幕录制等 TCC 权限；它不是 Developer ID 分发签名，也不能作为 Gatekeeper 或正式发布证据。一次性隔离测试可用 `npm run dist:mac:adhoc`，但其 ad-hoc 身份不稳定，不能覆盖日常安装版本、不能用于安装更新，也不能保留 TCC 权限。只有 `npm run dist:mac:release` 是失败关闭的 Developer ID、Hardened Runtime 与 Apple 公证入口。首次配置、凭据和真机证据要求见 [本机构建签名指南](docs/MACOS_LOCAL_BUILD.md) 与 [macOS 发布指南](docs/MACOS_RELEASE.md)。仓库目前没有可用来证明已正式发布的 Apple 凭据、公证记录或经验证正式产物。
 
 ## 已知限制
 

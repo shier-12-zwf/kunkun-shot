@@ -31,6 +31,21 @@ test('all screen capture entry points use the deterministic source matcher', () 
   assert.match(serialized, /serializeCaptureSources\(/);
 });
 
+test('screen capture reaches the real API when permission is undetermined and centralizes permission UI', () => {
+  assert.match(mainSource, /require\(['"]\.\/screen-permission['"]\)/);
+  assert.match(mainSource, /async function getScreenCaptureSources\(/);
+  assert.doesNotMatch(mainSource, /function checkScreenPermission\(/);
+
+  const grab = between('async function grabDisplay()', 'function grabWindowFrame');
+  assert.match(grab, /getScreenCaptureSources\(/);
+  assert.doesNotMatch(grab, /showMessageBox|showErrorBox/);
+
+  const start = between('async function startCapture(mode, options = {})', 'function pinFromClipboard');
+  assert.match(start, /isScreenPermissionError\(e\)/);
+  assert.match(start, /showScreenPermissionDialog\(e\.status\)/);
+  assert.doesNotMatch(start, /如果在 macOS 上/);
+});
+
 test('timed captures are scheduled and canceled by the main process', () => {
   assert.match(channelsSource, /CAPTURE_TIMED_CANCEL:\s*'capture:timed-cancel'/);
   assert.match(preloadSource, /cancelTimedCapture:\s*\([^)]*\)\s*=>\s*ipcRenderer\.invoke\(C\.CAPTURE_TIMED_CANCEL/);

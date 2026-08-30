@@ -1,8 +1,8 @@
 # macOS 构建、签名与公证 / macOS Build, Signing, and Notarization
 
-这个项目有两条刻意分开的 macOS 打包路径。本地包只用于开发验证；正式包必须签名、公证并通过产物校验。
+这个项目有三条刻意分开的 macOS 打包路径：默认本地包使用固定的本机证书稳定签名；ad-hoc 包只用于一次性隔离测试；正式包必须使用 Developer ID、Hardened Runtime 和 Apple 公证，并通过产物校验。
 
-This project deliberately separates two macOS packaging paths. Local artifacts are for development only; formal artifacts must be signed, notarized, and pass artifact verification.
+This project deliberately separates three macOS packaging paths: the default local build uses a fixed local certificate for a stable identity, the ad-hoc build is only for one-off isolated tests, and formal artifacts require Developer ID, Hardened Runtime, Apple notarization, and artifact verification.
 
 ## 0. 工具链前置检查 / Toolchain prerequisites
 
@@ -13,17 +13,35 @@ This project deliberately separates two macOS packaging paths. Local artifacts a
 
 Use Node.js `>=22.12.0`, and make sure `node` and `npm` resolve through the same installation. Packaging compiles the `axprobe` and `vision-boxes` Swift helpers, so a complete, internally consistent Xcode or Command Line Tools installation is required. When multiple Xcode installations exist, scope `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` to the build command instead of changing global `xcode-select` state. Duplicate `SwiftBridging` or SDK module-map errors indicate a damaged or mixed toolchain that should be repaired or reinstalled, not worked around by deleting SDK files.
 
-## 1. 本地无签名构建 / Local unsigned build
+## 1. 稳定本地签名构建 / Stable local-signed build
 
 ```bash
 npm run dist:mac:local
 ```
 
-这个命令同时关闭签名身份自动发现和公证，也不会发布产物。`npm run dist` 与兼容别名 `npm run dist:mac` 都指向这条本地路径。成功只说明“打包完成”，不能声称 Apple 签名、公证或 Gatekeeper 兼容。
+`npm run dist` 与兼容别名 `npm run dist:mac` 都指向这条默认本地路径。它要求通过 `KK_MAC_SIGNING_IDENTITY` 配置一项钥匙串中存在且带私钥的固定代码签名身份，并把产物写入 `dist/local-signed-mac`。构建完成后会验证未打包应用、DMG 和 ZIP 内应用都锚定到该证书；也可单独执行：
 
-This command disables identity auto-discovery and notarization and never publishes artifacts. `npm run dist` and the compatibility alias `npm run dist:mac` both use this local path. Success means only that packaging completed; it is not evidence of Apple signing, notarization, or Gatekeeper acceptance.
+```bash
+npm run verify:mac:local
+```
 
-## 2. 正式发布构建 / Formal release build
+本地签名路径明确关闭公证、Hardened Runtime 和时间戳，也不会发布产物。固定证书让同一台 Mac 上的开发安装在更新后仍能匹配屏幕录制、辅助功能、麦克风等 TCC 权限；它不是 Developer ID 分发签名，不能证明 Gatekeeper 兼容或正式发布。配置步骤见 [本机构建签名指南](MACOS_LOCAL_BUILD.md)。
+
+`npm run dist` and the compatibility alias `npm run dist:mac` both use this default local path. It requires `KK_MAC_SIGNING_IDENTITY` to resolve to one fixed keychain code-signing identity with a private key, writes artifacts to `dist/local-signed-mac`, and verifies that the unpacked app and the apps inside the DMG and ZIP are anchored to that certificate. `npm run verify:mac:local` can repeat the verification independently.
+
+The local-signed path explicitly disables notarization, Hardened Runtime, and timestamping, and it never publishes artifacts. The fixed certificate lets development installs on the same Mac continue to match Screen Recording, Accessibility, microphone, and other TCC permissions after an update. It is not a Developer ID distribution signature and is not evidence of Gatekeeper acceptance or a formal release. See the [local signing guide](MACOS_LOCAL_BUILD.md) for setup.
+
+## 2. 临时 ad-hoc 构建 / Temporary ad-hoc build
+
+```bash
+npm run dist:mac:adhoc
+```
+
+这条入口明确禁用稳定签名与公证，只适合不需要保留权限的一次性隔离测试。ad-hoc 指定要求会绑定到随构建变化的 CDHash；不要用其产物覆盖日常安装版本、交付安装更新或测试 TCC 权限延续性，否则 macOS 可能继续显示开关已开启，但新构建仍无法匹配旧权限记录。
+
+This entry explicitly disables stable signing and notarization and is only for one-off isolated tests that do not need retained permissions. Its ad-hoc designated requirement is tied to a build-specific CDHash. Never use it to replace the day-to-day install, deliver an update, or test TCC continuity: macOS can leave a permission switch visibly enabled while the new build no longer matches the stored requirement.
+
+## 3. 正式发布构建 / Formal release build
 
 ```bash
 npm run dist:mac:release
@@ -57,7 +75,7 @@ Partial credentials, mixed credential families, `CSC_NAME=-`, a non-macOS host, 
 
 The formal config enables Hardened Runtime and sets `forceCodeSigning: true` and `mac.notarize: true`. After `electron-builder` succeeds, the same command verifies the unpacked app and the app inside each DMG/ZIP, checks Developer ID (not ad-hoc), Team ID, Hardened Runtime, `codesign`, Gatekeeper, the stapled ticket, DMG/ZIP integrity and safe ZIP paths, then prints SHA-256 hashes.
 
-## 3. 独立重验 / Independent re-verification
+## 4. 正式产物独立重验 / Independent formal-artifact re-verification
 
 若产物仍在默认目录：
 

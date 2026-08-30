@@ -10,9 +10,9 @@ This checklist intentionally separates automated evidence from hands-on validati
 - `[x]`：已在待发布提交或产物上完成，并在发布记录中附有证据。/ Completed against the release commit or artifact, with evidence recorded in the release notes.
 - 不允许以“代码看起来没问题”代替真机验收。/ Code inspection is not a substitute for hands-on acceptance.
 
-> 截至本次源码盘点，仓库只提供正式签名/公证流水线与自动校验，没有 Apple 凭据、公证记录或经验证正式产物。流水线存在不得被视为已签名、已公证或已发布的证据。
+> 仓库同时提供稳定本地签名、临时 ad-hoc 与正式发布流水线。本地证书签名只用于维持同一台 Mac 上的开发安装身份，不等于 Developer ID、Apple 公证或正式发布。当前没有 Apple 凭据、公证记录或经验证正式产物；流水线存在不得被视为已正式签名、已公证或已发布的证据。
 >
-> As of this source audit, the repository provides a formal signing/notarization pipeline and automated verification only; it contains no Apple credentials, notarization record, or verified formal artifact. Pipeline availability is not evidence that a release is signed, notarized, or published.
+> The repository provides stable local-signing, temporary ad-hoc, and formal-release pipelines. A local-certificate signature only preserves development-install identity on the same Mac; it is not Developer ID, Apple notarization, or a formal release. There are currently no Apple credentials, notarization records, or verified formal artifacts, and pipeline availability is not evidence that a formal release is signed, notarized, or published.
 
 ## 1. 源码与自动化验证 / Source and automated verification
 
@@ -30,7 +30,7 @@ This checklist intentionally separates automated evidence from hands-on validati
 - [ ] 启动参数解析与单实例路由回归通过；未知、重复、越界参数均失败关闭。/ Launch-argument parsing and single-instance routing regressions pass; unknown, duplicate, and out-of-range values fail closed.
 - [ ] 对当前树和完整 Git 历史执行秘密扫描，人工审阅疑似命中；输出不得泄露秘密。/ Scan the current tree and full Git history for secrets, manually review findings, and never print secret values.
 - [ ] 检查仓库中没有本地配置、证书、签名身份、用户历史或未授权截图。/ Confirm no local configuration, certificates, signing identities, user history, or unauthorized captures are tracked.
-- [ ] macOS 发布链路回归测试通过：本地构建明确禁用签名/公证，正式构建对缺失或混用凭据失败关闭。/ macOS release-pipeline regressions pass: local builds explicitly disable signing/notarization, and formal builds fail closed for missing or mixed credentials.
+- [ ] macOS 构建链路回归通过：`dist:mac:local` 要求稳定本地证书并关闭公证/Hardened Runtime，`dist:mac:adhoc` 明确隔离，`dist:mac:release` 对缺失或混用凭据失败关闭。/ macOS pipeline regressions pass: `dist:mac:local` requires a stable local certificate with notarization/Hardened Runtime off, `dist:mac:adhoc` remains explicitly isolated, and `dist:mac:release` fails closed for missing or mixed credentials.
 
 ## 2. 真机功能验收（macOS）/ Hands-on functional acceptance (macOS)
 
@@ -39,7 +39,7 @@ This checklist intentionally separates automated evidence from hands-on validati
 All items below are manual and remain unverified until exercised on a real Mac; automated tests do not complete them.
 
 - [ ] 在一个干净的 macOS 用户数据目录首次启动，主窗口与菜单栏入口正常。/ First launch works with a clean macOS user-data directory; main window and menu-bar entry are usable.
-- [ ] 屏幕录制权限未授予时提示准确；授权并重启后恢复。/ Missing Screen Recording permission produces accurate guidance and works after permission plus restart.
+- [ ] 屏幕录制权限未授予时提示准确；授权并重启后恢复；用同一证书构建并安装本地更新后，指定要求仍锚定到相同证书且权限继续生效。/ Missing Screen Recording permission produces accurate guidance and works after permission plus restart; after installing a local update built with the same certificate, its designated requirement remains anchored to that certificate and permission still works.
 - [ ] 单显示器与多显示器分别验证区域、窗口、全屏、3/5/10 秒及自定义延时截图。/ Verify region, window, full-screen, 3/5/10-second, and custom timed capture on single- and multi-display setups.
 - [ ] 验证矩形、椭圆、箭头、直线、画笔、高亮、折线、文字、马赛克、序号、撤销与重做。/ Verify rectangle, ellipse, arrow, line, pen, highlight, polyline, text, mosaic, numbered marker, undo, and redo.
 - [ ] 验证复制、另存、快速保存与 PNG/JPEG/WebP/BMP/AVIF/PDF 导出；用 Preview/Finder 重新打开产物，确认扩展名与实际内容一致。/ Verify copy, Save As, quick save, and PNG/JPEG/WebP/BMP/AVIF/PDF export; reopen artifacts in Preview/Finder and confirm extensions match the actual content.
@@ -78,8 +78,9 @@ All items below are manual and remain unverified until exercised on a real Mac; 
 - [ ] 含 `ffmpeg-static`/FFmpeg 的产物已满足适用的 GPL/FFmpeg 声明、许可证文本及源码提供义务。/ Artifacts containing `ffmpeg-static`/FFmpeg satisfy applicable GPL/FFmpeg notice, license-text, and source-offer obligations.
 - [ ] Electron、Chromium、Node.js 及其他第三方许可证文件在产物中保留。/ Electron, Chromium, Node.js, and other required third-party notices are retained.
 - [ ] 对 `.app`、DMG 和 ZIP 分别执行完整性检查；哈希写入发布说明。/ Check `.app`, DMG, and ZIP integrity and publish hashes.
-- [ ] 若声称签名或公证，使用 `codesign`、Gatekeeper 与 Apple 公证结果在另一台 Mac 上独立验证；否则发布页显著写明“未签名/未公证”。/ If signing or notarization is claimed, independently verify with `codesign`, Gatekeeper, Apple notarization results, and another Mac; otherwise prominently label the release unsigned/not notarized.
-- [ ] 本地测试包只通过 `npm run dist:mac:local` 生成，且未被上传或标记为正式发布。/ Local test artifacts were built only through `npm run dist:mac:local` and were neither uploaded nor labeled as a formal release.
+- [ ] 对外正式产物使用 `codesign`、Gatekeeper 与 Apple 公证结果在另一台 Mac 上独立验证；不得用本地证书签名冒充 Developer ID 或公证证据。/ Independently verify public formal artifacts with `codesign`, Gatekeeper, Apple notarization results, and another Mac; never present a local-certificate signature as Developer ID or notarization evidence.
+- [ ] 本地测试包通过 `npm run dist:mac:local` 生成，校验输出确认所有应用都锚定到预期固定证书且不含 Hardened Runtime；产物未被上传或标记为正式发布。/ Local test artifacts were built through `npm run dist:mac:local`; verification confirms every app is anchored to the expected fixed certificate and lacks Hardened Runtime; the artifacts were neither uploaded nor labeled as a formal release.
+- [ ] `npm run dist:mac:adhoc` 只用于一次性隔离测试；其产物未覆盖日常安装版本、未作为安装更新交付，也未用于判断 TCC 权限能否延续。/ `npm run dist:mac:adhoc` was used only for a one-off isolated test; its artifacts did not replace the day-to-day install, deliver an update, or serve as evidence of TCC continuity.
 - [ ] 正式产物使用 `npm run dist:mac:release` 在空的 `dist/release-mac` 目录生成；记录凭据方式名称，但不记录任何凭据值。/ Formal artifacts were produced by `npm run dist:mac:release` in an empty `dist/release-mac`; record credential method names, never credential values.
 - [ ] 保留构建后校验输出：未打包/DMG/ZIP 内应用的 Developer ID、Hardened Runtime、Gatekeeper 和 stapled ticket 验证，以及 DMG/ZIP 完整性与 SHA-256。/ Retain post-build evidence for Developer ID, Hardened Runtime, Gatekeeper, and stapled-ticket checks on unpacked/DMG/ZIP apps, plus DMG/ZIP integrity and SHA-256.
 - [ ] 从对外发布位置重新下载 DMG 和 ZIP，在另一台 Mac 上验证 Gatekeeper 首次打开和核心功能。/ Re-download the DMG and ZIP from the public release location and verify first launch through Gatekeeper and core functionality on another Mac.
