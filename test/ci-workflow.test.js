@@ -21,3 +21,15 @@ test('CI uses supported Node and runs unit plus Electron interaction checks', ()
   const packagedSmokeIndex = workflow.indexOf('run: npm run test:packaged');
   assert.ok(packageIndex >= 0 && packagedSmokeIndex > packageIndex);
 });
+
+test('CI retains source-bound native helpers only after packaging succeeds', () => {
+  assert.match(workflow, /uses:\s*actions\/upload-artifact@v7\.0\.1/);
+  assert.match(workflow, /name:\s*native-helpers-\$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /path:\s*dist\/ci-package\/mac\*\/困困截图工具\.app\/Contents\/Resources\/native-helpers\//);
+  assert.match(workflow, /if-no-files-found:\s*error/);
+  assert.match(workflow, /retention-days:\s*7/);
+
+  const packageIndex = workflow.indexOf('run: npm run dist:mac:ci');
+  const uploadIndex = workflow.indexOf('uses: actions/upload-artifact@v7.0.1');
+  assert.ok(packageIndex >= 0 && uploadIndex > packageIndex);
+});

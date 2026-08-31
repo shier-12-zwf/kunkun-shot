@@ -41,5 +41,13 @@ jobs:
       - name: Package macOS app without distribution credentials
         run: npm run dist:mac:ci
 
+      - name: Upload source-bound native helpers
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: native-helpers-${{ github.sha }}
+          path: dist/ci-package/mac*/困困截图工具.app/Contents/Resources/native-helpers/
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Smoke-test the packaged macOS app
         run: npm run test:packaged

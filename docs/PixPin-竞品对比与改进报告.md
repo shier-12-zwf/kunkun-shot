@@ -163,7 +163,7 @@ PixPin 的[2.3.8.0 官方日志](https://pixpin.cn/docs/official-log/2.3.8.0)明
 
 ### 本轮发布前的自动测试结果
 
-- 最新一次 `npm test`：**340 项，340 通过，0 失败**；`npm run test:all` 全链通过，包含源码态 Electron 正常/故障注入冒烟和截图工具栏交互检查；智能选区交互检查另行连续运行 10 次均通过。
+- 最新一次 `npm test`：**341 项，341 通过，0 失败**；`npm run test:all` 全链通过，包含源码态 Electron 正常/故障注入冒烟和截图工具栏交互检查；智能选区交互检查另行连续运行 10 次均通过。
 - 此前暴露的贴图菜单键盘操作和减少动效两项已经修复，相关测试均通过。
 - Swift helper 的受控安全复用回退及可访问性文字 JSON 序列化已经修复；单独运行 `test/swift-packaged-helpers.test.js` 为 **13/13 通过**。
 - `npm run dist:mac:ci` 已重新构建 **0.2.1** 目录包，并确认 Bundle ID 为 `com.kunkun.shot`、ATS 未允许任意网络载入、Electron 许可证齐全、Swift helper 的文件名源码哈希与 arm64 架构匹配；打包态 Electron 正常/故障注入冒烟也均通过。回退目录仍必须来自用户信任且已验证签名的旧构建。
