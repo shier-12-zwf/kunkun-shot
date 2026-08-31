@@ -9,6 +9,8 @@ const workflow = fs.readFileSync(
 );
 
 test('CI uses supported Node and runs unit plus Electron interaction checks', () => {
+  assert.match(workflow, /uses:\s*actions\/checkout@v7\.0\.1/);
+  assert.match(workflow, /uses:\s*actions\/setup-node@v7\.0\.0/);
   assert.match(workflow, /node-version:\s*22/);
   assert.match(workflow, /run:\s*npm run test:all/);
   assert.match(workflow, /run:\s*npm run dist:mac:ci/);
