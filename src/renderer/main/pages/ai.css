@@ -327,7 +327,6 @@
   gap: 7px;
   padding: 11px 13px;
   border: 1px solid rgba(240, 80, 110, .25);
-  border-left: 3px solid var(--danger);
   border-radius: var(--r-md);
   background: rgba(240, 80, 110, .07);
 }

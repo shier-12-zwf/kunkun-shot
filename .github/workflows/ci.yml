@@ -17,7 +17,7 @@ jobs:
   test:
     name: Test on macOS
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Check out repository
@@ -33,7 +33,13 @@ jobs:
         run: npm ci
 
       - name: Run tests
-        run: npm test
+        run: npm run test:all
 
       - name: Audit dependencies
         run: npm audit --audit-level=high
+
+      - name: Package macOS app without distribution credentials
+        run: npm run dist:mac:ci
+
+      - name: Smoke-test the packaged macOS app
+        run: npm run test:packaged

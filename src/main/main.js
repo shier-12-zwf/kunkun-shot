@@ -72,6 +72,7 @@ const {
   normalizeStreamId,
   normalizeChatRequest,
   normalizeProviderBaseUrl,
+  normalizeExternalHttpUrl,
   normalizeConfigPatch,
   normalizePinStateFlags,
   normalizeProviderTestTarget,
@@ -82,6 +83,17 @@ const { spawn } = require('child_process');
 const axprobe = require('./axprobe');
 const os = require('os');
 const { pathToFileURL, fileURLToPath } = require('url');
+const { openValidatedExternalUrl } = require('./external-url');
+
+async function openExternalHttpUrl(rawUrl) {
+  return openValidatedExternalUrl(rawUrl, {
+    normalizeUrl: normalizeExternalHttpUrl,
+    openExternal: (url) => shell.openExternal(url),
+    reportError: (error, url) => {
+      console.error('[external-url] 系统浏览器打开失败：', url, error);
+    },
+  });
+}
 
 // 自定义协议 kkthumb://<id> 专供历史缩略图：让渲染层 <img> 按需加载磁盘缩略图文件，
 // 而非把每张 base64 内联进 DOM（历史攒到成百上千条时内联会导致主进程同步读盘 + 跨进程序列化 +
@@ -94,6 +106,7 @@ protocol.registerSchemesAsPrivileged([
 // 自动化/冒烟测试必须与真实用户配置、历史和 API Key 完全隔离。该环境变量只由本地测试脚本设置，
 // 并且要在任何模块首次调用 app.getPath('userData') 前生效。
 let ownedSmokeUserData = null;
+let smokeExitCode = null;
 if (process.env.KK_TEST_USER_DATA_DIR || process.env.KK_SMOKE) {
   const isolatedUserData = process.env.KK_TEST_USER_DATA_DIR
     ? path.resolve(process.env.KK_TEST_USER_DATA_DIR)
@@ -1733,17 +1746,7 @@ function registerIpc() {
   });
 
   // 外链打开：只放行 http(s)，其它协议一律拒绝（防 file:// 等被利用）
-  ipcMain.handle(C.OPEN_EXTERNAL, (_e, url) => {
-    if (typeof url !== 'string' || url.length > 4096) return { ok: false };
-    try {
-      const parsed = new URL(url);
-      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return { ok: false };
-      shell.openExternal(parsed.toString()).catch(() => {});
-      return { ok: true };
-    } catch (_) {
-      return { ok: false };
-    }
-  });
+  ipcMain.handle(C.OPEN_EXTERNAL, (_e, url) => openExternalHttpUrl(url));
 
   ipcMain.handle(C.OPEN_MAIN, (_e, page) => {
     windows.hidePopover();
@@ -2152,14 +2155,14 @@ if (!gotLock) {
     const ALLOWED_FILE_PREFIX = pathToFileURL(RENDERER_ROOT + path.sep).toString();
     app.on('web-contents-created', (_e, contents) => {
       contents.setWindowOpenHandler(({ url }) => {
-        if (/^https?:/i.test(url)) shell.openExternal(url).catch(() => {});
+        void openExternalHttpUrl(url);
         return { action: 'deny' };
       });
       contents.on('will-navigate', (ev, url) => {
         const okLocal = url.startsWith('file:') && url.startsWith(ALLOWED_FILE_PREFIX);
         if (!okLocal) {
           ev.preventDefault();
-          if (/^https?:/i.test(url)) shell.openExternal(url).catch(() => {});
+          void openExternalHttpUrl(url);
         }
       });
     });
@@ -2197,9 +2200,14 @@ if (!gotLock) {
       }
     }
 
-    // 冒烟自检：仅在 KK_SMOKE 环境变量下激活，加载设置窗并收集渲染层错误后自动退出。
+    // 冒烟自检：仅在 KK_SMOKE 环境变量下激活。每个页面都必须达到可观察的
+    // 初始化状态才算通过；超时只用于判失败，不能再靠固定等待时间提前判绿。
     if (process.env.KK_SMOKE) {
       const problems = [];
+      const checks = [];
+      const smokeDeadline = Date.now() + 30_000;
+      // 只用于回归测试：证明自检发现问题时会以非 0 退出，不会“报错但仍假绿”。
+      if (process.env.KK_SMOKE_INJECT_PROBLEM) problems.push('[injected] smoke failure');
       app.on('web-contents-created', (_e, wc) => {
         wc.on('console-message', (...args) => {
           const d = args[1] && typeof args[1] === 'object'
@@ -2212,69 +2220,275 @@ if (!gotLock) {
         wc.on('render-process-gone', (_ev, details) => problems.push(`[render-gone] ${JSON.stringify(details)}`));
         wc.on('preload-error', (_ev, p, err) => problems.push(`[preload-error] ${p} ${err && err.message}`));
       });
+
+      const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const stateSummary = (state) => {
+        try { return JSON.stringify(state); } catch (_) { return String(state); }
+      };
+      const waitForCondition = async (name, inspect) => {
+        let lastState = '尚未执行';
+        while (Date.now() < smokeDeadline) {
+          try {
+            const state = await inspect();
+            if (state && state.ready === true) return state;
+            lastState = stateSummary(state);
+          } catch (error) {
+            lastState = error && error.message ? error.message : String(error);
+          }
+          await delay(40);
+        }
+        throw new Error(`等待就绪超时；最后状态：${lastState}`);
+      };
+      const waitForRenderer = (win, name, probe, ...args) => waitForCondition(name, async () => {
+        if (!win || win.isDestroyed()) return { ready: false, destroyed: true };
+        try {
+          const serializedArgs = args.map((arg) => JSON.stringify(arg)).join(',');
+          return await win.webContents.executeJavaScript(`(${probe.toString()})(${serializedArgs})`, true);
+        } catch (error) {
+          // 页面导航切换 execution context 时 executeJavaScript 会短暂失败；条件轮询会重试。
+          return { ready: false, executionError: error && error.message };
+        }
+      });
+      const recordCheck = async (name, task) => {
+        try {
+          const state = await task();
+          checks.push(name);
+          console.log(`KK_SMOKE_CHECK ${name} ok ${stateSummary(state)}`);
+        } catch (error) {
+          problems.push(`[${name}] ${error && error.message ? error.message : String(error)}`);
+        }
+      };
+
       const tinyPng =
-        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
       const d = screen.getPrimaryDisplay();
       const syntheticRect = { x: 100, y: 100, width: 300, height: 200 };
-      windows.createMain('capture');
-      if (tray) windows.togglePopover(tray.getBounds());
-      windows.openSettings();
-      windows.openAIPanel({ mode: 'translate', text: 'smoke-test' });
-      windows.createOverlay(d, {
-        dataURL: tinyPng,
-        scaleFactor: d.scaleFactor || 1,
-        displayId: d.id,
-        width: d.size.width,
-        height: d.size.height,
-        mode: 'region',
-      });
-      windows.createRecorder({
-        rect: syntheticRect,
-        displayBounds: d.bounds,
-        scaleFactor: d.scaleFactor || 1,
-        displayId: d.id,
-        displayIndex: screen.getAllDisplays().findIndex((item) => String(item.id) === String(d.id)),
-        fps: 12,
-        toGif: true,
-      });
-      windows.createLongShot({
-        rect: syntheticRect,
-        displayBounds: d.bounds,
-        scaleFactor: d.scaleFactor || 1,
-        displayId: d.id,
-      });
-      // 划词翻译卡片：验证新窗口能加载 + 首帧数据渲染无错
-      {
-        const tpWin = windows.createTranslatePopup({ x: 200, y: 200 });
-        tpWin.webContents.once('did-finish-load', () => {
-          const w = windows.getTranslatePopup();
-          if (w && !w.isDestroyed()) {
-            w.webContents.send(C.TRANSLATE_POPUP_DATA, { text: 'hello world', target: '中文', loading: true });
-            w.webContents.send(C.TRANSLATE_POPUP_DATA, { text: 'hello world', target: '中文', translation: '你好，世界' });
+
+      const runSmokeChecks = async () => {
+        // 隔离 userData 天然为空；先创建一条真实历史，确保协议探针永远有明确样本，
+        // 同时让菜单栏与设置页的历史 UI 有可验证的数据。
+        await recordCheck('kkthumb', async () => {
+          const fixture = history.add(tinyPng, 'region');
+          if (!fixture) throw new Error('无法创建隔离历史夹具');
+          const item = history.list().find((candidate) => candidate.id === fixture.id);
+          if (!item || typeof item.thumb !== 'string' || !item.thumb.startsWith('kkthumb:')) {
+            throw new Error('历史夹具没有生成 kkthumb URL');
+          }
+          const resp = await net.fetch(item.thumb);
+          const buf = Buffer.from(await resp.arrayBuffer());
+          const pngMagic = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+          const okPng = buf.length > pngMagic.length
+            && pngMagic.every((byte, index) => buf[index] === byte);
+          if (!resp.ok || !okPng) {
+            throw new Error(`fetch status=${resp.status} bytes=${buf.length} png=${okPng}`);
+          }
+          return { ready: true, bytes: buf.length };
+        });
+
+        // 冒烟模式没有真实 tray，但窗口工厂本身仍必须覆盖；使用合成托盘坐标开窗。
+        await recordCheck('popover', async () => {
+          const popover = windows.togglePopover({
+            x: d.bounds.x + 20,
+            y: d.bounds.y,
+            width: 24,
+            height: 24,
+          });
+          try {
+            return await waitForRenderer(popover, 'popover', function smokePopoverProbe() {
+              const recentName = document.getElementById('recentName');
+              const recentThumb = document.getElementById('recentThumb');
+              const chipOcr = document.getElementById('chipOcr');
+              const ready = location.pathname.endsWith('/popover/popover.html')
+                && document.readyState === 'complete'
+                && !!document.getElementById('pop')
+                && !!recentName && recentName.textContent.startsWith('区域截图')
+                && !!recentThumb && recentThumb.style.backgroundImage.includes('kkthumb://img/')
+                && !!chipOcr && chipOcr.disabled === false;
+              return { ready, page: location.pathname, recent: recentName && recentName.textContent };
+            });
+          } finally {
+            windows.hidePopover();
           }
         });
-      }
-      // 探针：验证 kkthumb:// 协议能取到真实缩略图字节（历史缩略图按需加载链路自检）。
-      (async () => {
-        try {
-          const items = history.list();
-          if (items.length && items[0].thumb && items[0].thumb.startsWith('kkthumb:')) {
-            const resp = await net.fetch(items[0].thumb);
-            const buf = Buffer.from(await resp.arrayBuffer());
-            const okPng = buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50; // PNG 魔数 \x89P
-            if (!resp.ok || !okPng) problems.push(`[kkthumb] fetch status=${resp.status} bytes=${buf.length} png=${okPng}`);
-            else console.log(`KK_SMOKE_THUMB ok bytes=${buf.length} url=${items[0].thumb}`);
-          } else {
-            console.log('KK_SMOKE_THUMB skip（无历史缩略图可测）');
-          }
-        } catch (e) {
-          problems.push('[kkthumb] probe error ' + (e && e.message));
-        }
-      })();
-      setTimeout(() => {
-        console.log('KK_SMOKE_RESULT ' + JSON.stringify({ ok: problems.length === 0, problems }));
-        app.exit(0);
-      }, 3500);
+
+        let mainWin = null;
+        await recordCheck('main-capture', async () => {
+          mainWin = windows.createMain('capture');
+          return waitForRenderer(mainWin, 'main-capture', function smokeMainCaptureProbe(expectedVersion) {
+            const active = document.querySelector('.nav-item[data-page="capture"].active');
+            const title = document.getElementById('titlebar-page');
+            const version = document.getElementById('app-version');
+            const ready = location.pathname.endsWith('/main/main.html')
+              && document.readyState === 'complete'
+              && !!active
+              && !!title && title.textContent.trim() === '快捷截图'
+              && !!version && version.textContent.trim() === `版本 ${expectedVersion}`
+              && !!document.querySelector('#page .cap-stage')
+              && !!document.querySelector('#page .cap-actions');
+            return {
+              ready,
+              page: location.pathname,
+              title: title && title.textContent.trim(),
+              version: version && version.textContent.trim(),
+            };
+          }, app.getVersion());
+        });
+
+        // 必须先证明 capture renderer 已安装 onNav，再发 settings 导航；随后用页面 DOM
+        // 和异步历史数量共同证明导航与 preload/IPC 都真正到达设置页。
+        await recordCheck('main-settings', async () => {
+          mainWin = windows.openSettings();
+          return waitForRenderer(mainWin, 'main-settings', function smokeMainSettingsProbe() {
+            const active = document.querySelector('.nav-item[data-page="settings"].active');
+            const title = document.getElementById('titlebar-page');
+            const count = document.querySelector('#page .hist-count');
+            const ready = location.pathname.endsWith('/main/main.html')
+              && !!active
+              && !!title && title.textContent.trim() === '设置'
+              && !!document.querySelector('#page .settings-page')
+              && !!document.querySelector('#page .settings-grid')
+              && !!count && count.textContent.trim() === '1';
+            return { ready, title: title && title.textContent.trim(), historyCount: count && count.textContent.trim() };
+          });
+        });
+
+        await recordCheck('ai', async () => {
+          // OCR 全程只走本地引擎；等待 OCR 明确结束，避免外网/API Key 依赖，也避免
+          // AI 页刚画出静态 HTML 就被误判为加载成功。
+          const aiWin = windows.openAIPanel({ mode: 'ocr', dataURL: tinyPng });
+          return waitForRenderer(aiWin, 'ai', function smokeAiProbe() {
+            const title = document.getElementById('modeTitle');
+            const thumb = document.getElementById('thumbImg');
+            const block = document.getElementById('ocrBlock');
+            const text = document.getElementById('ocrText');
+            const ready = location.pathname.endsWith('/ai/ai.html')
+              && !!title && title.textContent.trim() === '文字识别 OCR'
+              && !!thumb && thumb.complete && thumb.naturalWidth === 1 && thumb.naturalHeight === 1
+              && !!block && block.hidden === false
+              && !!text && text.placeholder === '（未识别到文字，可手动输入）';
+            return { ready, title: title && title.textContent.trim(), ocr: text && text.placeholder };
+          });
+        });
+
+        await recordCheck('overlay', async () => {
+          const overlayWin = windows.createOverlay(d, {
+            dataURL: tinyPng,
+            scaleFactor: d.scaleFactor || 1,
+            displayId: d.id,
+            width: d.size.width,
+            height: d.size.height,
+            mode: 'region',
+          });
+          return waitForRenderer(overlayWin, 'overlay', function smokeOverlayProbe() {
+            const canvas = document.getElementById('bgCanvas');
+            const ready = location.pathname.endsWith('/overlay/overlay.html')
+              && !!canvas && canvas.width === 1 && canvas.height === 1
+              && !!document.getElementById('selection')
+              && !!document.getElementById('toolbar');
+            return { ready, canvas: canvas && `${canvas.width}x${canvas.height}` };
+          });
+        });
+
+        await recordCheck('pin', async () => {
+          const pinWin = windows.createPin({
+            dataURL: tinyPng,
+            bounds: { x: d.bounds.x + 120, y: d.bounds.y + 120, width: 80, height: 80 },
+          });
+          return waitForRenderer(pinWin, 'pin', function smokePinProbe() {
+            const image = document.getElementById('pinImg');
+            const ready = location.pathname.endsWith('/pin/pin.html')
+              && !!image && image.complete && image.naturalWidth === 1 && image.naturalHeight === 1
+              && image.src.startsWith('data:image/png;base64,')
+              && !!document.getElementById('pinToolbar');
+            return { ready, image: image && `${image.naturalWidth}x${image.naturalHeight}` };
+          });
+        });
+
+        await recordCheck('recorder', async () => {
+          const recorder = windows.createRecorder({
+            rect: syntheticRect,
+            displayBounds: d.bounds,
+            scaleFactor: d.scaleFactor || 1,
+            displayId: d.id,
+            displayIndex: screen.getAllDisplays().findIndex((item) => String(item.id) === String(d.id)),
+            fps: 12,
+            toGif: true,
+          });
+          await waitForRenderer(recorder.win, 'recorder-renderer', function smokeRecorderProbe() {
+            const start = document.getElementById('btnStart');
+            const stop = document.getElementById('btnStop');
+            const ready = location.pathname.endsWith('/recorder/recorder.html')
+              && !!start && start.hidden === false && start.disabled === false
+              && !!stop && stop.hidden === true && stop.disabled === true
+              && !!document.getElementById('timer');
+            return { ready };
+          });
+          return waitForCondition('recorder-lifecycle', async () => {
+            const state = windows.getRecorderState();
+            return { ready: !!state && state.state === 'idle', state };
+          });
+        });
+
+        await recordCheck('longshot', async () => {
+          // 使用无效尺寸作为只在测试环境出现的初始化哨兵：renderer 只有收到
+          // WINDOW_INIT 后才会禁用开始按钮并显示这段错误提示。
+          const longshotWin = windows.createLongShot({
+            rect: { ...syntheticRect, width: 0, height: 0 },
+            displayBounds: d.bounds,
+            scaleFactor: d.scaleFactor || 1,
+            displayId: d.id,
+          });
+          return waitForRenderer(longshotWin, 'longshot', function smokeLongshotProbe() {
+            const hint = document.getElementById('hint');
+            const start = document.getElementById('btnStart');
+            const ready = location.pathname.endsWith('/longshot/longshot.html')
+              && !!hint && hint.textContent.trim() === '选区无效，请取消重来'
+              && !!start && start.disabled === true;
+            return { ready, hint: hint && hint.textContent.trim(), disabled: start && start.disabled };
+          });
+        });
+
+        await recordCheck('translate-popup', async () => {
+          const popupWin = windows.createTranslatePopup({ x: d.bounds.x + 200, y: d.bounds.y + 200 });
+          await waitForRenderer(popupWin, 'translate-popup-shell', function smokeTranslateShellProbe() {
+            return {
+              ready: location.pathname.endsWith('/translate-popup/translate-popup.html')
+                && document.readyState === 'complete'
+                && !!document.getElementById('src')
+                && !!document.getElementById('trans'),
+            };
+          });
+          popupWin.webContents.send(C.TRANSLATE_POPUP_DATA, {
+            text: 'hello world',
+            target: '中文',
+            translation: '你好，世界',
+          });
+          return waitForRenderer(popupWin, 'translate-popup-data', function smokeTranslateDataProbe() {
+            const source = document.getElementById('src');
+            const target = document.getElementById('target');
+            const translation = document.getElementById('trans');
+            const copy = document.getElementById('btnCopy');
+            const ready = source && source.textContent === 'hello world'
+              && target && target.textContent.trim() === '→ 中文'
+              && translation && translation.textContent === '你好，世界'
+              && copy && copy.disabled === false;
+            return { ready, source: source && source.textContent, translation: translation && translation.textContent };
+          });
+        });
+      };
+
+      runSmokeChecks()
+        .catch((error) => {
+          problems.push('[smoke-runner] ' + (error && error.message ? error.message : String(error)));
+        })
+        .finally(() => {
+          const ok = problems.length === 0;
+          console.log('KK_SMOKE_RESULT ' + JSON.stringify({ ok, problems, checks }));
+          smokeExitCode = ok ? 0 : 1;
+          // 保持 pin renderer 存活，让 before-quit 能先完成安全关闭握手；
+          // 窗口统一由 will-quit 的正式退出链关闭。
+          app.quit();
+        });
     }
   }).catch((error) => {
     // 防止初始化失败时第二实例队列永久悬挂；同时给出可诊断的原生错误。
@@ -2339,6 +2553,9 @@ if (!gotLock) {
       }
       ownedSmokeUserData = null;
     }
+    // Electron 的 app.quit() 固定以 0 退出，不采纳 Node 的 process.exitCode。
+    // 所有同步清理已完成后，仅失败冒烟测试需用 app.exit(1) 传递正确状态。
+    if (smokeExitCode && process.env.KK_SMOKE) app.exit(smokeExitCode);
   });
 }
 

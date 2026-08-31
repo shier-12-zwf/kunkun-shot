@@ -5,9 +5,20 @@ const path = require('node:path');
 
 const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8');
 const windowsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'windows.js'), 'utf8');
+const mainHtml = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'main', 'main.html'), 'utf8');
+const popoverHtml = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'popover', 'popover.html'), 'utf8');
 
 test('custom thumbnail protocol does not bypass Content Security Policy', () => {
   assert.doesNotMatch(mainSource, /bypassCSP\s*:\s*true/);
+  assert.match(mainHtml, /img-src[^;]*\bkkthumb:/);
+  assert.match(popoverHtml, /img-src[^;]*\bkkthumb:/);
+});
+
+test('all external browser entry points share centralized URL validation', () => {
+  assert.match(mainSource, /function openExternalHttpUrl\(rawUrl\)/);
+  assert.match(mainSource, /normalizeUrl:\s*normalizeExternalHttpUrl/);
+  assert.match(mainSource, /openExternal:\s*\(url\)\s*=>\s*shell\.openExternal\(url\)/);
+  assert.doesNotMatch(mainSource, /if \(\/\^https\?:\/i\.test\(url\)\) shell\.openExternal/);
 });
 
 test('open-path authorization is bound to the requesting pin payload', () => {

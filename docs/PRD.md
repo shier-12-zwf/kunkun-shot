@@ -1,7 +1,7 @@
 # 困困截图工具 · 产品需求文档（PRD）
 
 > 说明：本 PRD 由**现有代码与功能逆向倒推**而成（reverse-engineered），用于沉淀产品定义、对齐后续迭代。
-> 产品代号 `kunkun-shot`，当前版本 `v0.2.0`，平台 macOS（Electron）。
+> 产品代号 `kunkun-shot`，当前版本 `v0.2.1`，平台 macOS（Electron）。
 > 文档基于实际实现盘点（IPC 通道、渲染模块、配置项），非凭空设想；标注「⚠️ 待完善 / 已知限制」处为真实现状。
 
 ---
@@ -74,7 +74,7 @@
 ### 4.4 OCR 文字识别
 - 两种引擎（设置可选）：
   - **本地模式**（默认）：tesseract.js，语言 `chi_sim+eng`，**真离线免费**（语言包随包内置 `tessdata/`，启动前预填进 tesseract 缓存，规避 Electron 下误走联网分支导致的卡死）；
-  - **大模型模式**：走视觉大模型识别（更准，联网，用当前 AI 供应商的 visionModel）。
+  - **大模型模式**：按当前提供方的数据路由执行。MiniMax 可接收用户选择的截图并走视觉模型；DeepSeek 与通用 OpenAI 兼容提供方当前会先在本地 OCR，再只发送识别文字。提供方不支持视觉时不会静默改投其他端点。
 - 输出可复制文本；可一键转「翻译 / 润色 / 问 AI」。
 - 通道：`OCR_RUN`；另有 `OCR_BOXES`（macOS Vision，输出每行文字+精确坐标，供原位翻译）。
 
@@ -112,7 +112,7 @@
 
 ### 4.10 主界面与快捷入口
 - **菜单栏托盘**常驻，**Popover** 快捷面板（`POPOVER_TOGGLE`）。
-- **主窗口**含截图页 / 历史 / AI 工作台（三栏可折叠）。
+- **主窗口**含截图、历史、AI 工作台和设置四页；AI 工作台内部为三栏布局，历史栏和预览栏可折叠。
 - 剪贴板集成：写图/写文/读图（`CLIPBOARD_*`）；保存到本地、可选保存目录（`CHOOSE_SAVE_DIR`）。
 
 ### 4.11 图片导出与启动参数
@@ -128,8 +128,8 @@
 |---|---|---|
 | 快捷键 | 截图 / 贴剪贴板 / 录屏 / 长截图 / OCR | `Cmd+Shift+A / P / R / L / O` |
 | AI | 供应商 provider | `deepseek`（可 `minimax` / `openai` / `auto`） |
-| DeepSeek | baseUrl / 文本模型 / 视觉模型 / 各提示词 | `api.deepseek.com`、`v4-flash` / `v4-pro` |
-| MiniMax | baseUrl / 文本 / 视觉模型 / apiKey | `api.minimaxi.com`、`MiniMax-M3` |
+| DeepSeek | baseUrl / 文本模型 / 视觉模型 / 各提示词 | `https://api.deepseek.com/v1`、`deepseek-v4-flash` / `deepseek-v4-pro` |
+| MiniMax | baseUrl / 文本 / 视觉模型 / apiKey | `https://api.minimaxi.com/v1`、`MiniMax-M3` |
 | OpenAI 兼容 | preset / baseUrl / 文本模型 / apiKey | `siliconflow`、`deepseek-ai/DeepSeek-V3`；亦可选通义千问、Kimi 或自定义端点 |
 | OCR | 引擎(local/model) / 语言 | `local`、`chi_sim+eng` |
 | 原位翻译 | 目标语言 `translate.target`（中/英/日/韩/法/德/西/俄） | `中文` |
@@ -178,4 +178,5 @@
 
 ## 9. 版本
 
-- **v0.2.0（当前，早期预览）**：截图/标注/多格式导出/贴图标注与工作区/OCR/AI 问答翻译与表格/公式识别/原位翻译（打磨中）/长截图（改进中）/可选系统声音与麦克风录屏/历史/启动参数/设置已具备基础链路；支持 DeepSeek、MiniMax 与通用 OpenAI 兼容文本服务。已提供稳定本地签名、临时 ad-hoc 与失败关闭的正式签名/公证流水线，但当前无 Apple 凭据、公证记录或已验证正式产物。
+- **v0.2.1（当前，早期预览）**：在 v0.2.0 基础上补齐多格式/PDF 原子导出、贴图标注与工作区恢复、AI 表格/公式识别、可选双音源录屏、受校验启动参数，以及稳定本地签名、临时 ad-hoc 和失败关闭的正式签名/公证流水线；同时新增源码态与打包后 Electron 冒烟、截图工具栏交互回归、CI 无签名打包验证、外链统一校验、Electron 许可证恢复、Swift helper 源码哈希/架构校验回退，并完善键盘无障碍和减弱动态效果。当前仍无 Apple 分发凭据或公证产物。
+- **v0.2.0（2026-08-24 标签）**：首个公开源码预览，提供区域/窗口/全屏/延时截图、基础标注与贴图、本地 OCR、二维码识别、实验性长截图、区域录屏、历史库和可选 AI 问答/翻译/润色；公开源码构建未签名、未公证。

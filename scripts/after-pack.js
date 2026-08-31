@@ -28,7 +28,67 @@ function copyVerifiedFile(sourcePath, destinationPath, label) {
   }
 }
 
-function packageElectronLicenses(context, appContentsDir) {
+function isNonEmptyFile(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile() && stat.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureElectronRuntime(projectDir, dependencies) {
+  const electronPackagePath = require.resolve('electron/package.json', { paths: [projectDir] });
+  const electronPackageDir = path.dirname(electronPackagePath);
+  const electronPackage = JSON.parse(fs.readFileSync(electronPackagePath, 'utf8'));
+  const sourceDir = path.join(electronPackageDir, 'dist');
+  const requiredLicenses = ['LICENSE', 'LICENSES.chromium.html'];
+
+  if (requiredLicenses.every((name) => isNonEmptyFile(path.join(sourceDir, name)))) return;
+
+  // Loading `electron/index.js` only repairs a missing executable. A half-present
+  // runtime (path.txt + executable, but no licenses) is therefore left broken.
+  // Download and checksum-verify the matching archive, extract it in an isolated
+  // temporary directory, then restore only the two license sources we need.
+  const downloadArtifact = dependencies && dependencies.downloadElectronArtifact
+    ? dependencies.downloadElectronArtifact
+    : require(require.resolve('@electron/get', { paths: [electronPackageDir] })).downloadArtifact;
+  const extractArchive = dependencies && dependencies.extractElectronArchive
+    ? dependencies.extractElectronArchive
+    : require(require.resolve('@electron-internal/extract-zip', {
+      paths: [electronPackageDir],
+    })).extract;
+  const checksumsPath = path.join(electronPackageDir, 'checksums.json');
+  const useRemoteChecksums =
+    process.env.electron_use_remote_checksums ||
+    process.env.npm_config_electron_use_remote_checksums;
+  const archivePath = await downloadArtifact({
+    version: electronPackage.version,
+    artifactName: 'electron',
+    platform: process.platform,
+    arch: process.arch,
+    force: process.env.force_no_cache === 'true',
+    cacheRoot: process.env.electron_config_cache,
+    checksums: useRemoteChecksums
+      ? undefined
+      : JSON.parse(fs.readFileSync(checksumsPath, 'utf8')),
+  });
+  const extractionDir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'kunkun-electron-license-'));
+  try {
+    await extractArchive(archivePath, { dir: extractionDir });
+    for (const name of requiredLicenses) {
+      copyVerifiedFile(
+        path.join(extractionDir, name),
+        path.join(sourceDir, name),
+        `restored Electron ${name}`
+      );
+    }
+  } finally {
+    fs.rmSync(extractionDir, { recursive: true, force: true });
+  }
+}
+
+async function packageElectronLicenses(context, appContentsDir, dependencies) {
   const projectDir = context.packager && context.packager.projectDir;
   if (!projectDir) {
     throw new Error('Cannot package Electron licenses: electron-builder projectDir is unavailable');
@@ -36,13 +96,26 @@ function packageElectronLicenses(context, appContentsDir) {
 
   const sourceDir = path.join(projectDir, 'node_modules', 'electron', 'dist');
   const destinationDir = path.join(appContentsDir, 'Resources', 'licenses', 'Electron');
-  copyVerifiedFile(
+  const sources = [
     path.join(sourceDir, 'LICENSE'),
+    path.join(sourceDir, 'LICENSES.chromium.html')
+  ];
+
+  if (!sources.every(isNonEmptyFile)) {
+    const runtimeInstaller =
+      dependencies && dependencies.ensureElectronRuntime
+        ? dependencies.ensureElectronRuntime
+        : ensureElectronRuntime;
+    await runtimeInstaller(projectDir, dependencies);
+  }
+
+  copyVerifiedFile(
+    sources[0],
     path.join(destinationDir, 'LICENSE'),
     'Electron license'
   );
   copyVerifiedFile(
-    path.join(sourceDir, 'LICENSES.chromium.html'),
+    sources[1],
     path.join(destinationDir, 'LICENSES.chromium.html'),
     'Chromium third-party licenses'
   );
@@ -80,7 +153,11 @@ module.exports = async function hardenMacAppTransportSecurity(context, dependenc
     });
   }
 
-  packageElectronLicenses(context, appContentsDir);
+  const electronLicensePackager =
+    dependencies && dependencies.packageElectronLicenses
+      ? dependencies.packageElectronLicenses
+      : packageElectronLicenses;
+  await electronLicensePackager(context, appContentsDir, dependencies);
   const nativeHelperPackager =
     dependencies && dependencies.packageSwiftHelpers
       ? dependencies.packageSwiftHelpers
@@ -89,3 +166,5 @@ module.exports = async function hardenMacAppTransportSecurity(context, dependenc
 };
 
 module.exports.copyVerifiedFile = copyVerifiedFile;
+module.exports.packageElectronLicenses = packageElectronLicenses;
+module.exports.ensureElectronRuntime = ensureElectronRuntime;

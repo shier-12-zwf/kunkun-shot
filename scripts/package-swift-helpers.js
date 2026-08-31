@@ -27,6 +27,8 @@ const TARGET_TRIPLES = {
   arm64: 'arm64-apple-macos11.0'
 };
 
+const PREBUILT_HELPER_DIR_ENV = 'KK_MAC_NATIVE_HELPER_SOURCE_DIR';
+
 function resolveBuilderArch(value) {
   const arch = BUILDER_ARCHES.get(value);
   if (!arch) throw new Error(`不支持的 macOS Swift helper 构建架构：${String(value)}`);
@@ -35,6 +37,58 @@ function resolveBuilderArch(value) {
 
 function expectedArchitectures(arch) {
   return arch === 'universal' ? ['x64', 'arm64'] : [arch];
+}
+
+function resolvePrebuiltHelperDir(options) {
+  const opts = options || {};
+  const configured = Object.prototype.hasOwnProperty.call(opts, 'prebuiltHelperDir')
+    ? opts.prebuiltHelperDir
+    : process.env[PREBUILT_HELPER_DIR_ENV];
+  if (configured === undefined || configured === null || configured === '') return null;
+  if (typeof configured !== 'string' || /[\0\r\n]/.test(configured) || !path.isAbsolute(configured)) {
+    throw new Error(`${PREBUILT_HELPER_DIR_ENV} 必须是无控制字符的绝对目录路径。`);
+  }
+
+  let stat;
+  try {
+    stat = fs.statSync(configured);
+  } catch (error) {
+    throw new Error(`预编译 Swift helper 目录不可访问：${configured}`, { cause: error });
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`预编译 Swift helper 路径不是目录：${configured}`);
+  }
+  return fs.realpathSync(configured);
+}
+
+function copyPrebuiltSwiftHelper({ helper, prebuiltHelperDir, destinationPath, expected }) {
+  const filename = helperFilename(helper.name, helper.source);
+  const sourcePath = path.join(prebuiltHelperDir, filename);
+  let sourceMetadata;
+  try {
+    sourceMetadata = fs.lstatSync(sourcePath);
+  } catch (error) {
+    throw new Error(`预编译 Swift helper 不可访问：${sourcePath}`, { cause: error });
+  }
+  if (sourceMetadata.isSymbolicLink()) {
+    throw new Error(`预编译 Swift helper 不得是符号链接：${sourcePath}`);
+  }
+  assertPackagedHelper(sourcePath, expected, helper.name, {
+    allowAdditionalArchitectures: true
+  });
+
+  const suffix = `${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+  const temporaryPath = `${destinationPath}.${suffix}.tmp`;
+  try {
+    fs.copyFileSync(sourcePath, temporaryPath, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(temporaryPath, 0o755);
+    assertPackagedHelper(temporaryPath, expected, helper.name, {
+      allowAdditionalArchitectures: true
+    });
+    fs.renameSync(temporaryPath, destinationPath);
+  } finally {
+    try { fs.unlinkSync(temporaryPath); } catch (_) {}
+  }
 }
 
 async function compileThinSwiftHelper({ name, source, arch, outputPath }) {
@@ -74,6 +128,7 @@ async function packageSwiftHelpers(context, appContentsDir, options) {
   const opts = options || {};
   const helpers = opts.helpers || SWIFT_HELPERS;
   const compileThin = opts.compileThin || compileThinSwiftHelper;
+  const prebuiltHelperDir = resolvePrebuiltHelperDir(opts);
   const arch = resolveBuilderArch(context && context.arch);
   const expected = expectedArchitectures(arch);
   const destinationDir = path.join(appContentsDir, 'Resources', 'native-helpers');
@@ -87,7 +142,14 @@ async function packageSwiftHelpers(context, appContentsDir, options) {
     names.add(helper.name);
 
     const destinationPath = path.join(destinationDir, helperFilename(helper.name, helper.source));
-    if (arch !== 'universal') {
+    if (prebuiltHelperDir) {
+      copyPrebuiltSwiftHelper({
+        helper,
+        prebuiltHelperDir,
+        destinationPath,
+        expected
+      });
+    } else if (arch !== 'universal') {
       const suffix = `${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
       const temporaryPath = `${destinationPath}.${suffix}.tmp`;
       try {
@@ -108,14 +170,18 @@ async function packageSwiftHelpers(context, appContentsDir, options) {
       }
     }
 
-    assertPackagedHelper(destinationPath, expected, helper.name);
+    assertPackagedHelper(destinationPath, expected, helper.name, {
+      allowAdditionalArchitectures: Boolean(prebuiltHelperDir)
+    });
     packagedPaths.push(destinationPath);
   }
   return packagedPaths;
 }
 
 module.exports = {
+  PREBUILT_HELPER_DIR_ENV,
   compileThinSwiftHelper,
   packageSwiftHelpers,
+  resolvePrebuiltHelperDir,
   resolveBuilderArch
 };

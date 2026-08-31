@@ -263,12 +263,62 @@
         return { card: card, body: body };
       }
 
+      let fieldSequence = 0;
+
+      // 把视觉标签/说明关联到实际可聚焦控件。包装容器中只有一个表单控件时，
+      // label 直接指向该控件；多个控件（如单选卡片组）则把容器暴露为命名 group。
+      function associateField(label, hint, control) {
+        fieldSequence += 1;
+        const baseId = 'kk-setting-field-' + fieldSequence;
+        label.id = baseId + '-label';
+
+        let targets = [];
+        if (control.matches && control.matches('input:not([type="hidden"]), select, textarea')) {
+          targets = [control];
+        } else if (control.querySelectorAll) {
+          targets = Array.from(
+            control.querySelectorAll('input:not([type="hidden"]), select, textarea')
+          );
+        }
+
+        // 少数 rowField 使用单一按钮作为控件，也给它关联行标签。
+        if (targets.length === 0) {
+          if (control.matches && control.matches('button')) {
+            targets = [control];
+          } else if (control.querySelectorAll) {
+            const buttons = Array.from(control.querySelectorAll('button'));
+            if (buttons.length === 1) targets = buttons;
+          }
+        }
+
+        let descriptionTarget = null;
+        if (targets.length === 1) {
+          const target = targets[0];
+          if (!target.id) target.id = baseId + '-control';
+          label.setAttribute('for', target.id);
+          target.setAttribute('aria-labelledby', label.id);
+          descriptionTarget = target;
+        } else if (targets.length > 1) {
+          if (!control.getAttribute('role')) control.setAttribute('role', 'group');
+          control.setAttribute('aria-labelledby', label.id);
+          descriptionTarget = control;
+        }
+
+        if (hint && descriptionTarget) {
+          hint.id = baseId + '-hint';
+          descriptionTarget.setAttribute('aria-describedby', hint.id);
+        }
+      }
+
       // 一行字段：左标签 + 右控件（用于开关/选择这类横排）
       function rowField(labelText, hintText, control) {
+        const label = h('label', { class: 'row-label' }, labelText);
+        const hint = hintText ? h('div', { class: 'row-hint' }, hintText) : null;
+        associateField(label, hint, control);
         return h('div', { class: 'row-field' }, [
           h('div', { class: 'row-meta' }, [
-            h('div', { class: 'row-label' }, labelText),
-            hintText ? h('div', { class: 'row-hint' }, hintText) : null,
+            label,
+            hint,
           ]),
           h('div', { class: 'row-control' }, control),
         ]);
@@ -276,10 +326,13 @@
 
       // 竖排字段：上 label + 下控件 + hint（用于输入框/文本域）
       function stackField(labelText, control, hintText) {
+        const label = h('label', { class: 'label' }, labelText);
+        const hint = hintText ? h('div', { class: 'hint' }, hintText) : null;
+        associateField(label, hint, control);
         return h('div', { class: 'stack-field' }, [
-          h('label', { class: 'label' }, labelText),
+          label,
           control,
-          hintText ? h('div', { class: 'hint' }, hintText) : null,
+          hint,
         ]);
       }
 

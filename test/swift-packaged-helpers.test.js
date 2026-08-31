@@ -207,6 +207,61 @@ for (const [builderArch, expectedArch] of [[1, 'x64'], [3, 'arm64']]) {
   });
 }
 
+test('afterPack can reuse source-bound verified helpers when the local Swift toolchain is unavailable', async (t) => {
+  const appContentsDir = tempDir(t, 'kunkun-prebuilt-helper-app-');
+  const prebuiltHelperDir = tempDir(t, 'kunkun-prebuilt-helper-source-');
+  const helpers = [
+    { name: 'axprobe', source: 'print("reuse-ax")' },
+    { name: 'vision-boxes', source: 'print("reuse-vision")' }
+  ];
+  for (const helper of helpers) {
+    writeExecutable(
+      path.join(prebuiltHelperDir, helperFilename(helper.name, helper.source)),
+      thinMachO('arm64')
+    );
+  }
+
+  let compileCalls = 0;
+  const packagedPaths = await packageSwiftHelpers(
+    { arch: 3 },
+    appContentsDir,
+    {
+      helpers,
+      prebuiltHelperDir,
+      compileThin: async () => { compileCalls += 1; }
+    }
+  );
+
+  assert.equal(compileCalls, 0);
+  assert.equal(packagedPaths.length, helpers.length);
+  for (const packagedPath of packagedPaths) {
+    assert.deepEqual(inspectMachOArchitectures(packagedPath), ['arm64']);
+    assert.notEqual(fs.statSync(packagedPath).mode & 0o111, 0);
+  }
+});
+
+test('afterPack refuses a symlink masquerading as a verified prebuilt helper', async (t) => {
+  const appContentsDir = tempDir(t, 'kunkun-prebuilt-symlink-app-');
+  const prebuiltHelperDir = tempDir(t, 'kunkun-prebuilt-symlink-source-');
+  const externalDir = tempDir(t, 'kunkun-prebuilt-symlink-target-');
+  const helper = { name: 'axprobe', source: 'print("no-symlink")' };
+  const targetPath = path.join(externalDir, 'arm64-helper');
+  writeExecutable(targetPath, thinMachO('arm64'));
+  fs.symlinkSync(
+    targetPath,
+    path.join(prebuiltHelperDir, helperFilename(helper.name, helper.source))
+  );
+
+  await assert.rejects(
+    packageSwiftHelpers(
+      { arch: 3 },
+      appContentsDir,
+      { helpers: [helper], prebuiltHelperDir }
+    ),
+    /符号链接/
+  );
+});
+
 test('universal afterPack verifies the lipo-merged helpers without recompiling', async (t) => {
   const appContentsDir = tempDir(t, 'kunkun-universal-app-');
   const helpers = [{ name: 'axprobe', source: 'print("both")' }];

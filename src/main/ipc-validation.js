@@ -157,6 +157,24 @@ function normalizeProviderBaseUrl(value) {
   return serializedUrl.replace(/\/$/, '');
 }
 
+function normalizeExternalHttpUrl(value) {
+  if (typeof value !== 'string') throw new Error('外部链接无效。');
+  if (value.length > 4096) throw new Error('外部链接过长。');
+  let url;
+  try {
+    url = new URL(value);
+  } catch (_) {
+    throw new Error('外部链接不是有效 URL。');
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new Error('外部链接只允许 HTTP 或 HTTPS。');
+  }
+  if (url.username || url.password) {
+    throw new Error('外部链接不得包含用户名或密码凭据。');
+  }
+  return url.toString();
+}
+
 function normalizePinStateFlags(value) {
   if (!isPlainObject(value)) throw new Error('贴图状态格式无效。');
   const allowed = new Set(['onTop', 'ignoreMouse', 'opacity', 'locked', 'title']);
@@ -333,6 +351,7 @@ module.exports = {
   normalizeStreamId,
   normalizeChatRequest,
   normalizeProviderBaseUrl,
+  normalizeExternalHttpUrl,
   normalizeOCRLanguage,
   normalizeConfigPatch,
   normalizePinStateFlags,

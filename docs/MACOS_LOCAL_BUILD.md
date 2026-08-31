@@ -30,6 +30,20 @@ npm run dist:mac:local
 
 本地自签证书没有 Apple Team ID，因此本地配置明确关闭 Hardened Runtime 和时间戳；正式发布仍使用独立的 Developer ID、公证及 Hardened Runtime 流程。
 
+### Swift 工具链异常时的受控回退
+
+正常构建会从仓库内源码重新编译 macOS Swift helper。如果 `swiftc` 报 `SwiftBridging` 模块重复定义等错误，应优先修复混装或损坏的 Command Line Tools / Xcode。不要为了构建本项目直接删除系统开发工具目录。
+
+在确认旧安装来自同一份 helper 源码且其深度签名完整时，可临时复用其中的原生 helper：
+
+```sh
+codesign --verify --deep --strict --verbose=2 "/Applications/困困截图工具.app"
+KK_MAC_NATIVE_HELPER_SOURCE_DIR="/Applications/困困截图工具.app/Contents/Resources/native-helpers" \
+  npm run dist:mac:local
+```
+
+打包脚本只查找以当前源码哈希命名的 helper，并在复制前后检查文件非空、可执行以及 Mach-O CPU 架构；缺失或不匹配时会停止。源码哈希文件名和架构检查不能单独证明二进制来源，因此该变量只能指向你信任并已验证签名的旧构建，不能指向下载目录或第三方文件。GitHub CI 和工具链健康的开发机仍应走源码编译路径。
+
 只有不需要保留 macOS 权限的一次性隔离测试才使用：
 
 ```sh

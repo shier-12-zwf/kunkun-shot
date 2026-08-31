@@ -261,7 +261,14 @@ body.ocr-mode .pin-wrap {
   background: var(--panel-2);
 }
 
-.ctx-item.ctx-danger:hover {
+.ctx-item:focus-visible {
+  background: var(--panel-2);
+  outline: 2px solid #2563eb;
+  outline-offset: -2px;
+}
+
+.ctx-item.ctx-danger:hover,
+.ctx-item.ctx-danger:focus-visible {
   background: rgba(239, 68, 68, 0.1);
   color: var(--danger);
 }
@@ -413,3 +420,15 @@ body.passthrough .pin-wrap {
   text-overflow: ellipsis;
 }
 .pin-file-hint { font-size: 10px; color: var(--text-2); }
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
+}

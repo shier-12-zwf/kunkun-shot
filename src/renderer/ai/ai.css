@@ -291,7 +291,6 @@ body {
   color: var(--danger);
   background: rgba(239, 68, 68, 0.08);
   border: 1px solid rgba(239, 68, 68, 0.25);
-  border-left: 3px solid var(--danger);
   border-radius: 10px;
   padding: 10px 12px;
   margin-bottom: 12px;
@@ -313,7 +312,7 @@ body {
   line-height: 1.6;
   color: #8a93a6;
   background: #f5f7fa;
-  border-left: 2px solid #cdd5e0;
+  border: 1px solid #cdd5e0;
   border-radius: 6px;
   white-space: pre-wrap;
   word-break: break-word;
@@ -408,4 +407,16 @@ body {
 
 .result::-webkit-scrollbar-thumb:hover {
   background: #c0c4cb;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
 }

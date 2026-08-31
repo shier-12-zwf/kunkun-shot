@@ -9,6 +9,8 @@
   var wrapEl = document.getElementById('pinWrap');
   var toolbarEl = document.getElementById('pinToolbar');
   var ctxMenu = document.getElementById('ctxMenu');
+  var ctxMenuItems = Array.prototype.slice.call(ctxMenu.querySelectorAll('[role="menuitem"]'));
+  var ctxMenuReturnFocus = null;
   var toastEl = document.getElementById('pinToast');
   var annotationCanvas = document.getElementById('pinAnnotationCanvas');
   var annotationToolbar = document.getElementById('pinAnnotationToolbar');
@@ -998,7 +1000,8 @@
         }
         // 若右键菜单开着，先关菜单
         if (ctxMenu.classList.contains('show')) {
-          hideCtxMenu();
+          e.preventDefault();
+          hideCtxMenu(true);
           return;
         }
         if (state.annotationMode) {
@@ -1069,7 +1072,20 @@
   }
 
   // ====== 自绘右键菜单 ======
+  function focusCtxItem(index) {
+    if (!ctxMenuItems.length) return;
+    var itemCount = ctxMenuItems.length;
+    var nextIndex = ((index % itemCount) + itemCount) % itemCount;
+    ctxMenuItems.forEach(function (item, itemIndex) {
+      item.setAttribute('tabindex', itemIndex === nextIndex ? '0' : '-1');
+    });
+    ctxMenuItems[nextIndex].focus();
+  }
+
   function showCtxMenu(x, y) {
+    if (!ctxMenu.classList.contains('show')) {
+      ctxMenuReturnFocus = document.activeElement;
+    }
     ctxMenu.classList.add('show');
     ctxMenu.setAttribute('aria-hidden', 'false');
     // 先显示再测量，避免越界出窗
@@ -1083,11 +1099,25 @@
     if (py + mh > vh) py = Math.max(0, vh - mh - 2);
     ctxMenu.style.left = px + 'px';
     ctxMenu.style.top = py + 'px';
+    focusCtxItem(0);
   }
 
-  function hideCtxMenu() {
+  function hideCtxMenu(restoreFocus) {
+    var returnFocus = ctxMenuReturnFocus;
     ctxMenu.classList.remove('show');
     ctxMenu.setAttribute('aria-hidden', 'true');
+    ctxMenuItems.forEach(function (item) {
+      item.setAttribute('tabindex', '-1');
+    });
+    ctxMenuReturnFocus = null;
+    if (
+      restoreFocus === true &&
+      returnFocus &&
+      returnFocus.isConnected &&
+      typeof returnFocus.focus === 'function'
+    ) {
+      returnFocus.focus();
+    }
   }
 
   function bindContextMenu() {
@@ -1100,8 +1130,39 @@
       var item = e.target.closest ? e.target.closest('.ctx-item') : null;
       if (!item) return;
       var act = ACTIONS[item.getAttribute('data-act')];
-      hideCtxMenu();
+      hideCtxMenu(true);
       if (act) act();
+    });
+    ctxMenu.addEventListener('keydown', function (e) {
+      if (!ctxMenu.classList.contains('show')) return;
+      var index = ctxMenuItems.indexOf(document.activeElement);
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        e.stopPropagation();
+        focusCtxItem(index + 1);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        e.stopPropagation();
+        focusCtxItem(index - 1);
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        e.stopPropagation();
+        focusCtxItem(0);
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        e.stopPropagation();
+        focusCtxItem(ctxMenuItems.length - 1);
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (index >= 0) ctxMenuItems[index].click();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        hideCtxMenu(true);
+      } else if (e.key === 'Tab') {
+        hideCtxMenu();
+      }
     });
     // 点击空白处关闭菜单（用 mousedown 抢在拖动前）
     document.addEventListener('mousedown', function (e) {

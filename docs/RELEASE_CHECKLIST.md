@@ -18,7 +18,7 @@ This checklist intentionally separates automated evidence from hands-on validati
 
 - [ ] 工作区干净，发布提交 SHA 已记录。/ Worktree is clean and the release commit SHA is recorded.
 - [ ] 在全新目录使用 Node.js 22.12 或更高版本执行 `npm ci` 成功。/ `npm ci` succeeds in a clean directory with Node.js 22.12 or later.
-- [ ] `npm test` 全部通过，测试数量和输出已记录。/ `npm test` passes; test count and output are recorded.
+- [ ] `npm run test:all` 全部通过，已记录 Node 测试数量、真实 Electron 冒烟结果与截图工具栏交互结果。/ `npm run test:all` passes; record the Node test count, real Electron smoke result, and capture-toolbar interaction result.
 - [ ] 对仓库 JavaScript 执行 `node --check`，无语法错误。/ `node --check` passes for repository JavaScript files.
 - [ ] `npm ls --depth=0` 无缺失或无效直接依赖。/ `npm ls --depth=0` reports no missing or invalid direct dependencies.
 - [ ] `npm audit --omit=dev` 结果已审阅；任何例外均有风险说明。/ `npm audit --omit=dev` is reviewed and every exception is documented.
@@ -31,6 +31,7 @@ This checklist intentionally separates automated evidence from hands-on validati
 - [ ] 对当前树和完整 Git 历史执行秘密扫描，人工审阅疑似命中；输出不得泄露秘密。/ Scan the current tree and full Git history for secrets, manually review findings, and never print secret values.
 - [ ] 检查仓库中没有本地配置、证书、签名身份、用户历史或未授权截图。/ Confirm no local configuration, certificates, signing identities, user history, or unauthorized captures are tracked.
 - [ ] macOS 构建链路回归通过：`dist:mac:local` 要求稳定本地证书并关闭公证/Hardened Runtime，`dist:mac:adhoc` 明确隔离，`dist:mac:release` 对缺失或混用凭据失败关闭。/ macOS pipeline regressions pass: `dist:mac:local` requires a stable local certificate with notarization/Hardened Runtime off, `dist:mac:adhoc` remains explicitly isolated, and `dist:mac:release` fails closed for missing or mixed credentials.
+- [ ] `npm run dist:mac:ci` 在无分发凭据条件下成功完成打包；包内 Electron 许可证、ATS 配置和 Swift helper 均已验证。/ `npm run dist:mac:ci` packages without distribution credentials; bundled Electron licenses, ATS configuration, and Swift helpers are verified.
 
 ## 2. 真机功能验收（macOS）/ Hands-on functional acceptance (macOS)
 
@@ -88,7 +89,7 @@ All items below are manual and remain unverified until exercised on a real Mac; 
 ## 6. GitHub 发布后核验 / Post-publication GitHub verification
 
 - [ ] 仓库可匿名访问，默认分支指向预期发布提交。/ Repository is anonymously accessible and the default branch points to the intended release commit.
-- [ ] 从 GitHub 匿名全新 clone 后可按 README 执行 `npm ci`、`npm test` 与 `npm start`。/ From an anonymous fresh clone, the README setup flow works.
+- [ ] 从 GitHub 匿名全新 clone 后可按 README 执行 `npm ci`、`npm run test:all` 与 `npm start`。/ From an anonymous fresh clone, the README setup flow works.
 - [ ] CI 在公开仓库默认分支通过。/ CI passes on the public default branch.
 - [ ] Release 页面、源码归档、演示素材和校验和可访问；没有把旧的未验证构建误标为当前版本。/ Release page, source archives, demo assets, and checksums are accessible; no stale unverified build is presented as current.
 - [ ] GitHub Security 页面存在可用的私密报告入口；若不可用，`SECURITY.md` 的备用流程仍可执行。/ GitHub Security exposes a private reporting entry; otherwise the fallback in `SECURITY.md` remains actionable.

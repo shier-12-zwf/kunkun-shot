@@ -2,6 +2,7 @@
 const path = require('path');
 const fs = require('fs');
 const { BrowserWindow, screen } = require('electron');
+const { version: APP_VERSION } = require('../../package.json');
 const C = require('../shared/channels');
 const { requireImageDataURL, normalizePinBounds } = require('./ipc-validation');
 const { normalizePinWorkspaceState } = require('./pin-workspace-store');
@@ -753,7 +754,10 @@ function createMain(page) {
     webPreferences: baseWebPrefs(),
   }, 'main');
   win.loadFile(rfile('main', 'main.html'));
-  whenLoaded(win, { page: safePage });
+  // package.json is the single version source for both source and packaged runs.
+  // Passing it through the existing trusted init channel avoids a renderer-side
+  // hard-coded value drifting away from the bundle metadata.
+  whenLoaded(win, { page: safePage, appVersion: APP_VERSION });
   win.on('closed', () => (refs.main = null));
   refs.main = win;
   return win;

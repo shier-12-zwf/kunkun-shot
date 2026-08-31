@@ -6,6 +6,8 @@ An open-source, macOS-first Electron screenshot utility with capture and annotat
 
 > Status: early preview. Available source code and automated tests do not imply that every hands-on flow has passed acceptance. The project does not claim Windows/Linux support, nor does it claim that public builds are Apple-signed or notarized. See the [release checklist](docs/RELEASE_CHECKLIST.md) for the evidence required before a release.
 
+Start with the [complete Chinese user guide](docs/使用指南.md). The [PixPin comparison and improvement report](docs/PixPin-竞品对比与改进报告.md) documents the evidence, current gaps, and priorities. See the [changelog](CHANGELOG.md) for version history.
+
 ![Kunkun Shot demo](docs/assets/demo.gif)
 
 > These assets come from the real Electron renderer running in an isolated session. The background, history items, and AI response are synthesized locally; no personal data or network request is used.
@@ -40,7 +42,7 @@ Requirements:
 git clone https://github.com/duangjaiignacy-blip/kunkun-shot.git
 cd kunkun-shot
 npm ci
-npm test
+npm run test:all
 npm start
 ```
 
@@ -119,7 +121,8 @@ The renderer has no Node integration and communicates with the main process only
 ## Development and verification
 
 ```bash
-npm test
+npm run test:all
+npm audit --audit-level=high
 npm audit --omit=dev
 npm ls --depth=0
 ```
@@ -142,6 +145,7 @@ Automated tests cannot replace hands-on checks for screen permission, multiple d
 - System audio, microphone capture, AVIF/PDF behavior in Preview/Finder, and cross-restart pin-workspace restoration still require acceptance on target macOS hardware.
 - Global shortcuts may conflict with macOS or other applications.
 - OCR accuracy depends on image quality, language data, and layout. AI output can also be wrong.
+- There is no in-app auto-update or notarized public installer. GitHub Releases are source-only, and local development installs are updated manually.
 - Any unchecked automated or manual item in the release checklist remains unverified.
 
 ## Contributing and security

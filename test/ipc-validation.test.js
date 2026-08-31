@@ -11,6 +11,7 @@ const {
   normalizeTranslationRequest,
   normalizeChatRequest,
   normalizeProviderBaseUrl,
+  normalizeExternalHttpUrl,
   normalizeOCRLanguage,
   normalizeConfigPatch,
   normalizePinStateFlags,
@@ -86,6 +87,15 @@ test('provider URLs require HTTPS except for explicit loopback HTTP endpoints', 
   assert.throws(() => normalizeProviderBaseUrl('https://api.example.com/v1#models'), /查询参数|片段/);
   assert.throws(() => normalizeProviderBaseUrl('https://api.example.com/v1?'), /查询参数|片段/);
   assert.throws(() => normalizeProviderBaseUrl('https://api.example.com/v1#'), /查询参数|片段/);
+});
+
+test('external browser URLs allow only credential-free HTTP(S)', () => {
+  assert.equal(normalizeExternalHttpUrl('https://example.com/docs?q=1#intro'), 'https://example.com/docs?q=1#intro');
+  assert.equal(normalizeExternalHttpUrl('http://localhost:3000/'), 'http://localhost:3000/');
+  assert.throws(() => normalizeExternalHttpUrl('file:///tmp/secret'), /HTTP/);
+  assert.throws(() => normalizeExternalHttpUrl('javascript:alert(1)'), /HTTP/);
+  assert.throws(() => normalizeExternalHttpUrl('https://user:pass@example.com/'), /凭据/);
+  assert.throws(() => normalizeExternalHttpUrl('x'.repeat(4097)), /过长/);
 });
 
 test('configuration patches are schema-bound and role-scoped', () => {

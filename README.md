@@ -6,6 +6,8 @@
 
 > 当前状态：早期预览版。源码和自动测试可用不等于所有真机流程已经验收。项目不声称支持 Windows/Linux，也不声称公开构建已经完成 Apple 签名或公证。发布前的真实状态以 [发布检查清单](docs/RELEASE_CHECKLIST.md) 为准。
 
+第一次使用请阅读 [完整使用指南](docs/使用指南.md)；想了解与 PixPin 的逐项差距、证据和后续优先级，请看 [竞品对比与改进报告](docs/PixPin-竞品对比与改进报告.md)。版本变化见 [更新日志](CHANGELOG.md)。
+
 ![困困截图工具操作演示](docs/assets/demo.gif)
 
 > 演示素材由真实 Electron 渲染界面在隔离会话中生成；背景、历史记录和 AI 回复均为本地合成，不含真实用户数据，也不会发起网络请求。
@@ -40,7 +42,7 @@
 git clone https://github.com/duangjaiignacy-blip/kunkun-shot.git
 cd kunkun-shot
 npm ci
-npm test
+npm run test:all
 npm start
 ```
 
@@ -119,7 +121,8 @@ docs/           产品说明与发布检查资料
 ## 开发与验证
 
 ```bash
-npm test
+npm run test:all
+npm audit --audit-level=high
 npm audit --omit=dev
 npm ls --depth=0
 ```
@@ -142,6 +145,7 @@ env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron scripts/capture-demo.js
 - 系统声音、麦克风、AVIF/PDF 在系统预览/Finder 中的兼容性，以及贴图工作区跨重启恢复，都需在目标 macOS 真机上验收。
 - 全局快捷键可能与系统或其他应用冲突。
 - OCR 精度取决于图像质量、语言数据和版面；AI 结果也可能错误。
+- 当前没有应用内自动更新或已公证的公开安装包；GitHub Release 仅提供源码，本机开发安装需要手工更新。
 - 尚未完成的自动或真机验证项目以发布检查清单中的未勾选项为准。
 
 ## 参与和安全

@@ -409,6 +409,17 @@
     return { x: x, y: y, width: width, height: height };
   }
 
+  function handleExternalOpenOutcome(outcome, onSuccess, onFailure) {
+    if (outcome && outcome.ok === true) {
+      if (typeof onSuccess === 'function') onSuccess();
+      return true;
+    }
+    if (typeof onFailure === 'function') {
+      onFailure((outcome && outcome.error) || '打开失败');
+    }
+    return false;
+  }
+
   // Node 回归测试只加载上面的纯异步契约，不初始化 renderer DOM。
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
@@ -430,6 +441,7 @@
       detectBarcodeResults,
       formatBarcodeResultsForCopy,
       normalizeBarcodeResults,
+      handleExternalOpenOutcome,
     };
     return;
   }
@@ -2265,7 +2277,9 @@
     btnQrOpen.addEventListener('click', function () {
       if (!S.qrOpenURL) return;
       Promise.resolve(kkapi.openExternal(S.qrOpenURL))
-        .then(function () { hideQrPanel(); })
+        .then(function (outcome) {
+          handleExternalOpenOutcome(outcome, hideQrPanel, showTip);
+        })
         .catch(function () { showTip('打开失败'); });
     });
     btnQrClose.addEventListener('click', hideQrPanel);

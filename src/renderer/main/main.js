@@ -19,6 +19,7 @@
   var pageEl = document.getElementById("page");
   var navEl = document.getElementById("nav");
   var titlePageEl = document.getElementById("titlebar-page");
+  var versionEl = document.getElementById("app-version");
 
   // 当前页 key，避免无意义重渲染时也能携带新 ctx 正常刷新
   var currentPage = null;
@@ -129,6 +130,13 @@
     document.body.classList.toggle("theme-dark", dark);
   }
 
+  function applyVersion(version) {
+    if (!versionEl || typeof version !== "string") return;
+    var normalized = version.trim();
+    if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(normalized)) return;
+    versionEl.textContent = "版本 " + normalized;
+  }
+
   // —— 启动初始化 ——
   function boot() {
     var api = window.kkapi;
@@ -146,6 +154,7 @@
     // 主进程下发初始页（无回调时退化为默认进入“快捷截图”）
     if (api && typeof api.onInit === "function") {
       api.onInit(function (p) {
+        applyVersion(p && p.appVersion);
         KKMain.go((p && p.page) || "capture");
       });
     }

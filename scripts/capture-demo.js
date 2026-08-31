@@ -15,6 +15,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { app, BrowserWindow, session } = require('electron');
+const { version: APP_VERSION } = require('../package.json');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const RENDERER_ROOT = path.join(REPO_ROOT, 'src', 'renderer');
@@ -179,12 +180,14 @@ const DEMO_IMAGES = [
 function createPreloadSource() {
   const images = JSON.stringify(DEMO_IMAGES);
   const viewport = JSON.stringify(VIEWPORT);
+  const appVersion = JSON.stringify(APP_VERSION);
   return `'use strict';
 const { contextBridge } = require('electron');
 const kindArg = process.argv.find((arg) => arg.indexOf('--kk-demo-kind=') === 0) || '--kk-demo-kind=main';
 const kind = kindArg.slice('--kk-demo-kind='.length);
 const images = ${images};
 const viewport = ${viewport};
+const appVersion = ${appVersion};
 const listeners = { stream: [], history: [], nav: [] };
 const telemetry = { finishCapture: 0, cancelCapture: 0 };
 const config = {
@@ -238,7 +241,7 @@ const api = {
   onInit: (cb) => {
     const payload = kind === 'overlay'
       ? { dataURL: images[0], width: viewport.width, height: viewport.height, scaleFactor: 1, displayId: 'public-demo', displayBounds: { x: 0, y: 0, width: viewport.width, height: viewport.height }, mode: 'region' }
-      : { page: kind === 'ai' ? 'ai' : 'capture' };
+      : { page: kind === 'ai' ? 'ai' : 'capture', appVersion };
     const timer = setTimeout(() => cb(clone(payload)), 0);
     return () => clearTimeout(timer);
   },

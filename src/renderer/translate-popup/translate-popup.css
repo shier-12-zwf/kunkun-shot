@@ -109,13 +109,13 @@ html, body {
 .tp-dot {
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--brand);
-  animation: tp-bounce 1.2s infinite ease-in-out both;
+  animation: tp-pulse 1.2s infinite ease-in-out both;
 }
 .tp-dot:nth-child(1) { animation-delay: -0.24s; }
 .tp-dot:nth-child(2) { animation-delay: -0.12s; }
-@keyframes tp-bounce {
-  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
-  40% { transform: scale(1); opacity: 1; }
+@keyframes tp-pulse {
+  0%, 80%, 100% { opacity: 0.35; }
+  40% { opacity: 1; }
 }
 
 /* 底部 */
@@ -139,3 +139,15 @@ html, body {
 .tp-btn:hover { border-color: var(--brand); color: var(--brand-strong); }
 .tp-btn:disabled { opacity: 0.5; cursor: default; }
 .tp-btn.copied { background: var(--brand); color: #fff; border-color: var(--brand); }
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
+}
