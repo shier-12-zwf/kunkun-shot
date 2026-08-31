@@ -577,9 +577,29 @@ async function probeOverlayToolbar() {
       };
     })()`, true);
     await dispatchMouse(win, null, 'mousemove', 200, 150, 0);
-    await waitFor(win, `!document.getElementById('axHighlight').hidden`);
+    await waitFor(win, `(() => {
+      const highlight = document.getElementById('axHighlight');
+      const rect = highlight.getBoundingClientRect();
+      return !highlight.hidden
+        && Math.round(rect.x) === 120
+        && Math.round(rect.y) === 100
+        && Math.round(rect.width) === 420
+        && Math.round(rect.height) === 260;
+    })()`);
     await dispatchMouse(win, null, 'mousedown', 200, 150, 1);
     await dispatchMouse(win, null, 'mouseup', 200, 150, 0);
+    // Hidden BrowserWindows can expose the previous layout for one compositor
+    // turn on hosted macOS runners. Assert the complete observable end state
+    // instead of making the test depend on a single-frame layout commit.
+    await waitFor(win, `(() => {
+      const rect = document.getElementById('selection').getBoundingClientRect();
+      return Math.round(rect.x) === 120
+        && Math.round(rect.y) === 100
+        && Math.round(rect.width) === 420
+        && Math.round(rect.height) === 260
+        && document.getElementById('btnAx').getAttribute('aria-pressed') === 'false'
+        && !document.getElementById('toolbar').hidden;
+    })()`);
     const axSelection = await win.webContents.executeJavaScript(`(() => {
       const rect = document.getElementById('selection').getBoundingClientRect();
       return {
