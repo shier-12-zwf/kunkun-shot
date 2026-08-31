@@ -1,6 +1,7 @@
 'use strict';
 
 const AX_PROBE_SOURCE = [
+  'import Foundation',
   'import Cocoa',
   'import ApplicationServices',
   '',
@@ -44,9 +45,22 @@ const AX_PROBE_SOURCE = [
   '',
   'let pos = attrPoint()',
   'let size = attrSize()',
-  'let role = (attrStr(kAXRoleAttribute as CFString) ?? "").replacingOccurrences(of: "\\\"", with: "\'")',
-  'let title = (attrStr(kAXTitleAttribute as CFString) ?? "").replacingOccurrences(of: "\\\"", with: "\'")',
-  'print("{\\\"x\\\":\\(pos.x),\\\"y\\\":\\(pos.y),\\\"w\\\":\\(size.width),\\\"h\\\":\\(size.height),\\\"role\\\":\\\"\\(role)\\\",\\\"title\\\":\\\"\\(title)\\\"}")',
+  'let payload: [String: Any] = [',
+  '  "x": Double(pos.x),',
+  '  "y": Double(pos.y),',
+  '  "w": Double(size.width),',
+  '  "h": Double(size.height),',
+  '  "role": attrStr(kAXRoleAttribute as CFString) ?? "",',
+  '  "title": attrStr(kAXTitleAttribute as CFString) ?? ""',
+  ']',
+  'do {',
+  '  let data = try JSONSerialization.data(withJSONObject: payload, options: [])',
+  '  guard let json = String(data: data, encoding: .utf8) else { exit(3) }',
+  '  print(json)',
+  '} catch {',
+  '  FileHandle.standardError.write("json-failed".data(using: .utf8)!)',
+  '  exit(3)',
+  '}',
   ''
 ].join('\n');
 

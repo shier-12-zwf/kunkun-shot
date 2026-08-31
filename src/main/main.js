@@ -1378,18 +1378,17 @@ function registerIpc() {
   let axPrompted = false;
   ipcMain.handle(C.AX_AT_POINT, async (_e, { x, y } = {}) => {
     if (process.platform !== 'darwin') return { error: '仅支持 macOS' };
+    const point = axprobe.normalizeProbePoint(x, y);
+    if (!point) {
+      return { error: '坐标无效' };
+    }
     if (!checkAccessibilityPermission(!axPrompted)) {
       axPrompted = true;
       return { error: '需要「辅助功能」权限（系统设置 → 隐私与安全性 → 辅助功能）' };
     }
-    if (!isFinite(Number(x)) || !isFinite(Number(y)) || Math.abs(Number(x)) > 100000 || Math.abs(Number(y)) > 100000) {
-      return { error: '坐标无效' };
-    }
     try {
-      const r = await axprobe.probeAtPoint(Number(x), Number(y), 700);
-      const f = r && r.frame;
-      if (f && !(f.w > 0) && !(f.h > 0)) return { frame: null };
-      return r;
+      const r = await axprobe.probeAtPoint(point.x, point.y, 700);
+      return axprobe.normalizeProbeResult(r);
     } catch (e) {
       return { error: (e && e.message) || String(e) };
     }

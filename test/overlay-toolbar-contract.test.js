@@ -88,7 +88,7 @@ test('toolbar labels cannot shrink into clipped vertical text', () => {
 });
 
 test('smart selection can replace an existing region and return to the toolbar', () => {
-  assert.match(js, /if \(S\.axMode && S\.axFrame\) \{/);
+  assert.match(js, /getSelectableFrame\(\)/);
   assert.doesNotMatch(js, /S\.axFrame && !S\.rect/);
-  assert.match(js, /function disableAx\(\)[\s\S]*?setSelectionOptionActive\(btnAx, false\)[\s\S]*?hideAx\(\)/);
+  assert.match(js, /function disableAx\(\)[\s\S]*?setSelectionOptionActive\(btnAx, false\)[\s\S]*?\.disable\(\)/);
 });

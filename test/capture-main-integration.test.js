@@ -63,6 +63,14 @@ test('timed captures are scheduled and canceled by the main process', () => {
   assert.doesNotMatch(capturePageSource, /captureTimed\(\{\s*delay:\s*0/);
 });
 
+test('AX probe results are normalized before crossing the IPC boundary', () => {
+  const handler = between('ipcMain.handle(C.AX_AT_POINT', 'ipcMain.handle(C.OCR_RUN');
+  assert.match(handler, /axprobe\.normalizeProbePoint\(x, y\)/);
+  assert.match(handler, /axprobe\.normalizeProbeResult\(r\)/);
+  assert.doesNotMatch(handler, /Number\(x\)|Number\(y\)/);
+  assert.ok(handler.indexOf('normalizeProbePoint') < handler.indexOf('checkAccessibilityPermission'));
+});
+
 test('fullscreen, window, and timed captures all enter the shared editor before side effects', () => {
   const fullscreen = between('async function doFullscreenNow()', '// 交互式窗口截图');
   assert.match(fullscreen, /return\s+startCapture\(['"]fullscreen['"]\)/);

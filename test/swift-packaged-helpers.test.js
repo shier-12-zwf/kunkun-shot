@@ -59,6 +59,15 @@ test('AX helper validates the Core Foundation type before converting to AXValue'
   assert.equal(checkedConversions && checkedConversions.length, 2);
 });
 
+test('AX helper uses JSONSerialization for arbitrary accessibility text', () => {
+  assert.match(AX_PROBE_SOURCE, /import Foundation/);
+  assert.match(AX_PROBE_SOURCE, /JSONSerialization\.data\(withJSONObject: payload, options: \[\]\)/);
+  assert.match(AX_PROBE_SOURCE, /"role": attrStr\(kAXRoleAttribute as CFString\) \?\? ""/);
+  assert.match(AX_PROBE_SOURCE, /"title": attrStr\(kAXTitleAttribute as CFString\) \?\? ""/);
+  assert.doesNotMatch(AX_PROBE_SOURCE, /replacingOccurrences/);
+  assert.doesNotMatch(AX_PROBE_SOURCE, /print\("\{\\"x\\"/);
+});
+
 test('Mach-O inspection recognizes thin arm64/x64 and universal helpers', (t) => {
   const dir = tempDir(t, 'kunkun-macho-contract-');
   const arm64Path = path.join(dir, 'arm64-helper');

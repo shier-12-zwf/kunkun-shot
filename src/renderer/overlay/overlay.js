@@ -420,6 +420,161 @@
     return false;
   }
 
+  // AX 悬停探针一次只允许一个请求在途；移动期间只保留最新坐标。
+  // generation 会隔离关闭再开启之前的旧响应，避免旧元素重新变成可点击候选。
+  function createAxProbeScheduler(options) {
+    var opts = options || {};
+    if (typeof opts.probe !== 'function') throw new TypeError('AX probe is required');
+
+    var enabled = false;
+    var busy = false;
+    var generation = 0;
+    var latestPoint = null;
+    var frame = null;
+    var frameGeneration = 0;
+    var drainPromise = Promise.resolve();
+    var minIntervalMs = Number.isFinite(opts.minIntervalMs) && opts.minIntervalMs > 0
+      ? opts.minIntervalMs
+      : 0;
+    var now = typeof opts.now === 'function' ? opts.now : Date.now;
+    var setDelay = typeof opts.setDelay === 'function' ? opts.setDelay : setTimeout;
+    var clearDelay = typeof opts.clearDelay === 'function' ? opts.clearDelay : clearTimeout;
+    var lastStartedAt = null;
+    var delayTimer = null;
+    var resolveDelay = null;
+
+    function cancelDelay() {
+      if (delayTimer === null) return;
+      clearDelay(delayTimer);
+      delayTimer = null;
+      var resolve = resolveDelay;
+      resolveDelay = null;
+      if (resolve) resolve();
+    }
+
+    function waitForNextStart() {
+      if (lastStartedAt === null || minIntervalMs === 0) return null;
+      var remaining = minIntervalMs - (now() - lastStartedAt);
+      if (remaining <= 0) return null;
+      return new Promise(function (resolve) {
+        resolveDelay = resolve;
+        delayTimer = setDelay(function () {
+          delayTimer = null;
+          resolveDelay = null;
+          resolve();
+        }, remaining);
+      });
+    }
+
+    function clearFrame() {
+      frame = null;
+      frameGeneration = 0;
+      if (typeof opts.onClear === 'function') opts.onClear();
+    }
+
+    function enable() {
+      generation += 1;
+      enabled = true;
+      latestPoint = null;
+      lastStartedAt = null;
+      cancelDelay();
+      clearFrame();
+      return generation;
+    }
+
+    function disable() {
+      generation += 1;
+      enabled = false;
+      latestPoint = null;
+      lastStartedAt = null;
+      cancelDelay();
+      clearFrame();
+    }
+
+    async function drain() {
+      busy = true;
+      try {
+        while (enabled && latestPoint) {
+          var requestGeneration = generation;
+          var intervalWait = waitForNextStart();
+          if (intervalWait) await intervalWait;
+          if (!enabled || generation !== requestGeneration) continue;
+
+          // 等待节流间隔时仍可接收 mousemove；真正发起时取最新坐标。
+          var point = latestPoint;
+          latestPoint = null;
+          lastStartedAt = now();
+          var result;
+
+          try {
+            result = await opts.probe(point);
+          } catch (err) {
+            // 已关闭、已换代或已有更新坐标时，这个错误同样属于过期响应。
+            if (enabled && generation === requestGeneration && !latestPoint) {
+              clearFrame();
+              if (typeof opts.onError === 'function') {
+                opts.onError((err && err.message) || String(err), 'exception');
+              }
+            }
+            continue;
+          }
+
+          // 若移动过程中又来了坐标，旧结果不应短暂闪现或变为可点击。
+          if (!enabled || generation !== requestGeneration || latestPoint) continue;
+          if (result && result.error) {
+            clearFrame();
+            if (typeof opts.onError === 'function') opts.onError(result.error, 'result');
+            continue;
+          }
+
+          var nextFrame;
+          try {
+            nextFrame = typeof opts.resolveFrame === 'function' ? opts.resolveFrame(result) : result;
+          } catch (err) {
+            clearFrame();
+            if (typeof opts.onError === 'function') {
+              opts.onError((err && err.message) || String(err), 'exception');
+            }
+            continue;
+          }
+          if (nextFrame) {
+            frame = nextFrame;
+            frameGeneration = requestGeneration;
+            if (typeof opts.onFrame === 'function') opts.onFrame(nextFrame);
+          } else {
+            clearFrame();
+          }
+        }
+      } finally {
+        busy = false;
+      }
+    }
+
+    function schedule(point) {
+      if (!enabled) return Promise.resolve();
+      latestPoint = { x: point && point.x, y: point && point.y };
+      // 从指针移动到新候选开始，到该候选完成前，旧 frame 一律不可选择。
+      clearFrame();
+      if (!busy) drainPromise = drain();
+      return drainPromise;
+    }
+
+    function getSelectableFrame() {
+      if (!enabled || busy || frameGeneration !== generation) return null;
+      return frame;
+    }
+
+    return {
+      enable: enable,
+      disable: disable,
+      schedule: schedule,
+      invalidate: clearFrame,
+      isBusy: function () { return busy; },
+      getGeneration: function () { return generation; },
+      getSelectableFrame: getSelectableFrame,
+    };
+  }
+
   // Node 回归测试只加载上面的纯异步契约，不初始化 renderer DOM。
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
@@ -442,6 +597,7 @@
       formatBarcodeResultsForCopy,
       normalizeBarcodeResults,
       handleExternalOpenOutcome,
+      createAxProbeScheduler,
     };
     return;
   }
@@ -476,7 +632,7 @@
     axMode: false, // 智能 UI 元素识别
     axFrame: null, // 当前高亮元素(显示器CSS坐标)
     frameStyle: 0, // 导出图边框/阴影：0=无 1=边框 2=阴影
-    axBusy: false, axLast: 0, axErrShown: false,
+    axErrShown: false,
     // 历史浏览 / 选区历史（PixPin 式 < > / R）
     histItems: null, // 历史列表缓存
     histIdx: -1, // -1=当前截图；>=0 表示正在看第几张历史
@@ -733,8 +889,9 @@
     if (toolbar.contains(e.target) || e.target === textInput) return;
 
     // 智能识别模式：有高亮元素时，点击 = 直接框选该元素
-    if (S.axMode && S.axFrame) {
-      var f = S.axFrame;
+    var selectableAxFrame = axProbeScheduler.getSelectableFrame();
+    if (S.axMode && selectableAxFrame) {
+      var f = selectableAxFrame;
       S.rect = { x: f.x, y: f.y, width: f.w, height: f.h };
       S.shapes = [];
       S.history = [];
@@ -3149,7 +3306,7 @@
   function disableAx() {
     S.axMode = false;
     setSelectionOptionActive(btnAx, false);
-    hideAx();
+    axProbeScheduler.disable();
   }
   function toggleAx() {
     if (S.axMode) {
@@ -3158,7 +3315,7 @@
       S.axMode = true;
       setSelectionOptionActive(btnAx, true);
       S.axErrShown = false;
-      hideAx();
+      axProbeScheduler.enable();
       showTip('UI识别已开：悬停高亮元素，点击框选（仅 macOS）');
     }
   }
@@ -3170,41 +3327,34 @@
       h: f.h,
     };
   }
-  async function probeAx(e) {
-    if (!S.axMode || S.axBusy || S.finished || S.aiOpen || S.selecting || S.dragMode || S.drawing) return;
-    var now = Date.now();
-    if (now - S.axLast < 150) return; // 节流 150ms
-    S.axLast = now;
-    S.axBusy = true;
-    try {
-      var r = await kkapi.axAtPoint({ x: e.screenX, y: e.screenY });
-      S.axBusy = false;
-      if (!S.axMode) return;
-      if (r && r.error) {
-        if (!S.axErrShown) {
-          S.axErrShown = true;
-          showTip('UI识别不可用：' + r.error);
-        }
-        return;
-      }
-      var f = r && r.frame;
-      if (f && f.w > 2 && f.h > 2) {
-        S.axFrame = axCss(f);
-        axHighlight.hidden = false;
-        axHighlight.style.left = S.axFrame.x + 'px';
-        axHighlight.style.top = S.axFrame.y + 'px';
-        axHighlight.style.width = S.axFrame.w + 'px';
-        axHighlight.style.height = S.axFrame.h + 'px';
-      } else {
-        hideAx();
-      }
-    } catch (err) {
-      S.axBusy = false;
-      if (!S.axErrShown) {
-        S.axErrShown = true;
-        showTip('UI识别失败：' + ((err && err.message) || err));
-      }
-    }
+  var axProbeScheduler = createAxProbeScheduler({
+    probe: function (point) {
+      return kkapi.axAtPoint(point);
+    },
+    resolveFrame: function (result) {
+      var f = result && result.frame;
+      return f && f.w > 2 && f.h > 2 ? axCss(f) : null;
+    },
+    onClear: hideAx,
+    onFrame: function (frame) {
+      S.axFrame = frame;
+      axHighlight.hidden = false;
+      axHighlight.style.left = frame.x + 'px';
+      axHighlight.style.top = frame.y + 'px';
+      axHighlight.style.width = frame.w + 'px';
+      axHighlight.style.height = frame.h + 'px';
+    },
+    onError: function (message, kind) {
+      if (S.axErrShown) return;
+      S.axErrShown = true;
+      showTip((kind === 'result' ? 'UI识别不可用：' : 'UI识别失败：') + message);
+    },
+    minIntervalMs: 150,
+  });
+  function probeAx(e) {
+    if (!S.axMode || S.finished || S.aiOpen || S.selecting || S.dragMode || S.drawing) return;
+    // 调度器会限制启动频率，并在节流等待或请求在途时只保留最新坐标。
+    axProbeScheduler.schedule({ x: e.screenX, y: e.screenY });
   }
   btnAx.addEventListener('click', toggleAx);
   // 边框/阴影三态（PixPin 式：无 → 边框 → 阴影）
