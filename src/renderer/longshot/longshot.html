@@ -10,60 +10,57 @@
   <body>
     <!-- 整个控制条：浅色胶囊，悬浮在选区外面 -->
     <div class="bar" id="bar">
-      <!-- 左侧状态区：说明 + 帧数 -->
-      <div class="status">
-        <div class="title" id="hint">滚动页面会自动拼接</div>
-        <div class="meta">
-          已捕获 <span class="count" id="count">0</span> 帧
-          <span class="dot" id="liveDot" aria-hidden="true"></span>
+      <div class="primary-row">
+        <!-- 左侧状态区：说明 + 帧数 -->
+        <div class="status">
+          <div class="title" id="hint">滚动页面会自动拼接</div>
+          <div class="meta">
+            已保留 <span class="count" id="count">0</span> 帧
+            <span class="dot" id="liveDot" aria-hidden="true"></span>
+          </div>
+        </div>
+
+        <!-- 右侧按钮区 -->
+        <div class="actions">
+          <button class="btn" id="btnDir" title="切换滚动方向（当前：纵向）"><span class="label">纵向</span></button>
+          <button class="btn btn-primary" id="btnStart" title="开始捕获">
+            <span class="ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 3.5v9a.5.5 0 0 0 .77.42l7-4.5a.5.5 0 0 0 0-.84l-7-4.5A.5.5 0 0 0 4 3.5z" fill="currentColor"/></svg></span>
+            <span class="label">开始</span>
+          </button>
+          <button class="btn btn-ok" id="btnDone" title="完成并保存" disabled>
+            <span class="ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M13.5 4.5l-7 7-4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <span class="label">完成</span>
+          </button>
+          <button class="btn btn-ghost" id="btnCancel" title="取消">
+            <span class="ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span>
+            <span class="label">取消</span>
+          </button>
         </div>
       </div>
 
-      <!-- 手动裁剪（P2-3：上下裁掉多余部分，完成时生效） -->
+      <!-- 帧/片段编辑：任意删除后从原始帧重新拼接，可撤销/重做。 -->
+      <div class="edit-row" id="editBox" hidden>
+        <label class="compact-field">片段
+          <select id="segmentSelect" aria-label="选择要删除的原始帧"></select>
+        </label>
+        <button class="mini-btn danger" id="btnDeleteSegment" title="删除选中帧并重新拼接">删除</button>
+        <button class="mini-btn" id="btnUndo" title="撤销片段或固定区域修改" disabled>撤销</button>
+        <button class="mini-btn" id="btnRedo" title="重做片段或固定区域修改" disabled>重做</button>
+        <span class="separator" aria-hidden="true"></span>
+        <label class="compact-field">固定顶部 <input type="number" id="fixedTop" min="0" step="1" value="0" /> px</label>
+        <label class="compact-field">固定底部 <input type="number" id="fixedBottom" min="0" step="1" value="0" /> px</label>
+        <button class="mini-btn" id="btnSuggestFixed" title="检测相邻帧中重复的固定顶部/底部">自动建议</button>
+        <button class="mini-btn" id="btnApplyFixed" title="应用固定区域参数并重新拼接">应用</button>
+      </div>
+
+      <!-- 导出裁剪（不改动原始帧） -->
       <div class="crop-box" id="cropBox" hidden>
         <label class="crop-label">上裁 <input type="range" id="cropTop" min="0" max="0" step="10" value="0" /> <span class="crop-val" id="cropTopVal">0</span></label>
         <label class="crop-label">下裁 <input type="range" id="cropBottom" min="0" max="0" step="10" value="0" /> <span class="crop-val" id="cropBottomVal">0</span></label>
       </div>
-
-      <!-- 右侧按钮区 -->
-      <div class="actions">
-        <!-- 方向切换（P2-3：纵向/横向滚动） -->
-        <button class="btn" id="btnDir" title="切换滚动方向（当前：纵向）">
-          <span class="label">纵向</span>
-        </button>
-
-        <!-- 开始捕获 -->
-        <button class="btn btn-primary" id="btnStart" title="开始捕获">
-          <span class="ico" aria-hidden="true">
-            <svg viewBox="0 0 16 16" width="14" height="14">
-              <path d="M4 3.5v9a.5.5 0 0 0 .77.42l7-4.5a.5.5 0 0 0 0-.84l-7-4.5A.5.5 0 0 0 4 3.5z" fill="currentColor"/>
-            </svg>
-          </span>
-          <span class="label">开始</span>
-        </button>
-
-        <!-- 完成（拼接保存）-->
-        <button class="btn btn-ok" id="btnDone" title="完成并保存" disabled>
-          <span class="ico" aria-hidden="true">
-            <svg viewBox="0 0 16 16" width="14" height="14">
-              <path d="M13.5 4.5l-7 7-4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </span>
-          <span class="label">完成</span>
-        </button>
-
-        <!-- 取消 -->
-        <button class="btn btn-ghost" id="btnCancel" title="取消">
-          <span class="ico" aria-hidden="true">
-            <svg viewBox="0 0 16 16" width="14" height="14">
-              <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-            </svg>
-          </span>
-          <span class="label">取消</span>
-        </button>
-      </div>
     </div>
 
+    <script src="./longshot-stitch.js"></script>
     <script src="./longshot.js"></script>
   </body>
 </html>

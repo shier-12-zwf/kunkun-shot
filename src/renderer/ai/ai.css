@@ -163,6 +163,114 @@ body {
   line-height: 1.5;
 }
 
+/* ---------- 可编辑表格 ---------- */
+.table-workspace {
+  flex: 1 1 auto;
+  min-height: 180px;
+  margin: 10px 14px 4px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: var(--card-shadow);
+}
+
+.table-workspace[hidden] {
+  display: none;
+}
+
+.table-workspace-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+  background: #f8fafc;
+}
+
+.table-meta {
+  color: var(--text-sub);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.table-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.table-scroll {
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.editable-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+}
+
+.editable-table th,
+.editable-table td {
+  min-width: 140px;
+  padding: 0;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.editable-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f3f6fb;
+}
+
+.editable-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.editable-table th:last-child,
+.editable-table td:last-child {
+  border-right: 0;
+}
+
+.table-cell-input {
+  display: block;
+  width: 100%;
+  min-width: 140px;
+  min-height: 36px;
+  margin: 0;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  resize: vertical;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.45;
+}
+
+.editable-table th .table-cell-input {
+  font-weight: 700;
+}
+
+.table-cell-input:focus {
+  position: relative;
+  z-index: 2;
+  box-shadow: inset 0 0 0 2px var(--accent);
+  background: #fff;
+}
+
 /* ---------- OCR 文本块 ---------- */
 .ocr-block {
   flex: 0 0 auto;

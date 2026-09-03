@@ -26,6 +26,13 @@
   const btnRetry = $('btnRetry');
   const btnMin = $('btnMin');
   const btnClose = $('btnClose');
+  const tableWorkspace = $('tableWorkspace');
+  const tableMeta = $('tableMeta');
+  const tableGrid = $('tableGrid');
+  const btnTableRaw = $('btnTableRaw');
+  const btnCopyCsv = $('btnCopyCsv');
+  const btnCopyTsv = $('btnCopyTsv');
+  const btnCopyMarkdown = $('btnCopyMarkdown');
 
   // ---------- 运行时状态 ----------
   let config = null; // 配置（含 prompts）
@@ -38,6 +45,7 @@
   let liveText = ''; // 正在累积的原始文本
   let liveReasoning = ''; // 正在累积的思考过程（仅问答模式展示）
   let liveReasoningEl = null; // 思考块节点
+  let editableTableRows = [];
 
   const MODE_META = {
     ask: { icon: '🤖', title: '截图问 AI' },
@@ -84,6 +92,68 @@
     resultEl.innerHTML = '';
     liveBodyEl = null;
     liveText = '';
+  }
+
+  function resetTableWorkspace() {
+    editableTableRows = [];
+    tableGrid.textContent = '';
+    tableWorkspace.hidden = true;
+    resultEl.hidden = false;
+    btnTableRaw.textContent = '查看原始结果';
+  }
+
+  function readEditableTable() {
+    return Array.from(tableGrid.querySelectorAll('tr')).map((row) =>
+      Array.from(row.querySelectorAll('input, textarea')).map((cellInput) => cellInput.value)
+    );
+  }
+
+  function renderEditableTable(source) {
+    if (mode !== 'table' || !window.KKTableModel) return false;
+    let parsed;
+    try {
+      parsed = window.KKTableModel.extractStructuredTable(source);
+    } catch (_) {
+      return false;
+    }
+
+    resetTableWorkspace();
+    editableTableRows = parsed.rows.map((row) => row.slice());
+    const body = document.createElement('tbody');
+    editableTableRows.forEach((row, rowIndex) => {
+      const rowEl = document.createElement('tr');
+      row.forEach((value, columnIndex) => {
+        const cellEl = document.createElement(rowIndex === 0 ? 'th' : 'td');
+        const cellInput = value.includes('\n')
+          ? document.createElement('textarea')
+          : document.createElement('input');
+        if (cellInput.tagName === 'INPUT') cellInput.type = 'text';
+        cellInput.className = 'table-cell-input';
+        cellInput.value = value;
+        cellInput.setAttribute('aria-label', `第 ${rowIndex + 1} 行，第 ${columnIndex + 1} 列`);
+        cellEl.appendChild(cellInput);
+        rowEl.appendChild(cellEl);
+      });
+      body.appendChild(rowEl);
+    });
+    tableGrid.appendChild(body);
+    tableMeta.textContent = `${editableTableRows.length} 行 × ${editableTableRows[0].length} 列 · 可直接编辑`;
+    tableWorkspace.hidden = false;
+    resultEl.hidden = true;
+    return true;
+  }
+
+  async function copyEditedTable(button, serializer) {
+    const rows = readEditableTable();
+    if (!rows.length || !window.KKTableModel) return;
+    try {
+      await kkapi.copyText(serializer(rows));
+      const old = button.textContent;
+      button.textContent = '已复制 ✓';
+      setTimeout(() => { button.textContent = old; }, 1200);
+    } catch (error) {
+      showError('复制表格失败：' + (error && error.message ? error.message : error));
+    }
   }
 
   // 追加一条完整消息（role: user / assistant）。返回 body 节点。
@@ -234,11 +304,13 @@
       }
     }
     if (ev.done) {
+      const completedText = liveText;
       finishStream();
       if (isStructuredRecognitionMode(mode)) {
         btnRetry.hidden = false;
         btnCopyResult.hidden = !liveText;
       }
+      if (mode === 'table') renderEditableTable(completedText);
     }
   });
 
@@ -398,6 +470,7 @@
     liveReasoning = '';
     liveReasoningEl = null;
     clearResult();
+    resetTableWorkspace();
     // 重新放回占位文案
     const ph = document.createElement('div');
     ph.className = 'placeholder';
@@ -485,6 +558,14 @@
       setTimeout(() => { btnCopyResult.textContent = old; }, 1200);
     } catch (_) {}
   });
+  btnTableRaw.addEventListener('click', () => {
+    const showingRaw = !resultEl.hidden;
+    resultEl.hidden = showingRaw;
+    btnTableRaw.textContent = showingRaw ? '查看原始结果' : '返回编辑表格';
+  });
+  btnCopyCsv.addEventListener('click', () => copyEditedTable(btnCopyCsv, window.KKTableModel.serializeCsv));
+  btnCopyTsv.addEventListener('click', () => copyEditedTable(btnCopyTsv, window.KKTableModel.serializeTsv));
+  btnCopyMarkdown.addEventListener('click', () => copyEditedTable(btnCopyMarkdown, window.KKTableModel.serializeMarkdown));
   btnMin.addEventListener('click', () => {
     try {
       kkapi.minimizeSelf();

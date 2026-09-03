@@ -99,6 +99,18 @@
         <button class="tool-btn toolbar-menu-item" data-tool="number" type="button" title="序号笔">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><text x="12" y="16" class="num-glyph">1</text></svg><span>序号笔</span>
         </button>
+        <button class="tool-btn toolbar-menu-item" data-tool="blur" type="button" title="模糊画笔（真实高斯模糊）">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><path d="M9 9h.01 M15 9h.01 M9 15h.01 M15 15h.01 M12 12h.01"/></svg><span>模糊</span>
+        </button>
+        <button class="tool-btn toolbar-menu-item" data-tool="spotlight" type="button" title="聚光灯（拖出椭圆高亮区域）">
+          <svg viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="7" ry="5"/><path d="M12 2v3 M12 19v3 M2 12h3 M19 12h3"/></svg><span>聚光灯</span>
+        </button>
+        <button class="tool-btn toolbar-menu-item" data-tool="magnifier" type="button" title="放大镜（拖出镜片，可移动、缩放和调节倍率）">
+          <svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="M14.5 14.5L20 20 M7 10h6 M10 7v6"/></svg><span>放大镜</span>
+        </button>
+        <button class="tool-btn toolbar-menu-item" data-tool="watermark" type="button" title="文字水印（35% 透明、倾斜）">
+          <svg viewBox="0 0 24 24"><path d="M4 7h16 M8 7v10 M16 7v10 M6 17h4 M14 17h4" opacity=".75"/><path d="M3 20L21 4"/></svg><span>水印</span>
+        </button>
       </div>
     </div>
 
@@ -119,6 +131,19 @@
       <button class="width-btn" data-width="4" title="中"><span style="height:4px"></span></button>
       <button class="width-btn" data-width="7" title="粗"><span style="height:7px"></span></button>
     </div>
+
+    <label class="magnifier-zoom-control" id="magnifierZoomGroup" title="放大镜倍率" hidden>
+      <span>倍率</span>
+      <select id="magnifierZoom" aria-label="放大镜倍率">
+        <option value="1.25">1.25×</option>
+        <option value="1.5">1.5×</option>
+        <option value="2" selected>2×</option>
+        <option value="3">3×</option>
+        <option value="4">4×</option>
+        <option value="6">6×</option>
+        <option value="8">8×</option>
+      </select>
+    </label>
 
     <span class="divider"></span>
 
@@ -161,6 +186,23 @@
       </button>
       <div class="toolbar-menu action-menu" id="actionMenu" role="group" aria-label="更多截图与处理选项" hidden>
         <span class="toolbar-menu-heading">截图选项</span>
+        <fieldset class="selection-geometry" aria-label="选区尺寸与比例">
+          <label><span>宽</span><input id="selectionWidth" type="number" min="1" step="1" inputmode="numeric" aria-label="选区宽度（源像素）" /></label>
+          <label><span>高</span><input id="selectionHeight" type="number" min="1" step="1" inputmode="numeric" aria-label="选区高度（源像素）" /></label>
+          <label><span>尺寸</span><select id="selectionSizePreset" aria-label="选区尺寸预设">
+            <option value="custom">自定义</option>
+            <option value="640x480">640 × 480</option>
+            <option value="1280x720">1280 × 720</option>
+            <option value="1920x1080">1920 × 1080</option>
+            <option value="1080x1080">1080 × 1080</option>
+          </select></label>
+          <label><span>比例</span><select id="selectionRatio" aria-label="选区宽高比">
+            <option value="free">自由</option>
+            <option value="1:1">1 : 1</option>
+            <option value="4:3">4 : 3</option>
+            <option value="16:9">16 : 9</option>
+          </select></label>
+        </fieldset>
         <button class="tool-btn toolbar-menu-item selection-option-btn" id="btnRatioLock" type="button" aria-pressed="false" title="锁定宽高比（按当前比例调整选框）">
           <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span>比例锁定</span>
         </button>
@@ -186,7 +228,7 @@
           <svg viewBox="0 0 24 24"><path d="M5 5h13 M5 19h13 M8 5l-3 7 3 7 M12 9l6 6 M18 9l-6 6"/></svg>
           <span>AI 公式</span>
         </button>
-        <button class="action-btn toolbar-menu-item" id="btnQR" data-action="qr" type="button" title="识别到二维码或条码后出现" hidden>
+        <button class="action-btn toolbar-menu-item" id="btnQR" data-action="qr" type="button" title="查看二维码 / 条码识别状态与结果">
           <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3z M20 14h1 M14 20h1 M18 18h3v3h-3"/></svg>
           <span>条码结果</span>
         </button>
@@ -251,15 +293,18 @@
   <!-- 二维码 / 条码结果面板 -->
   <div id="qrPanel" class="qr-panel" hidden>
     <div class="qr-title">条码识别结果</div>
+    <div id="qrStatus" class="qr-status" role="status" aria-live="polite">等待扫描</div>
     <div id="qrText" class="qr-text"></div>
     <div class="qr-actions">
       <button class="qr-btn" id="btnQrCopy" type="button">复制</button>
       <button class="qr-btn" id="btnQrOpen" type="button">打开链接</button>
+      <button class="qr-btn" id="btnQrRetry" type="button">重新扫描</button>
       <button class="qr-btn qr-btn-close" id="btnQrClose" type="button">关闭</button>
     </div>
   </div>
 
   <script src="./vendor/jsQR.js"></script>
+  <script src="./overlay-geometry.js"></script>
   <script src="./overlay.js"></script>
 </body>
 </html>

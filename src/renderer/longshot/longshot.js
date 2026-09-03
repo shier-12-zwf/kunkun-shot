@@ -321,7 +321,7 @@
     rctx.translate(frame.height / 2, frame.width / 2);
     rctx.rotate(Math.PI / 2);
     rctx.drawImage(frame.canvas, -frame.width / 2, -frame.height / 2);
-    return { canvas: rot, width: frame.height, height: frame.width };
+    return { canvas: rot, ctx: rctx, width: frame.height, height: frame.width };
   }
 
   function overlapResult(overlap, hadContent) {
@@ -377,6 +377,10 @@
   let stitchCanvas = null;
   let stitchCtx = null;
   let stitchedHeight = 0; // 当前已拼接的实际像素高度（canvas 可能比它高，预留空间）
+  let stitchTimeline = null; // 保留原始帧 + 可重建的片段计划
+  let rawFrameSequence = 0;
+  let fixedSuggestionShown = false;
+  let suggestedFixedBands = null;
 
   let timer = null; // 单次 setTimeout 句柄；每帧结束后按状态自适应调度下一帧
   let capturing = false; // 是否处于捕获中
@@ -392,6 +396,8 @@
   let idleStreak = 0;
   let failureStreak = 0;
   let operationGeneration = 0; // 保存/取消也需要抵御迟到回调
+
+  const stitchApi = window.LongshotStitch;
 
   // ====== 算法参数 ======
   const SAMPLE_COLS = 24; // 每行横向采样点数
@@ -415,6 +421,15 @@
   const $cropBottomVal = document.getElementById('cropBottomVal');
   const $btnDir = document.getElementById('btnDir');
   const $btnCancel = document.getElementById('btnCancel');
+  const $editBox = document.getElementById('editBox');
+  const $segmentSelect = document.getElementById('segmentSelect');
+  const $btnDeleteSegment = document.getElementById('btnDeleteSegment');
+  const $btnUndo = document.getElementById('btnUndo');
+  const $btnRedo = document.getElementById('btnRedo');
+  const $fixedTop = document.getElementById('fixedTop');
+  const $fixedBottom = document.getElementById('fixedBottom');
+  const $btnSuggestFixed = document.getElementById('btnSuggestFixed');
+  const $btnApplyFixed = document.getElementById('btnApplyFixed');
 
   // ====== 工具：把 dataURL 画到一个临时 canvas，拿到 ctx + 尺寸 ======
   function loadDataURL(dataURL) {
@@ -449,198 +464,200 @@
     );
   }
 
-  // ====== 创建/初始化拼接 canvas（首帧）======
-  function initStitch(frame, pixelBudget) {
-    if (!isFrameWithinCanvasBudget(frame.width, frame.height, pixelBudget)) {
-      throw new Error('选区分辨率过高，超出长截图的安全内存上限');
-    }
-    stitchCanvas = document.createElement('canvas');
-    stitchCanvas.width = frame.width; // = rect.width * scaleFactor
-    stitchCanvas.height = frame.height; // 起始高度 = 首帧高
-    stitchCtx = stitchCanvas.getContext('2d', { willReadFrequently: true });
-    stitchCtx.drawImage(frame.canvas, 0, 0);
-    stitchedHeight = frame.height;
+  function timelineError(reason, fallback) {
+    const error = new Error(fallback || reason || '长截图拼接失败');
+    error.code = reason || 'stitch-error';
+    return error;
   }
 
-  // ====== 确保拼接 canvas 至少能容纳 needHeight；不够则用临时 canvas 扩高复制 ======
-  function ensureCapacity(needHeight, pixelBudget) {
-    if (needHeight <= stitchCanvas.height) return true;
-    const maxHeight = getMaxCanvasHeight(stitchCanvas.width, pixelBudget);
-    if (needHeight > maxHeight) return false;
-    let target = stitchCanvas.height + GROW_STEP;
-    while (target < needHeight) target += GROW_STEP;
-    if (target > maxHeight) target = maxHeight;
-    if (target < needHeight) return false; // 已经到上限，装不下
+  function capturedGeometry(frame) {
+    const sourceWidth = Math.max(1, Math.round(Number(RECT && RECT.width) * SCALE));
+    const sourceHeight = Math.max(1, Math.round(Number(RECT && RECT.height) * SCALE));
+    const expectedWidth = captureHorizontal ? sourceHeight : sourceWidth;
+    const expectedHeight = captureHorizontal ? sourceWidth : sourceHeight;
+    // macOS 的选区边界可因非整数 DPR 有1px取整差；更大差异表示显示器/DPR
+    // 已改变，继续拼接会必然错位，必须明确拒绝。
+    if (Math.abs(frame.width - expectedWidth) > 1 || Math.abs(frame.height - expectedHeight) > 1) {
+      return {
+        ok: false,
+        reason: 'scale-mismatch',
+        expectedWidth,
+        expectedHeight,
+        actualWidth: frame.width,
+        actualHeight: frame.height,
+      };
+    }
+    return { ok: true };
+  }
 
-    const tmp = document.createElement('canvas');
-    tmp.width = stitchCanvas.width;
-    tmp.height = target;
-    const tctx = tmp.getContext('2d', { willReadFrequently: true });
-    // 只复制已拼接的有效区域即可
-    tctx.drawImage(stitchCanvas, 0, 0, stitchCanvas.width, stitchedHeight, 0, 0, stitchCanvas.width, stitchedHeight);
-    stitchCanvas = tmp;
-    stitchCtx = tctx;
+  function rawFrameFromCanvas(frame) {
+    const geometry = capturedGeometry(frame);
+    if (!geometry.ok) return geometry;
+    let pixels;
+    try {
+      pixels = frame.ctx.getImageData(0, 0, frame.width, frame.height).data;
+    } catch (error) {
+      return { ok: false, reason: 'pixel-read-failed', error };
+    }
+    rawFrameSequence += 1;
+    return {
+      ok: true,
+      frame: {
+        id: 'frame-' + rawFrameSequence,
+        width: frame.width,
+        height: frame.height,
+        scaleFactor: SCALE,
+        pixels,
+      },
+    };
+  }
+
+  // Rebuild into a fresh canvas and swap only after every segment succeeded. The old
+  // canvas therefore remains exportable if an edit/recomposition ever throws.
+  function renderTimeline() {
+    if (!stitchTimeline) return false;
+    const composed = stitchTimeline.compose();
+    if (!composed.ok) return false;
+    const nextCanvas = document.createElement('canvas');
+    nextCanvas.width = composed.width;
+    nextCanvas.height = composed.height;
+    const nextContext = nextCanvas.getContext('2d', { willReadFrequently: true });
+    if (!nextContext) return false;
+    const imageData = nextContext.createImageData(composed.width, composed.height);
+    imageData.data.set(composed.pixels);
+    nextContext.putImageData(imageData, 0, 0);
+    stitchCanvas = nextCanvas;
+    stitchCtx = nextContext;
+    stitchedHeight = composed.height;
     return true;
   }
 
-  // ====== 行像素匹配核心 ======
-  // 思路：新帧整体相对已拼接底部，可能向下滚动了 d 个像素（0 <= d <= frameH）。
-  // 当滚动 d 像素时：新帧的第 0..(frameH-d) 行 应当与 已拼接底部的 (stitchedHeight-(frameH-d))..stitchedHeight 行 相同。
-  // 我们枚举「重叠高度 overlap = frameH - d」，从大到小找：重叠越大代表滚动越少。
-  // 为效率，用采样行 + 采样列比较，命中即接受。
-  //
-  // 返回 { overlap, hadContent } ：
-  //   overlap = 新帧顶部与已拼接底部相同的像素行数
-  //   hadContent = 搜索区是否有足够内容行；有内容但 overlap=0 时应暂停而不是硬接
-  //   新追加的高度 = frameH - overlap
-  function matchOverlap(frameCtx, frameW, frameH) {
-    const stitchW = stitchCanvas.width;
-    const w = Math.min(frameW, stitchW);
-    // 忽略最右侧滚动条区域（约 3%），滚动条会移动、破坏匹配
-    const mw = Math.max(8, Math.floor(w * 0.97));
-    const stitchSampleH = Math.min(stitchedHeight, frameH);
-    if (stitchSampleH < SEARCH_ROWS) return overlapResult(0, false);
-    const sBottom = stitchCtx.getImageData(0, stitchedHeight - stitchSampleH, w, stitchSampleH).data;
-    const fTop = frameCtx.getImageData(0, 0, w, stitchSampleH).data;
-    const cols = [];
-    for (let i = 0; i < SAMPLE_COLS; i++) cols.push(Math.floor(((i + 0.5) / SAMPLE_COLS) * mw));
-    const ROW_RATIO = 0.82;
-    // 判断某帧行是否“有内容”：采样列的明暗有明显变化（纯空白/纯色行=无内容，不参与判定）
-    function isContentRow(fRow) {
-      let lo = 255;
-      let hi = 0;
-      const base = fRow * w * 4;
-      for (let k = 0; k < cols.length; k++) {
-        const v = fTop[base + cols[k] * 4];
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
-      }
-      return hi - lo > 24;
+  function refreshEditControls() {
+    const state = stitchTimeline && stitchTimeline.getState();
+    const frames = state ? state.frames : [];
+    $editBox.hidden = frames.length === 0;
+    const selected = $segmentSelect.value;
+    $segmentSelect.replaceChildren();
+    frames.forEach((frame, index) => {
+      const option = document.createElement('option');
+      option.value = frame.id;
+      option.textContent = '帧 ' + String(index + 1) + ' · ' + frame.id;
+      $segmentSelect.appendChild(option);
+    });
+    if (frames.some((frame) => frame.id === selected)) $segmentSelect.value = selected;
+    else if (frames.length) $segmentSelect.value = frames[frames.length - 1].id;
+    $btnDeleteSegment.disabled = frames.length <= 1 || capturing || finishing;
+    $segmentSelect.disabled = frames.length === 0 || capturing || finishing;
+    $btnUndo.disabled = !state || !state.canUndo || capturing || finishing;
+    $btnRedo.disabled = !state || !state.canRedo || capturing || finishing;
+    $btnSuggestFixed.disabled = frames.length < 2 || capturing || finishing;
+    $btnApplyFixed.disabled = frames.length < 1 || capturing || finishing;
+    $fixedTop.disabled = frames.length < 1 || capturing || finishing;
+    $fixedBottom.disabled = frames.length < 1 || capturing || finishing;
+    if (state) {
+      $fixedTop.max = String(Math.max(0, Math.min(...frames.map((frame) => frame.height)) - 1));
+      $fixedBottom.max = $fixedTop.max;
+      const displayedBands = suggestedFixedBands && state.fixedBands.top === 0 && state.fixedBands.bottom === 0
+        ? suggestedFixedBands
+        : state.fixedBands;
+      $fixedTop.value = String(displayedBands.top);
+      $fixedBottom.value = String(displayedBands.bottom);
     }
-    function rowSimilar(fRow, sRow) {
-      let same = 0;
-      const fBase = fRow * w * 4;
-      const sBase = sRow * w * 4;
-      for (let k = 0; k < cols.length; k++) {
-        const x4 = cols[k] * 4;
-        const fi = fBase + x4;
-        const si = sBase + x4;
-        if (
-          Math.abs(fTop[fi] - sBottom[si]) <= MATCH_TOL &&
-          Math.abs(fTop[fi + 1] - sBottom[si + 1]) <= MATCH_TOL &&
-          Math.abs(fTop[fi + 2] - sBottom[si + 2]) <= MATCH_TOL
-        ) same++;
-      }
-      return same / cols.length >= ROW_RATIO;
+  }
+
+  function maybeOfferFixedSuggestion() {
+    if (!stitchTimeline || fixedSuggestionShown) return false;
+    const state = stitchTimeline.getState();
+    if (state.frames.length < 2 || state.fixedBands.top || state.fixedBands.bottom) return false;
+    const suggestion = stitchTimeline.suggestFixedBands({ minBand: 3 });
+    if (!suggestion.top && !suggestion.bottom) return false;
+    fixedSuggestionShown = true;
+    suggestedFixedBands = { top: suggestion.top, bottom: suggestion.bottom };
+    $fixedTop.value = String(suggestion.top);
+    $fixedBottom.value = String(suggestion.bottom);
+    $hint.style.color = '#2563eb';
+    $hint.textContent = '检测到固定区域建议，确认后点「应用」';
+    return true;
+  }
+
+  // ====== 初始化原始帧时间线（首帧）======
+  function initStitch(frame, pixelBudget) {
+    if (!stitchApi || typeof stitchApi.createStitchTimeline !== 'function') {
+      throw timelineError('stitch-helper-missing', '长截图拼接模块未加载');
     }
-    // 只在“内容行”上判定重叠相似度；重叠区几乎全是空白行则判为无法判定(-1)
-    function scoreOverlap(overlap) {
-      let ok = 0;
-      let content = 0;
-      for (let i = 0; i < SEARCH_ROWS; i++) {
-        const fRow = Math.floor(((i + 0.5) / SEARCH_ROWS) * overlap);
-        const sRow = stitchSampleH - overlap + fRow;
-        if (sRow < 0 || sRow >= stitchSampleH || fRow >= stitchSampleH) continue;
-        if (!isContentRow(fRow)) continue;
-        content++;
-        if (rowSimilar(fRow, sRow)) ok++;
-      }
-      if (content < 2) return -1;
-      return ok / content;
+    if (!isFrameWithinCanvasBudget(frame.width, frame.height, pixelBudget)) {
+      throw timelineError('pixel-limit', '选区分辨率过高，超出长截图的安全内存上限');
     }
-    const maxOverlap = stitchSampleH;
-    const minOverlap = SEARCH_ROWS;
-    // 取“内容行相似度”最高的 overlap；并列偏向更大 overlap（少接、避免重复）
-    let bestOv = 0;
-    let bestScore = 0;
-    let anyContent = false;
-    for (let ov = maxOverlap; ov >= minOverlap; ov -= STEP) {
-      const sc = scoreOverlap(ov);
-      if (sc < 0) continue;
-      anyContent = true;
-      if (sc > bestScore) {
-        bestScore = sc;
-        bestOv = ov;
-      }
+    const raw = rawFrameFromCanvas(frame);
+    if (!raw.ok) throw timelineError(raw.reason, '抓帧尺寸或像素无效');
+    stitchTimeline = stitchApi.createStitchTimeline({
+      maxFrames: captureSession.getLimits().maxFrames,
+      maxPixels: pixelBudget,
+      // 原始帧和输出各自上限 20M 像素，防止高重叠抓帧无界占用内存。
+      maxSourcePixels: pixelBudget,
+      minOverlap: SEARCH_ROWS,
+      matchThreshold: 0.9,
+      ambiguityMargin: 0.025,
+      tolerance: MATCH_TOL,
+    });
+    const added = stitchTimeline.addFrame(raw.frame);
+    if (!added.ok) {
+      stitchTimeline = null;
+      throw timelineError(added.reason, '首帧无法用于可靠拼接');
     }
-    if (anyContent && bestScore >= 0.62 && bestOv >= minOverlap) {
-      return overlapResult(bestOv, true);
+    if (!renderTimeline()) {
+      stitchTimeline = null;
+      throw timelineError('render-failed', '首帧渲染失败');
     }
-    // 搜索区几乎全空白 → 无法靠像素判定，整帧接上（此时重复的只会是空白，肉眼看不出）
-    return overlapResult(0, anyContent);
+    refreshEditControls();
+  }
+
+  function unmatchedMessage(reason) {
+    if (reason === 'ambiguous-match' || reason === 'ambiguous-direction') {
+      return '重叠候选不唯一，已保留上一版——请小段慢速滚动';
+    }
+    if (reason === 'reverse-direction') {
+      return '检测到反向滚动，本帧未接入——请沿原方向继续';
+    }
+    return '未找到可靠重叠，已保留上一版——请放慢滚动';
   }
 
   function consumeFrame(frame, token) {
     if (!captureSession || !captureSession.isCurrent(token)) return { status: 'stale', changed: false };
-    const m = matchOverlap(frame.ctx, frame.width, frame.height);
-    const overlap = m.overlap;
-    const appendH = frame.height - overlap;
-
-    // 几乎完全重叠（未滚动）：appendH 很小则不追加。
-    // 阈值用帧高的 0.5% 或至少 2px，避免抖动/亚像素噪声反复追加。
-    const threshold = Math.max(2, Math.floor(frame.height * 0.005));
-    if (appendH <= threshold) {
-      displacementGate.observe(0);
-      return { status: 'idle', changed: false }; // 未滚动，不追加
-    }
-
-    // 纯色/全透明等视觉空帧无法产生可靠重叠。不再把整帧硬接上去，
-    // 由会话的连续失败计数进行有界重试。
-    if (overlap === 0 && !m.hadContent) {
-      displacementGate.resetPending();
-      return { status: 'empty-frame', changed: false };
-    }
-
-    // 有内容却没能匹配上重叠（overlap=0 且本应有内容）：多半滚动过快或渲染有差异。
-    // 整帧硬接会漏接或重复且无法察觉——改为「丢弃本帧、不拼接」，等用户放慢后下一帧自然能匹配上，
-    // 宁可暂停也不静默产出错位长图。警告用红色持久显示，避免被后续 tick 的提示覆盖。
-    if (shouldPauseForUnmatchedContent(m)) {
-      $hint.textContent = '滚动过快，已暂停拼接——请放慢匀速下滚';
+    if (!stitchTimeline) return { status: 'terminal', reason: 'stitch-helper-missing', changed: false };
+    const raw = rawFrameFromCanvas(frame);
+    if (!raw.ok) return { status: 'terminal', reason: raw.reason, changed: false };
+    const added = stitchTimeline.addFrame(raw.frame);
+    if (!added.ok) {
+      if (added.reason === 'blank-frame') return { status: 'empty-frame', changed: false };
+      if (added.reason === 'fixed-bands-suggested') {
+        suggestedFixedBands = { top: added.suggestion.top, bottom: added.suggestion.bottom };
+        fixedSuggestionShown = true;
+        $fixedTop.value = String(suggestedFixedBands.top);
+        $fixedBottom.value = String(suggestedFixedBands.bottom);
+        return { status: 'terminal', reason: 'fixed-bands-suggested', changed: false };
+      }
+      if (['width-mismatch', 'scale-mismatch', 'pixel-read-failed'].includes(added.reason)) {
+        return { status: 'terminal', reason: added.reason, changed: false };
+      }
+      if (['pixel-limit', 'source-pixel-limit', 'frame-limit'].includes(added.reason)) {
+        return { status: 'terminal', reason: added.reason, changed: false };
+      }
       $hint.style.color = '#ff5a5a';
-      displacementGate.resetPending();
-      return { status: 'unmatched', changed: false };
+      $hint.textContent = unmatchedMessage(added.reason);
+      return { status: 'unmatched', reason: added.reason, changed: false };
     }
-
-    // 单帧的重叠误判不立即写入 canvas；等连续位移样本稳定后再接入当前帧。
-    // 因为当前帧仍然相对已拼接底部做匹配，等待确认不会丢掉中间内容。
-    const movement = displacementGate.observe(appendH);
-    if (!movement.confirmed) {
-      $hint.style.color = '';
-      $hint.textContent = '正在确认稳定位移…';
-      return { status: 'movement-pending', changed: false };
-    }
-    // 正常拼接：清掉可能残留的警告态
-    if ($hint.style.color) {
-      $hint.style.color = '';
-      $hint.textContent = '滚动页面会自动拼接';
-    }
-
-    const newHeight = stitchedHeight + appendH;
-    const pixelBudget = captureSession.getLimits().maxPixels;
-    if (
-      !captureSession.canFitCanvas(token, stitchCanvas.width, newHeight) ||
-      !ensureCapacity(newHeight, pixelBudget)
-    ) {
-      return { status: 'terminal', reason: 'pixel-limit', changed: false };
-    }
-
+    if (added.status === 'idle') return { status: 'idle', changed: false };
     if (!captureSession.isCurrent(token)) return { status: 'stale', changed: false };
-
-    // 把新帧的 [overlap, frame.height) 这段，绘制到拼接 canvas 底部
-    stitchCtx.drawImage(
-      frame.canvas,
-      0,
-      overlap,
-      frame.width,
-      appendH, // 源区域
-      0,
-      stitchedHeight,
-      frame.width,
-      appendH // 目标区域
-    );
-    stitchedHeight = newHeight;
+    if (!renderTimeline()) return { status: 'terminal', reason: 'render-failed', changed: false };
     captureSession.updateStitchedPixels(token, stitchCanvas.width, stitchedHeight);
-    return { status: 'movement', changed: true };
+    refreshEditControls();
+    const offeredSuggestion = maybeOfferFixedSuggestion();
+    if (!offeredSuggestion) {
+      $hint.style.color = '';
+      $hint.textContent = captureHorizontal ? '水平滚动页面会自动拼接' : '滚动页面会自动拼接';
+    }
+    return { status: 'movement', changed: true, direction: added.direction };
   }
 
   function clearCaptureTimer() {
@@ -657,11 +674,15 @@
 
   function captureTerminalMessage(reason, count) {
     if (reason === 'capture-failures') {
-      return '连续 ' + String(count || DEFAULT_MAX_CONSECUTIVE_FAILURES) + ' 次抓帧失败，已安全停止';
+      return '连续 ' + String(count || DEFAULT_MAX_CONSECUTIVE_FAILURES) + ' 次抓帧失败，已保留原始帧，可点「继续」';
     }
-    if (reason === 'frame-limit') return '已达会话最大帧数，请点完成';
-    if (reason === 'pixel-limit') return '已达图像像素/内存安全上限，请点完成';
-    return '捕获已停止，可保存已拼接内容';
+    if (reason === 'frame-limit') return '已达会话最大帧数，可完成或删除片段后继续';
+    if (reason === 'pixel-limit' || reason === 'source-pixel-limit') return '已达图像/原始帧内存上限，可删除片段或完成';
+    if (reason === 'width-mismatch') return '抓帧宽度已变化，为避免错位已拒绝；恢复原窗口尺寸后可继续';
+    if (reason === 'scale-mismatch') return '显示器或 DPR 已变化，为避免错位已拒绝；恢复后可继续';
+    if (reason === 'fixed-bands-suggested') return '检测到固定顶部/底部建议；确认数值并点「应用」后继续';
+    if (reason === 'render-failed') return '重新拼接失败，旧图与原始帧仍保留';
+    return '捕获已停止，内容已保留，可继续或完成';
   }
 
   function endCapture(reason, count) {
@@ -672,8 +693,10 @@
     $hint.style.color = '#b45309';
     $hint.textContent = captureTerminalMessage(reason, count);
     $btnDone.disabled = !stitchCanvas || stitchedHeight <= 0;
-    $btnStart.disabled = !!stitchCanvas;
+    $btnStart.disabled = false;
+    $btnStart.querySelector('.label').textContent = stitchCanvas ? '继续' : '开始';
     $btnDir.disabled = !!stitchCanvas;
+    refreshEditControls();
   }
 
   // ====== 单次自适应 tick ======
@@ -705,7 +728,6 @@
         return;
       }
 
-      updateCount(result.frameCount);
       const outcome = result.value || { status: 'idle', changed: false };
       if (outcome.status === 'terminal') {
         endCapture(outcome.reason);
@@ -728,6 +750,7 @@
 
       captureSession.recordSuccess(token);
       failureStreak = 0;
+      updateCount(stitchTimeline ? stitchTimeline.getState().frames.length : 0);
       cadenceStatus = outcome.status;
       if (outcome.status === 'idle') {
         idleStreak += 1;
@@ -751,6 +774,8 @@
       var maxCrop = Math.max(0, stitchedHeight - 8);
       $cropTop.max = String(maxCrop);
       $cropBottom.max = String(maxCrop);
+      if ((parseInt($cropTop.value, 10) || 0) > maxCrop) $cropTop.value = String(maxCrop);
+      if ((parseInt($cropBottom.value, 10) || 0) > maxCrop) $cropBottom.value = String(maxCrop);
       $cropTopVal.textContent = $cropTop.value + 'px';
       $cropBottomVal.textContent = $cropBottom.value + 'px';
     }
@@ -758,19 +783,19 @@
 
   // ====== 开始捕获 ======
   async function startCapture() {
-    if (capturing || captureBusy || finishing || stitchCanvas) return;
+    if (capturing || captureBusy || finishing) return;
+    const hadExistingTimeline = !!stitchTimeline;
     operationGeneration += 1;
     captureSession = createLongshotSession(sessionOptions);
     captureHorizontal = horizontal;
     captureToken = captureSession.start(captureHorizontal ? 'horizontal' : 'vertical');
-    displacementGate = createDisplacementGate({ confirmations: 2, toleranceRatio: 0.65 });
     idleStreak = 0;
     failureStreak = 0;
     captureBusy = true;
     $btnStart.disabled = true;
     $btnDir.disabled = true;
     $hint.style.color = '';
-    $hint.textContent = '正在抓取首帧…';
+    $hint.textContent = hadExistingTimeline ? '正在恢复捕获…' : '正在抓取首帧…';
     try {
       const token = captureToken;
       const result = await runCaptureStep({
@@ -778,32 +803,54 @@
         token,
         capture: () => grabFrame(captureHorizontal),
         consume: (first) => {
+          if (stitchTimeline) return consumeFrame(first, token);
           initStitch(first, captureSession.getLimits().maxPixels);
           captureSession.updateStitchedPixels(token, first.width, first.height);
           return { status: 'initial', changed: true };
         },
       });
       if (result.status === 'stale') return;
-      if (result.status !== 'ok') throw (result.error || new Error(result.reason || '首帧失败'));
+      if (result.status === 'terminal') {
+        endCapture(result.reason, result.consecutiveFailures);
+        return;
+      }
+      if (result.status !== 'ok') throw (result.error || timelineError(result.reason, '首帧失败'));
+      const outcome = result.value || { status: 'idle', changed: false };
+      if (outcome.status === 'terminal') {
+        endCapture(outcome.reason);
+        return;
+      }
       captureSession.recordSuccess(token);
-      updateCount(result.frameCount);
+      updateCount(stitchTimeline ? stitchTimeline.getState().frames.length : 0);
       capturing = true;
       $dot.classList.add('live');
       $btnDone.disabled = false;
-      $hint.textContent = captureHorizontal ? '水平滚动页面会自动拼接' : '滚动页面会自动拼接';
+      $btnStart.disabled = false;
+      $btnStart.querySelector('.label').textContent = '暂停';
+      if (outcome.status !== 'unmatched') {
+        $hint.textContent = captureHorizontal ? '水平滚动页面会自动拼接' : '滚动页面会自动拼接';
+      }
+      refreshEditControls();
       scheduleNextTick('idle', 0);
     } catch (e) {
-      // 首帧失败：恢复可重试
+      // 失败时只丢弃本轮在途捕获；既有时间线与上次可导出画布不动。
       if (captureSession && captureSession.isCurrent(captureToken)) captureSession.stop('first-frame-failure');
       captureToken = null;
-      stitchCanvas = null;
-      stitchCtx = null;
-      stitchedHeight = 0;
-      updateCount(0);
-      $cropBox.hidden = true;
+      if (!hadExistingTimeline) {
+        stitchTimeline = null;
+        stitchCanvas = null;
+        stitchCtx = null;
+        stitchedHeight = 0;
+        updateCount(0);
+        $cropBox.hidden = true;
+      }
       $btnStart.disabled = false;
-      $btnDir.disabled = false;
-      $hint.textContent = '首帧失败，请重试';
+      $btnDir.disabled = !!stitchTimeline;
+      $btnStart.querySelector('.label').textContent = stitchTimeline ? '继续' : '开始';
+      $hint.style.color = '#b45309';
+      $hint.textContent = (hadExistingTimeline ? '继续捕获失败，原始帧已保留' : '首帧失败，请重试') +
+        (e && e.code ? '（' + e.code + '）' : '');
+      refreshEditControls();
     } finally {
       captureBusy = false;
     }
@@ -817,6 +864,89 @@
     if (captureSession && captureSession.isCurrent(captureToken)) {
       captureSession.stop(reason || 'stopped');
     }
+  }
+
+  function pauseCaptureForUser() {
+    if (!capturing) return;
+    stopCapture('paused');
+    $btnStart.disabled = false;
+    $btnStart.querySelector('.label').textContent = '继续';
+    $btnDir.disabled = !!stitchTimeline;
+    $hint.style.color = '';
+    $hint.textContent = '已暂停：可删除片段、调整固定区域，或继续捕获';
+    refreshEditControls();
+  }
+
+  function timelineMutationMessage(result) {
+    if (!result) return '操作失败';
+    if (result.reason === 'ambiguous-match') return '删除后相邻帧有多个重叠候选，已取消操作';
+    if (result.reason === 'no-match') return '删除后相邻帧无法可靠衔接，已取消操作';
+    if (result.reason === 'last-frame') return '至少需保留一帧';
+    if (result.reason === 'pixel-limit' || result.reason === 'source-pixel-limit') return '重新拼接超出内存安全上限';
+    if (result.reason === 'nothing-to-undo') return '没有可撤销的操作';
+    if (result.reason === 'nothing-to-redo') return '没有可重做的操作';
+    return '操作失败：' + (result.reason || '未知原因');
+  }
+
+  function finishTimelineEdit(result, successMessage) {
+    if (!result || !result.ok) {
+      $hint.style.color = '#ff5a5a';
+      $hint.textContent = timelineMutationMessage(result);
+      return false;
+    }
+    if (!renderTimeline()) {
+      $hint.style.color = '#ff5a5a';
+      $hint.textContent = '重新拼接失败，上一版导出图仍保留';
+      return false;
+    }
+    updateCount(stitchTimeline.getState().frames.length);
+    refreshEditControls();
+    $hint.style.color = '';
+    $hint.textContent = successMessage;
+    return true;
+  }
+
+  function deleteSelectedSegment() {
+    if (!stitchTimeline || capturing || finishing) return;
+    const id = $segmentSelect.value;
+    finishTimelineEdit(stitchTimeline.deleteFrame(id), '已删除选中帧并从原始帧重新拼接');
+  }
+
+  function undoTimelineEdit() {
+    if (!stitchTimeline || capturing || finishing) return;
+    suggestedFixedBands = null;
+    finishTimelineEdit(stitchTimeline.undo(), '已撤销并重新拼接');
+  }
+
+  function redoTimelineEdit() {
+    if (!stitchTimeline || capturing || finishing) return;
+    suggestedFixedBands = null;
+    finishTimelineEdit(stitchTimeline.redo(), '已重做并重新拼接');
+  }
+
+  function suggestFixedRegions() {
+    if (!stitchTimeline || capturing || finishing) return;
+    const suggestion = stitchTimeline.suggestFixedBands({ minBand: 2 });
+    if (!suggestion.top && !suggestion.bottom) {
+      $hint.style.color = '#b45309';
+      $hint.textContent = '未检测到稳定固定区域，可手动输入像素值';
+      return;
+    }
+    suggestedFixedBands = { top: suggestion.top, bottom: suggestion.bottom };
+    fixedSuggestionShown = true;
+    $fixedTop.value = String(suggestion.top);
+    $fixedBottom.value = String(suggestion.bottom);
+    $hint.style.color = '#2563eb';
+    $hint.textContent = '建议顶部 ' + suggestion.top + 'px、底部 ' + suggestion.bottom + 'px；确认后点「应用」';
+  }
+
+  function applyFixedRegions() {
+    if (!stitchTimeline || capturing || finishing) return;
+    const top = Math.max(0, parseInt($fixedTop.value, 10) || 0);
+    const bottom = Math.max(0, parseInt($fixedBottom.value, 10) || 0);
+    const result = stitchTimeline.setFixedBands({ top, bottom });
+    if (result.ok) suggestedFixedBands = null;
+    finishTimelineEdit(result, '已应用固定顶部/底部并重新拼接');
   }
 
   // ====== 完成：导出 -> 保存 + 复制 -> 关窗 ======
@@ -901,6 +1031,9 @@
       finishing = false;
       $bar.classList.remove('busy');
       $hint.textContent = '保存失败：' + ((e && e.message) || e) + '，可点「完成」重试或「取消」放弃';
+      $btnStart.disabled = false;
+      $btnStart.querySelector('.label').textContent = '继续';
+      refreshEditControls();
     }
   }
 
@@ -920,7 +1053,15 @@
     $btnDir.title = '切换滚动方向（当前：' + (horizontal ? '横向' : '纵向') + '）';
     $hint.textContent = horizontal ? '水平滚动页面会自动拼接' : '滚动页面会自动拼接';
   });
-  $btnStart.addEventListener('click', startCapture);
+  $btnStart.addEventListener('click', () => {
+    if (capturing) pauseCaptureForUser();
+    else startCapture();
+  });
+  $btnDeleteSegment.addEventListener('click', deleteSelectedSegment);
+  $btnUndo.addEventListener('click', undoTimelineEdit);
+  $btnRedo.addEventListener('click', redoTimelineEdit);
+  $btnSuggestFixed.addEventListener('click', suggestFixedRegions);
+  $btnApplyFixed.addEventListener('click', applyFixedRegions);
   $cropTop.addEventListener('input', () => { $cropTopVal.textContent = $cropTop.value + 'px'; });
   $cropBottom.addEventListener('input', () => { $cropBottomVal.textContent = $cropBottom.value + 'px'; });
   $btnDone.addEventListener('click', finish);
@@ -928,6 +1069,13 @@
 
   // Esc 取消 / Enter 完成（已捕获时）
   window.addEventListener('keydown', (e) => {
+    const modifier = e.metaKey || e.ctrlKey;
+    if (modifier && e.key.toLowerCase() === 'z' && stitchTimeline && !capturing && !finishing) {
+      e.preventDefault();
+      if (e.shiftKey) redoTimelineEdit();
+      else undoTimelineEdit();
+      return;
+    }
     if (e.key === 'Escape') {
       e.preventDefault();
       cancel();
@@ -942,6 +1090,12 @@
   // ====== 接收初始化 payload ======
   kkapi.onInit((payload) => {
     if (!payload) return;
+    if (!stitchApi || typeof stitchApi.createStitchTimeline !== 'function') {
+      $hint.textContent = '长截图拼接模块加载失败，请重启应用';
+      $hint.style.color = '#ff5a5a';
+      $btnStart.disabled = true;
+      return;
+    }
     RECT = payload.rect;
     DISPLAY_ID = payload.displayId;
     SCALE = payload.scaleFactor || 1;

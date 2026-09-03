@@ -19,6 +19,7 @@ const {
   protocol,
   net,
   Notification,
+  session,
 } = require('electron');
 
 const C = require('../shared/channels');
@@ -29,11 +30,19 @@ const { createAIRecognitionHandler } = require('./ai-recognition');
 const media = require('./media');
 const {
   exportImage,
+  exportImagesToPdf,
   saveImageViaDialog,
   quickSaveImage,
   normalizeImageExportPreferences,
   preferredExtensionForFormat,
 } = require('./image-export');
+const {
+  DEFAULT_SCREENSHOT_TEMPLATE,
+  DEFAULT_RECORDING_TEMPLATE,
+  buildFilename,
+  nextAvailablePath,
+} = require('./filename-template');
+const { exportHistoryPdf } = require('./history-pdf-export');
 const windows = require('./windows');
 const history = require('./history');
 const tempFiles = require('./temp-files');
@@ -75,15 +84,38 @@ const {
   normalizeExternalHttpUrl,
   normalizeConfigPatch,
   normalizePinStateFlags,
+  normalizePinImageReplacement,
+  normalizePinGroupAction,
+  normalizeFormulaPinPayload,
   normalizeProviderTestTarget,
   normalizeRecordingPayload,
   normalizeOCRLanguage,
 } = require('./ipc-validation');
 const { spawn } = require('child_process');
 const axprobe = require('./axprobe');
+const swiftcache = require('./swiftcache');
+const { RECORD_ACTIONS_SOURCE } = require('./swift-helper-sources');
+const {
+  createRecordActionMonitor,
+  createRecordActionOwnerRegistry,
+} = require('./record-action-monitor');
 const os = require('os');
 const { pathToFileURL, fileURLToPath } = require('url');
 const { openValidatedExternalUrl } = require('./external-url');
+const { installMediaPermissionPolicy } = require('./media-permission-policy');
+
+const recordActionMonitor = createRecordActionMonitor({
+  ensureBinary: () => swiftcache.ensureBinary({
+    name: 'record-actions',
+    source: RECORD_ACTIONS_SOURCE,
+    language: 'c',
+  }),
+  spawnProcess: spawn,
+  cursorPoint: () => screen.getCursorScreenPoint(),
+});
+const recordActionOwners = createRecordActionOwnerRegistry({
+  stop: (ownerId) => recordActionMonitor.stop(ownerId),
+});
 
 async function openExternalHttpUrl(rawUrl) {
   return openValidatedExternalUrl(rawUrl, {
@@ -372,12 +404,16 @@ async function askAboutQuitRisk(message, detail) {
   return 'cancel';
 }
 
-async function prepareApplicationQuit() {
+async function prepareApplicationQuit({ interactive = true } = {}) {
   // 交互式选窗会启动 screencapture 子进程。退出时先使当前代数
   // 失效，再等待 Abort 清理（包括 SIGTERM 后的 SIGKILL 兜底）完成。
   for (;;) {
     const captureStopped = await captureCoordinator.cancelPendingAndWait('app-quit', 2000);
     if (captureStopped) break;
+    if (!interactive) {
+      console.error('[quit] 非交互退出：窗口截图子进程未在限时内停止。');
+      break;
+    }
     const choice = await askAboutQuitRisk(
       '正在进行的窗口截图未能完全停止。',
       '系统选窗子进程仍在退出清理中。'
@@ -395,6 +431,10 @@ async function prepareApplicationQuit() {
   for (;;) {
     const flushResult = await windows.preparePinsForClose({ timeoutMs: 5000 });
     if (flushResult.ok) break;
+    if (!interactive) {
+      console.error('[quit] 非交互退出：有贴图未在限时内完成内容同步。');
+      break;
+    }
     const failures = flushResult.results
       .filter((item) => !item.ok)
       .slice(0, 5)
@@ -421,6 +461,10 @@ async function prepareApplicationQuit() {
       savePinWorkspaceNow({ throwOnError: true });
       break;
     } catch (error) {
+      if (!interactive) {
+        console.error('[quit] 非交互退出：贴图工作区保存失败：', error);
+        break;
+      }
       const choice = await askAboutQuitRisk(
         '贴图工作区保存失败。',
         String((error && error.message) || error || '未知错误').slice(0, 2000)
@@ -438,6 +482,10 @@ async function prepareApplicationQuit() {
   // 保护。非 idle/saved/canceled 状态要求明确放弃，默认选项是返回录屏。
   if (!windows.canCloseRecorder()) {
     const state = windows.getRecorderState();
+    if (!interactive) {
+      console.error(`[quit] 非交互退出：录屏状态 ${state && state.state ? state.state : 'unknown'} 未安全保存。`);
+      return true;
+    }
     const result = await dialog.showMessageBox({
       type: 'warning',
       title: '录屏尚未安全保存',
@@ -518,7 +566,7 @@ const IPC_ROLE_ALLOWLIST = {
   [C.CONFIG_GET]: ['main', 'overlay', 'ai', 'popover', 'pin'],
   [C.CONFIG_SET]: ['main', 'popover', 'overlay'],
 
-  [C.WINDOW_CLOSE_SELF]: ['ai', 'longshot', 'pin', 'recorder'],
+  [C.WINDOW_CLOSE_SELF]: ['ai', 'longshot', 'pin', 'recorder', 'formula'],
   [C.WINDOW_MINIMIZE_SELF]: ['ai'],
   [C.WINDOW_RESIZE_SELF]: ['pin'],
   [C.WINDOW_MOVE_SELF]: ['pin'],
@@ -540,8 +588,12 @@ const IPC_ROLE_ALLOWLIST = {
   [C.PIN_CREATE]: [],
   [C.PIN_SET_STATE]: ['pin'],
   [C.PIN_UPDATE_CONTENT]: ['pin'],
+  [C.PIN_REPLACE_IMAGE]: ['pin'],
+  [C.PIN_GROUP_ACTION]: ['pin'],
   [C.PIN_CLOSE_READY]: ['pin'],
+  [C.PIN_SYNC_READY]: ['pin'],
   [C.PIN_START_DRAG]: ['pin'],
+  [C.FORMULA_CREATE_PIN]: ['formula'],
   [C.OPEN_PATH]: ['pin'],
 
   [C.OCR_RUN]: ['main', 'overlay', 'ai'],
@@ -559,6 +611,8 @@ const IPC_ROLE_ALLOWLIST = {
   [C.TRANSLATE_POPUP_CLOSE]: ['translate-popup'],
   [C.RECORD_SAVE]: ['recorder'],
   [C.RECORD_STATE]: ['recorder'],
+  [C.RECORD_ACTION_START]: ['recorder'],
+  [C.RECORD_ACTION_STOP]: ['recorder'],
   [C.OPEN_EXTERNAL]: ['overlay'],
 
   [C.OPEN_MAIN]: ['popover'],
@@ -576,6 +630,7 @@ const IPC_ROLE_ALLOWLIST = {
   [C.HISTORY_CLEAR]: ['main'],
   [C.HISTORY_EXPORT]: ['main'],
   [C.HISTORY_EXPORT_MANY]: ['main'],
+  [C.HISTORY_EXPORT_PDF]: ['main'],
 };
 
 // ---------- 屏幕捕获 ----------
@@ -1020,15 +1075,25 @@ function downscaleDataURL(dataURL, maxSide) {
 }
 
 // ---------- 保存图片 ----------
-async function saveImageWithDialog(dataURL, suggestName) {
+async function saveImageWithDialog(dataURL, filenameContext = {}) {
   const cfg = config.get();
   const dir = cfg.general.saveDir || app.getPath('pictures');
+  const preferences = normalizeImageExportPreferences(cfg);
+  const filename = buildFilename({
+    template: (cfg.capture && cfg.capture.fileNameTemplate) || DEFAULT_SCREENSHOT_TEMPLATE,
+    extension: preferredExtensionForFormat(preferences.format),
+    now: filenameContext.now == null ? Date.now() : filenameContext.now,
+    type: filenameContext.type || 'screenshot',
+    index: filenameContext.index == null ? 1 : filenameContext.index,
+    width: filenameContext.width == null ? 0 : filenameContext.width,
+    height: filenameContext.height == null ? 0 : filenameContext.height,
+  });
   return saveImageViaDialog(
     {
       dataURL,
       config: cfg,
       defaultDirectory: dir,
-      suggestName: suggestName || `困困截图-${Date.now()}.png`,
+      suggestName: path.basename(nextAvailablePath(dir, filename)),
     },
     {
       showSaveDialog: (options) => dialog.showSaveDialog(options),
@@ -1106,11 +1171,8 @@ function registerIpc() {
   });
   // 按增量移动当前窗口（贴图 JS 拖动用）
   ipcMain.handle(C.WINDOW_MOVE_SELF, (e, payload) => {
-    const w = BrowserWindow.fromWebContents(e.sender);
-    if (!w || w.isDestroyed()) return;
     const { dx, dy } = normalizeWindowMove(payload);
-    const b = w.getBounds();
-    w.setBounds({ x: Math.round(b.x + dx), y: Math.round(b.y + dy), width: b.width, height: b.height });
+    return { moved: windows.movePinGroup(e.sender.id, dx, dy) };
   });
   ipcMain.handle(C.OPEN_SETTINGS, () => windows.openSettings());
   ipcMain.handle(C.OPEN_AI_PANEL, (_e, payload) => windows.openAIPanel(payload));
@@ -1188,7 +1250,12 @@ function registerIpc() {
           clipboard.writeImage(image);
           break;
         case 'save': {
-          const r = await saveImageWithDialog(imageDataURL);
+          const imageSize = image.getSize();
+          const r = await saveImageWithDialog(imageDataURL, {
+            type: captureType,
+            width: imageSize.width,
+            height: imageSize.height,
+          });
           if (!r || r.saved !== true) {
             return {
               ok: false,
@@ -1208,6 +1275,9 @@ function registerIpc() {
             config: cfg,
             defaultDirectory: dir,
             timestamp: Date.now(),
+            type: captureType,
+            width: image.getSize().width,
+            height: image.getSize().height,
           }, { exportImage });
           const file = exported.path;
           // 历史库始终保留截图阶段的原始 PNG data URL，不因磁盘导出格式而二次压缩。
@@ -1297,11 +1367,17 @@ function registerIpc() {
     return img.isEmpty() ? null : img.toDataURL();
   });
   ipcMain.handle(C.IMAGE_SAVE, async (e, dataURL) => {
-    validatedNativeImage(dataURL);
-    const r = await saveImageWithDialog(dataURL);
+    const image = validatedNativeImage(dataURL);
+    const role = windows.getTrustedRole(e.sender.id);
+    const type = historyTypeForImageSaveRole(role);
+    const imageSize = image.getSize();
+    const r = await saveImageWithDialog(dataURL, {
+      type,
+      width: imageSize.width,
+      height: imageSize.height,
+    });
     if (r && r.saved) {
-      const role = windows.getTrustedRole(e.sender.id);
-      saveToHistory(dataURL, historyTypeForImageSaveRole(role)); // 长截图/贴图保留真实类型
+      saveToHistory(dataURL, type); // 长截图/贴图保留真实类型
     }
     return r;
   });
@@ -1366,9 +1442,81 @@ function registerIpc() {
     }
   });
 
+  // 裁剪、旋转与翻转会同时改变图片像素和窗口宽高比。两端尺寸都以
+  // Electron 实际解码结果为准，避免 renderer 伪造尺寸导致越界窗口或伸缩畸变。
+  ipcMain.handle(C.PIN_REPLACE_IMAGE, (e, rawUpdate) => {
+    try {
+      const update = normalizePinImageReplacement(rawUpdate);
+      const payload = windows.getPinPayload(e.sender.id);
+      if (!payload || typeof payload.dataURL !== 'string') throw new Error('图片贴图窗口不存在。');
+      const nextSize = validatedNativeImage(update.dataURL).getSize();
+      if (nextSize.width !== update.width || nextSize.height !== update.height) {
+        throw new Error('新图片尺寸与申报不一致。');
+      }
+      const currentRevision = Number.isSafeInteger(payload.contentRevision) ? payload.contentRevision : 0;
+      // invoke 回执丢失后 renderer 会重放完全相同的替换。此时 payload 已是新图，
+      // 不能再用旧 sourceWidth/sourceHeight 去校验它，应交给 windows 的幂等分支。
+      const isExactReplay = update.revision === currentRevision
+        && update.baseRevision === currentRevision - 1
+        && update.dataURL === payload.dataURL;
+      if (!isExactReplay) {
+        const sourceSize = validatedNativeImage(payload.dataURL).getSize();
+        if (sourceSize.width !== update.sourceWidth || sourceSize.height !== update.sourceHeight) {
+          throw new Error('原图片尺寸已变更，请重试。');
+        }
+      }
+      const result = windows.replacePinImage(e.sender.id, update);
+      return { ok: true, revision: result.revision, bounds: result.bounds };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+  });
+
+  ipcMain.handle(C.PIN_GROUP_ACTION, (e, rawAction) => {
+    try {
+      const { action } = normalizePinGroupAction(rawAction);
+      return windows.pinGroupAction(e.sender.id, action);
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+  });
+
+  ipcMain.handle(C.FORMULA_CREATE_PIN, (_e, rawPayload) => {
+    try {
+      const { dataURL } = normalizeFormulaPinPayload(rawPayload);
+      if (!dataURL.startsWith('data:image/png;base64,')) throw new Error('公式贴图必须是 PNG 图片。');
+      const image = validatedNativeImage(dataURL);
+      const size = image.getSize();
+      // 公式页以 2x 像素渲染，贴图创建时还原为逻辑尺寸，并保持宽高比。
+      const logicalWidth = size.width / 2;
+      const logicalHeight = size.height / 2;
+      const grow = Math.max(1, 80 / logicalWidth, 40 / logicalHeight);
+      const shrink = Math.min(1, 1600 / (logicalWidth * grow), 1000 / (logicalHeight * grow));
+      const logicalScale = grow * shrink;
+      const width = Math.max(1, Math.round(logicalWidth * logicalScale));
+      const height = Math.max(1, Math.round(logicalHeight * logicalScale));
+      const point = screen.getCursorScreenPoint();
+      windows.createPin({
+        dataURL,
+        bounds: { x: point.x, y: point.y, width, height },
+      });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+  });
+
   ipcMain.handle(C.PIN_CLOSE_READY, (e, rawReply) => {
     try {
       return windows.acknowledgePinClose(e.sender.id, rawReply);
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+  });
+
+  ipcMain.handle(C.PIN_SYNC_READY, (e, rawReply) => {
+    try {
+      return windows.acknowledgePinSync(e.sender.id, rawReply);
     } catch (err) {
       return { ok: false, error: (err && err.message) || String(err) };
     }
@@ -1632,7 +1780,7 @@ function registerIpc() {
     } catch (err) {
       return { saved: false, error: (err && err.message) || String(err) };
     }
-    const { buffer, toGif, fps: safeFps, trimStart: ss, trimEnd: te } = normalized;
+    const { buffer, toGif, fps: safeFps, trimStart: ss, trimEnd: te, width, height } = normalized;
     // P2-4 剪辑：起止秒（0=不裁）
     const trimArgs = [];
     if (ss > 0) trimArgs.push('-ss', String(ss));
@@ -1643,9 +1791,18 @@ function registerIpc() {
       const wantGif = toGif !== undefined ? !!toGif : !!cfg.recording.toGif;
       const dir = cfg.general.saveDir || app.getPath('videos') || app.getPath('downloads');
       const ext = wantGif ? 'gif' : 'webm';
+      const filename = buildFilename({
+        template: (cfg.recording && cfg.recording.fileNameTemplate) || DEFAULT_RECORDING_TEMPLATE,
+        extension: ext,
+        now: Date.now(),
+        type: 'recording',
+        index: 1,
+        width,
+        height,
+      });
       const { canceled, filePath } = await dialog.showSaveDialog({
         title: '保存录屏',
-        defaultPath: path.join(dir, `困困录屏-${Date.now()}.${ext}`),
+        defaultPath: nextAvailablePath(dir, filename),
         filters: wantGif
           ? [{ name: 'GIF 动图', extensions: ['gif'] }]
           : [
@@ -1668,12 +1825,14 @@ function registerIpc() {
         // 受管副本写入失败不能否定用户导出已成功的事实，但会返回 historySaved=false
         // 并记录日志，避免为了历史副本让录屏窗口误以为整个保存失败。
         const historyItem = await persistRecordingHistory(filePath, {
-          addMedia: (source, type) => history.addMedia(source, type),
+          addMedia: (source, type, metadata) => history.addMedia(source, type, metadata),
           broadcast: () => windows.broadcast(C.HISTORY_CHANGED),
           onError: (error) => console.error(
             '[history] 录屏已导出，但受管历史副本写入失败：',
             (error && error.message) || String(error),
           ),
+          width,
+          height,
         });
         return { saved: true, path: filePath, historySaved: !!historyItem };
       } catch (err) {
@@ -1691,6 +1850,36 @@ function registerIpc() {
     } catch (error) {
       return { ok: false, error: (error && error.message) || String(error) };
     }
+  });
+
+  ipcMain.handle(C.RECORD_ACTION_START, async (e) => {
+    const ownerId = e.sender.id;
+    let releaseOwner;
+    try {
+      // 同一 WebContents 重试只保留一个 destroyed 监听器；helper 的任何终止路径
+      // 都通过 onStopped 释放它，避免长时间运行后触发 EventEmitter 泄漏告警。
+      releaseOwner = recordActionOwners.watch(e.sender);
+      return await recordActionMonitor.start({
+        ownerId,
+        send: (payload) => {
+          if (!e.sender.isDestroyed()) e.sender.send(C.RECORD_ACTION_EVENT, payload);
+        },
+        onStopped: releaseOwner,
+      });
+    } catch (error) {
+      if (typeof releaseOwner === 'function') releaseOwner();
+      return {
+        ok: false,
+        active: false,
+        error: (error && error.message) || String(error),
+      };
+    }
+  });
+
+  ipcMain.handle(C.RECORD_ACTION_STOP, (e) => {
+    const result = recordActionMonitor.stop(e.sender.id);
+    recordActionOwners.release(e.sender.id, e.sender);
+    return result;
   });
 
   // ---- 主窗口 / 菜单栏弹窗 ----
@@ -1805,9 +1994,19 @@ function registerIpc() {
       if (!source) return { saved: false };
       const ext = path.extname(source).toLowerCase();
       const cfg = config.get();
+      const dir = cfg.general.saveDir || app.getPath('videos') || app.getPath('downloads');
+      const filename = buildFilename({
+        template: (cfg.recording && cfg.recording.fileNameTemplate) || DEFAULT_RECORDING_TEMPLATE,
+        extension: ext,
+        now: got.item.time || Date.now(),
+        type: 'recording',
+        index: 1,
+        width: got.item.width || 0,
+        height: got.item.height || 0,
+      });
       const { canceled, filePath } = await dialog.showSaveDialog({
         title: '导出录屏',
-        defaultPath: path.join(cfg.general.saveDir || app.getPath('videos') || app.getPath('downloads'), `困困录屏-${Date.now()}${ext}`),
+        defaultPath: nextAvailablePath(dir, filename),
         filters: [{ name: '录屏文件', extensions: [ext.slice(1)] }],
       });
       if (canceled || !filePath) return { saved: false };
@@ -1819,7 +2018,13 @@ function registerIpc() {
         return { saved: false, error: (err && err.message) || String(err) };
       }
     }
-    return saveImageWithDialog(got.dataURL, `困困截图-${Date.now()}.png`);
+    return saveImageWithDialog(got.dataURL, {
+      now: got.item.time || Date.now(),
+      type: got.item.type || 'screenshot',
+      index: 1,
+      width: got.item.width || 0,
+      height: got.item.height || 0,
+    });
   });
   // 批量导出：只弹一次目录选择框，图片与录屏都从受管历史副本导出。
   ipcMain.handle(C.HISTORY_EXPORT_MANY, async (_e, ids) => {
@@ -1835,20 +2040,40 @@ function registerIpc() {
     const dir = filePaths[0];
     const imagePreferences = normalizeImageExportPreferences(cfg);
     const imageExtension = preferredExtensionForFormat(imagePreferences.format);
+    const reservedPaths = new Set();
     let count = 0;
-    for (const id of safeIds) {
+    for (const [itemIndex, id] of safeIds.entries()) {
       try {
         const got = history.get(id);
         if (got && got.item && got.item.kind === 'media') {
           const source = history.filePathOf(id);
           if (source) {
-            media.copyFileAtomic(source, path.join(dir, `困困录屏-${id}${path.extname(source).toLowerCase()}`));
+            const extension = path.extname(source).toLowerCase();
+            const filename = buildFilename({
+              template: (cfg.recording && cfg.recording.fileNameTemplate) || DEFAULT_RECORDING_TEMPLATE,
+              extension,
+              now: got.item.time || Date.now(),
+              type: 'recording',
+              index: itemIndex + 1,
+              width: got.item.width || 0,
+              height: got.item.height || 0,
+            });
+            media.copyFileAtomic(source, nextAvailablePath(dir, filename, { reserved: reservedPaths }));
             count++;
           }
         } else if (got && got.dataURL) {
+          const filename = buildFilename({
+            template: (cfg.capture && cfg.capture.fileNameTemplate) || DEFAULT_SCREENSHOT_TEMPLATE,
+            extension: imageExtension,
+            now: got.item.time || Date.now(),
+            type: got.item.type || 'screenshot',
+            index: itemIndex + 1,
+            width: got.item.width || 0,
+            height: got.item.height || 0,
+          });
           await exportImage({
             dataURL: got.dataURL,
-            outputPath: path.join(dir, `困困截图-${id}.${imageExtension}`),
+            outputPath: nextAvailablePath(dir, filename, { reserved: reservedPaths }),
             format: imagePreferences.format,
             quality: imagePreferences.quality,
           });
@@ -1857,6 +2082,24 @@ function registerIpc() {
       } catch (err) { console.error('[history] 批量导出单张失败', id, err); }
     }
     return { saved: count > 0, count, dir };
+  });
+  ipcMain.handle(C.HISTORY_EXPORT_PDF, async (_e, ids) => {
+    const cfg = config.get();
+    try {
+      return await exportHistoryPdf({
+        ids,
+        config: cfg,
+        defaultDirectory: cfg.general.saveDir || app.getPath('pictures'),
+      }, {
+        history,
+        showSaveDialog: (options) => dialog.showSaveDialog(options),
+        exportImagesToPdf,
+      });
+    } catch (err) {
+      const message = (err && err.message) || String(err);
+      dialog.showErrorBox('合并 PDF 失败', message);
+      return { saved: false, error: message };
+    }
   });
 }
 
@@ -1955,14 +2198,24 @@ windows.onPinRemoved((webContentsId) => passthroughShortcutLifecycle.removePin(w
 
 // 全部贴图保存为一个目录
 async function pinSaveAll() {
-  const snaps = windows.pinSnapshots();
-  if (!snaps.length) return;
+  if (!windows.pinCount()) return;
   const { canceled, filePaths } = await dialog.showOpenDialog({
     title: '选择目录保存全部贴图',
     properties: ['openDirectory', 'createDirectory'],
     defaultPath: config.get().general.saveDir || app.getPath('pictures'),
   });
   if (canceled || !filePaths[0]) return;
+  const syncResult = await windows.syncPinsContent({ timeoutMs: 5000 });
+  if (!syncResult.ok) {
+    const failures = syncResult.results
+      .filter((item) => !item.ok)
+      .slice(0, 5)
+      .map((item) => `贴图 ${item.webContentsId}: ${item.error}`)
+      .join('\n');
+    dialog.showErrorBox('保存全部贴图失败', failures || '贴图内容同步失败，请重试。');
+    return;
+  }
+  const snaps = windows.pinSnapshots();
   const dir = filePaths[0];
   let n = 0;
   snaps.forEach(({ payload }, i) => {
@@ -2080,6 +2333,7 @@ function buildTray() {
       { label: '长截图', accelerator: sc.longShot, click: () => startCapture('long') },
       { label: '区域录屏', accelerator: sc.record, click: () => startCapture('record') },
       { label: '把剪贴板图片/文字/颜色贴到屏幕', accelerator: sc.pinClipboard, click: () => pinFromClipboard() },
+      { label: 'LaTeX 公式贴图…', click: () => windows.createFormula() },
       { label: '恢复最近关闭的贴图', accelerator: sc.pinRestore, click: () => { if (!windows.restoreLastPin()) dialog.showMessageBox({ type: 'info', message: '没有可恢复的贴图' }); } },
       {
         label: '贴图管理（当前 ' + windows.pinCount() + ' 张）',
@@ -2109,6 +2363,25 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  // 安全：统一拦截所有窗口的「新窗口打开」与「页内导航」——外链走系统浏览器，禁止导航到非本地(file://)页面，
+  // 即使渲染层被注入也无法把窗口导到外部 URL。必须在恢复贴图或创建任何其他窗口之前注册。
+  // P1-1(M4) 收紧：file:// 也只允许导航到应用自身渲染层目录（防被注入后把窗口导到本机任意本地文件渲染）。
+  const RENDERER_ROOT = path.join(__dirname, '..', 'renderer');
+  const ALLOWED_FILE_PREFIX = pathToFileURL(RENDERER_ROOT + path.sep).toString();
+  app.on('web-contents-created', (_e, contents) => {
+    contents.setWindowOpenHandler(({ url }) => {
+      void openExternalHttpUrl(url);
+      return { action: 'deny' };
+    });
+    contents.on('will-navigate', (ev, url) => {
+      const okLocal = url.startsWith('file:') && url.startsWith(ALLOWED_FILE_PREFIX);
+      if (!okLocal) {
+        ev.preventDefault();
+        void openExternalHttpUrl(url);
+      }
+    });
+  });
+
   // 第二实例可能在首实例仍初始化 IPC/托盘时抵达：先排队，初始化完成后按到达顺序处理。
   let resolveLaunchHandlingReady;
   const launchHandlingReady = new Promise((resolve) => { resolveLaunchHandlingReady = resolve; });
@@ -2130,8 +2403,12 @@ if (!gotLock) {
     pinWorkspaceStore = createPinWorkspaceStore({
       rootDir: path.join(app.getPath('userData'), 'pin-workspace'),
     });
-    const restoredPins = windows.restorePinWorkspace(pinWorkspaceStore);
-    if (restoredPins) console.log(`[pin-workspace] 已恢复 ${restoredPins} 张贴图。`);
+    installMediaPermissionPolicy(session.defaultSession, {
+      allowedRecorderUrl: pathToFileURL(
+        path.join(RENDERER_ROOT, 'recorder', 'recorder.html')
+      ).toString(),
+      getTrustedRole: windows.getTrustedRole,
+    });
     // 注册 kkthumb://img/<id> 协议：把请求映射到磁盘上的历史缩略图文件，供历史/首页画廊按需加载。
     // 只读、只服务 history 目录内的缩略图，路径由 history.thumbPathOf 校验，不接受任意路径注入。
     protocol.handle('kkthumb', async (req) => {
@@ -2147,31 +2424,15 @@ if (!gotLock) {
         return new Response('bad request', { status: 400 });
       }
     });
-    // 安全：统一拦截所有窗口的「新窗口打开」与「页内导航」——外链走系统浏览器，禁止导航到非本地(file://)页面，
-    // 即使渲染层被注入也无法把窗口导到外部 URL。须在创建任何窗口前注册。
-    // P1-1(M4) 收紧：file:// 也只允许导航到应用自身渲染层目录（防被注入后把窗口导到本机任意本地文件渲染）。
-    const RENDERER_ROOT = path.join(__dirname, '..', 'renderer');
-    const ALLOWED_FILE_PREFIX = pathToFileURL(RENDERER_ROOT + path.sep).toString();
-    app.on('web-contents-created', (_e, contents) => {
-      contents.setWindowOpenHandler(({ url }) => {
-        void openExternalHttpUrl(url);
-        return { action: 'deny' };
-      });
-      contents.on('will-navigate', (ev, url) => {
-        const okLocal = url.startsWith('file:') && url.startsWith(ALLOWED_FILE_PREFIX);
-        if (!okLocal) {
-          ev.preventDefault();
-          void openExternalHttpUrl(url);
-        }
-      });
-    });
+    registerIpc();
+    const restoredPins = windows.restorePinWorkspace(pinWorkspaceStore);
+    if (restoredPins) console.log(`[pin-workspace] 已恢复 ${restoredPins} 张贴图。`);
     if (process.platform === 'darwin' && app.dock) {
       try {
         const _ic = nativeImage.createFromPath(path.join(__dirname, '..', '..', 'build', 'icon.png'));
         if (!_ic.isEmpty()) app.dock.setIcon(_ic);
       } catch (_) {}
     }
-    registerIpc();
     // 冒烟自检不注册全局快捷键、不改开机启动项、也不创建菜单栏常驻图标。
     if (!process.env.KK_SMOKE) {
       buildTray();
@@ -2204,7 +2465,6 @@ if (!gotLock) {
     if (process.env.KK_SMOKE) {
       const problems = [];
       const checks = [];
-      const smokeDeadline = Date.now() + 30_000;
       // 只用于回归测试：证明自检发现问题时会以非 0 退出，不会“报错但仍假绿”。
       if (process.env.KK_SMOKE_INJECT_PROBLEM) problems.push('[injected] smoke failure');
       app.on('web-contents-created', (_e, wc) => {
@@ -2224,9 +2484,10 @@ if (!gotLock) {
       const stateSummary = (state) => {
         try { return JSON.stringify(state); } catch (_) { return String(state); }
       };
-      const waitForCondition = async (name, inspect) => {
+      const waitForCondition = async (name, inspect, timeoutMs = 3_000) => {
+        const deadline = Date.now() + timeoutMs;
         let lastState = '尚未执行';
-        while (Date.now() < smokeDeadline) {
+        while (Date.now() < deadline) {
           try {
             const state = await inspect();
             if (state && state.ready === true) return state;
@@ -2412,6 +2673,30 @@ if (!gotLock) {
           });
         });
 
+        await recordCheck('formula', async () => {
+          const formulaWin = windows.createFormula();
+          return waitForRenderer(formulaWin, 'formula', function smokeFormulaProbe() {
+            const input = document.getElementById('formulaInput');
+            const preview = document.getElementById('formulaPreview');
+            const error = document.getElementById('formulaError');
+            const create = document.getElementById('btnCreate');
+            const ready = location.pathname.endsWith('/formula/formula.html')
+              && document.readyState === 'complete'
+              && typeof window.katex === 'object'
+              && !!window.FormulaModel
+              && !!input && input.value.includes('\\frac')
+              && !!preview && preview.hidden === false
+              && preview.querySelector('math') !== null
+              && !!error && error.hidden === true
+              && !!create && create.disabled === false;
+            return {
+              ready,
+              katex: !!window.katex,
+              mathml: !!preview && preview.querySelector('math') !== null,
+            };
+          });
+        });
+
         await recordCheck('recorder', async () => {
           const recorder = windows.createRecorder({
             rect: syntheticRect,
@@ -2520,7 +2805,7 @@ if (!gotLock) {
     if (quitPrepared) return;
     event.preventDefault();
     if (quitPreparationInFlight) return;
-    quitPreparationInFlight = prepareApplicationQuit()
+    quitPreparationInFlight = prepareApplicationQuit({ interactive: !process.env.KK_SMOKE })
       .then((ready) => {
         quitPreparationInFlight = null;
         if (!ready) {
@@ -2547,6 +2832,7 @@ if (!gotLock) {
 
   app.on('will-quit', () => {
     pinWorkspaceClosing = true;
+    recordActionMonitor.stopAll();
     timedCaptureScheduler.cancelAll();
     captureCoordinator.cancelPending('app-quit');
     savePinWorkspaceNow();

@@ -45,7 +45,13 @@ test('settings field helpers associate visible labels and hints with their contr
 test('pin context menu exposes a roving tabindex and complete keyboard operation', () => {
   assert.match(pinHtml, /id="ctxMenu" role="menu" aria-label="\u8d34\u56fe\u64cd\u4f5c"/);
   const menuItems = Array.from(pinHtml.matchAll(/class="ctx-item[^"]*"[^>]*role="menuitem"[^>]*tabindex="-1"/g));
-  assert.equal(menuItems.length, 14, 'every actionable context-menu item starts outside the tab order');
+  const allMenuItems = Array.from(pinHtml.matchAll(/role="menuitem"/g));
+  assert.ok(allMenuItems.length > 0, 'the context menu must expose actionable menu items');
+  assert.equal(
+    menuItems.length,
+    allMenuItems.length,
+    'every actionable context-menu item starts outside the tab order'
+  );
 
   assert.match(pinSource, /function focusCtxItem\(/);
   assert.match(pinSource, /ctxMenuItems\[(?:nextIndex|index)\]\.focus\(\)/);

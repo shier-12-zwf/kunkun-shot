@@ -19,6 +19,12 @@ function isUsableBinary(filePath) {
   }
 }
 
+function normalizeHelperLanguage(value) {
+  if (value === undefined || value === null || value === '') return 'swift';
+  if (value === 'swift' || value === 'c') return value;
+  throw new TypeError(`native helper language is invalid: ${String(value)}`);
+}
+
 function createSwiftBinaryCache(options) {
   const cacheDir = options && options.cacheDir;
   const compile = options && options.compile;
@@ -27,9 +33,10 @@ function createSwiftBinaryCache(options) {
 
   const inFlight = new Map();
 
-  function ensureBinary({ name, source }) {
+  function ensureBinary({ name, source, language }) {
     try {
       validateHelperRequest(name, source);
+      language = normalizeHelperLanguage(language);
     } catch (error) {
       return Promise.reject(error);
     }
@@ -43,7 +50,7 @@ function createSwiftBinaryCache(options) {
 
     const pending = (async () => {
       const suffix = `${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
-      const sourcePath = `${binaryPath}.${suffix}.swift`;
+      const sourcePath = `${binaryPath}.${suffix}.${language === 'c' ? 'c' : 'swift'}`;
       const temporaryBinaryPath = `${binaryPath}.${suffix}.tmp`;
       try {
         fs.writeFileSync(sourcePath, source, {
@@ -51,7 +58,7 @@ function createSwiftBinaryCache(options) {
           mode: 0o600,
           flag: 'wx'
         });
-        await compile(sourcePath, temporaryBinaryPath);
+        await compile(sourcePath, temporaryBinaryPath, { name, source, language });
         if (!isUsableBinary(temporaryBinaryPath)) {
           throw new Error('swiftc 没有生成可执行文件。');
         }
@@ -92,7 +99,8 @@ function createSwiftBinaryProvider(options) {
   async function ensureBinary(request) {
     const { name, source } = request || {};
     validateHelperRequest(name, source);
-    if (!isPackaged()) return developmentCache.ensureBinary({ name, source });
+    normalizeHelperLanguage(request && request.language);
+    if (!isPackaged()) return developmentCache.ensureBinary(request);
 
     const arch = runtimeArch();
     if (arch !== 'arm64' && arch !== 'x64') {
@@ -112,4 +120,9 @@ function createSwiftBinaryProvider(options) {
   return { ensureBinary };
 }
 
-module.exports = { createSwiftBinaryCache, createSwiftBinaryProvider, isUsableBinary };
+module.exports = {
+  createSwiftBinaryCache,
+  createSwiftBinaryProvider,
+  isUsableBinary,
+  normalizeHelperLanguage
+};

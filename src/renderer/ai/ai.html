@@ -32,6 +32,22 @@
     AI 辅助识别：视觉提供方会直接处理图片；纯文本提供方只会接收本地 OCR 结果，复杂结构可能丢失。
   </div>
 
+  <!-- 表格识别完成后显示可编辑单元格；原始模型输出仍可随时展开核对。 -->
+  <section class="table-workspace" id="tableWorkspace" hidden aria-label="可编辑识别表格">
+    <div class="table-workspace-head">
+      <span class="table-meta" id="tableMeta">可直接编辑单元格</span>
+      <div class="table-actions">
+        <button class="text-btn" id="btnTableRaw" type="button">查看原始结果</button>
+        <button class="text-btn" id="btnCopyCsv" type="button">复制 CSV</button>
+        <button class="text-btn" id="btnCopyTsv" type="button">复制 TSV</button>
+        <button class="text-btn" id="btnCopyMarkdown" type="button">复制 Markdown</button>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table class="editable-table" id="tableGrid"></table>
+    </div>
+  </section>
+
   <!-- OCR 模式：可编辑文本区 + 操作按钮 -->
   <div class="ocr-block" id="ocrBlock" hidden>
     <textarea class="ocr-text" id="ocrText" placeholder="识别中…" spellcheck="false"></textarea>
@@ -59,6 +75,7 @@
     <button class="send-btn" id="btnSend" title="发送">发送</button>
   </footer>
 
+  <script src="./table-model.js"></script>
   <script src="./ai.js"></script>
 </body>
 </html>

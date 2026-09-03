@@ -1,0 +1,32 @@
+:root {
+  color-scheme: light;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+  color: #1d2522;
+  background: #f6f2ea;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 480px; min-height: 400px; background: #f6f2ea; }
+button, textarea, input, select { font: inherit; }
+.formula-shell { min-height: 100vh; padding: 28px 32px; display: flex; flex-direction: column; gap: 16px; }
+header, footer, .options { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+h1 { margin: 3px 0 0; font: 650 25px/1.2 Georgia, "Songti SC", serif; }
+.eyebrow { margin: 0; color: #8c5e3c; font: 700 10px/1.2 ui-monospace, monospace; letter-spacing: .14em; }
+.field-label { margin-bottom: -9px; color: #59615d; font-size: 12px; font-weight: 650; }
+textarea { width: 100%; min-height: 112px; resize: vertical; padding: 13px 15px; border: 1px solid #d7cfc2; border-radius: 10px; outline: none; background: #fffdf8; color: #17201c; font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+textarea:focus { border-color: #9b6a46; box-shadow: 0 0 0 3px rgba(155,106,70,.12); }
+.options { justify-content: flex-start; flex-wrap: wrap; color: #59615d; font-size: 12px; }
+.options label { display: flex; align-items: center; gap: 7px; }
+.options input[type="range"] { width: 110px; accent-color: #805735; }
+.options input[type="color"] { width: 30px; height: 26px; padding: 1px; border: 1px solid #d7cfc2; border-radius: 6px; background: #fff; }
+.options select { padding: 5px 8px; border: 1px solid #d7cfc2; border-radius: 7px; background: #fffdf8; }
+.preview-card { flex: 1; min-height: 118px; display: grid; place-items: center; padding: 18px; overflow: auto; border: 1px solid #d7cfc2; border-radius: 12px; background-image: linear-gradient(45deg,#eee8de 25%,transparent 25%),linear-gradient(-45deg,#eee8de 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#eee8de 75%),linear-gradient(-45deg,transparent 75%,#eee8de 75%); background-position: 0 0,0 8px,8px -8px,-8px 0; background-size: 16px 16px; }
+.formula-preview { max-width: 100%; padding: 14px 18px; overflow: auto; color: #111827; background: transparent; }
+.formula-error { max-width: 100%; margin: 0; color: #b42318; font-size: 13px; text-align: center; word-break: break-word; }
+footer p { margin: 0; color: #747b77; font-size: 11px; }
+button { border: 0; border-radius: 8px; cursor: pointer; }
+.quiet { padding: 7px 10px; color: #59615d; background: transparent; }
+.quiet:hover { background: rgba(30,40,35,.07); }
+.primary { padding: 10px 16px; color: #fff; background: #805735; font-weight: 650; }
+.primary:hover { background: #69472d; }
+.primary:disabled { opacity: .5; cursor: wait; }

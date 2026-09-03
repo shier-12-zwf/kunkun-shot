@@ -158,6 +158,18 @@ test('active pin workspace is restored on ready and flushed before pin windows c
   assert.ok(saveAt >= 0 && closeAt > saveAt, 'workspace must be saved before closing live pin windows');
 });
 
+test('window navigation and media permissions are guarded before startup restores pin windows', () => {
+  const restoreAt = mainSource.indexOf('windows.restorePinWorkspace(');
+  const navigationGuardAt = mainSource.indexOf("app.on('web-contents-created'");
+  const mediaPolicyAt = mainSource.indexOf('installMediaPermissionPolicy(session.defaultSession');
+
+  assert.ok(restoreAt >= 0, 'startup workspace restore must remain wired');
+  assert.ok(navigationGuardAt >= 0 && navigationGuardAt < restoreAt,
+    'the global navigation guard must be registered before restored pins create webContents');
+  assert.ok(mediaPolicyAt >= 0 && mediaPolicyAt < restoreAt,
+    'the default-session media policy must be installed before restored pins create webContents');
+});
+
 test('smoke mode exits deterministically after the normal quit cleanup for both status codes', () => {
   const quit = between("app.on('will-quit'", '\n  });\n}');
   assert.match(
@@ -165,4 +177,17 @@ test('smoke mode exits deterministically after the normal quit cleanup for both 
     /process\.env\.KK_SMOKE\s*&&\s*smokeExitCode\s*!==\s*null[\s\S]*?app\.exit\(smokeExitCode\)/
   );
   assert.doesNotMatch(quit, /if\s*\(\s*smokeExitCode\s*&&/);
+});
+
+test('smoke checks use independent bounded deadlines and quit without interactive dialogs', () => {
+  const smoke = between("if (process.env.KK_SMOKE) {", "\n  }).catch((error) => {");
+  assert.doesNotMatch(smoke, /const\s+smokeDeadline\s*=/);
+  assert.match(smoke, /waitForCondition\s*=\s*async\s*\(name,\s*inspect,\s*timeoutMs\s*=/);
+  assert.match(smoke, /const\s+deadline\s*=\s*Date\.now\(\)\s*\+\s*timeoutMs/);
+
+  const beforeQuit = between("app.on('before-quit'", "app.on('will-quit'");
+  assert.match(beforeQuit, /prepareApplicationQuit\(\{\s*interactive:\s*!process\.env\.KK_SMOKE\s*\}\)/);
+  const prepareQuit = between('async function prepareApplicationQuit', '\n}\n\nif (typeof windows.onPinWorkspaceChanged');
+  assert.match(prepareQuit, /interactive\s*=\s*true/);
+  assert.match(prepareQuit, /if\s*\(\s*!interactive\s*\)\s*\{[\s\S]*?break;\s*\}/);
 });

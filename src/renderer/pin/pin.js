@@ -9,7 +9,9 @@
   var wrapEl = document.getElementById('pinWrap');
   var toolbarEl = document.getElementById('pinToolbar');
   var ctxMenu = document.getElementById('ctxMenu');
-  var ctxMenuItems = Array.prototype.slice.call(ctxMenu.querySelectorAll('[role="menuitem"]'));
+  var ctxMenuItems = ctxMenu && typeof ctxMenu.querySelectorAll === 'function'
+    ? Array.prototype.slice.call(ctxMenu.querySelectorAll('[role="menuitem"]'))
+    : [];
   var ctxMenuReturnFocus = null;
   var toastEl = document.getElementById('pinToast');
   var annotationCanvas = document.getElementById('pinAnnotationCanvas');
@@ -17,8 +19,12 @@
   var annotationColor = document.getElementById('pinAnnotationColor');
   var annotationApi = window.PinAnnotations || null;
   var contentApi = window.PinContentUpdate || null;
+  var imageLoaderApi = window.PinImageLoader || null;
+  var transformApi = window.PinImageTransform || null;
   var annotationDoc = annotationApi ? new annotationApi.AnnotationDocument() : null;
   var contentUpdater = null;
+  var imageLoader = null;
+  var pendingImagePayload = null;
   var ocrRequestToken = 0;
   var closeBarrierMode = ''; // '' | ordinary | application
   var closeAttempt = null;
@@ -54,6 +60,13 @@
     title: '',
     annotationMode: false,
     annotationTool: 'pen',
+    imageReady: false,
+    imageError: '',
+    transformBusy: false,
+    cropMode: false,
+    cropSelection: { x: 0.08, y: 0.08, width: 0.84, height: 0.84 },
+    groupId: '',
+    groupCollapsed: false,
   };
 
   // ---- 轻提示 ----
@@ -79,6 +92,165 @@
   // ---- 安全调用 kkapi（防止某接口缺失导致整页报错）----
   function api() {
     return window.kkapi || null;
+  }
+
+  var IMAGE_ACTION_IDS = ['btnCopy', 'btnSave', 'btnOcr', 'btnAsk', 'btnText', 'btnAnnotate'];
+  var IMAGE_CONTEXT_ACTIONS = ['copy', 'save', 'ocr', 'ask', 'textSel', 'annotate'];
+  var TRANSFORM_CONTEXT_ACTIONS = ['crop', 'rotateCW', 'rotateCCW', 'flipHorizontal', 'flipVertical'];
+
+  function setTransformActionsEnabled(enabled) {
+    var allowed = Boolean(enabled && state.kind === 'image' && !state.transformBusy);
+    var button = document.getElementById('btnTransform');
+    if (button) button.disabled = !allowed;
+    TRANSFORM_CONTEXT_ACTIONS.forEach(function (action) {
+      var item = ctxMenu && ctxMenu.querySelector ? ctxMenu.querySelector('[data-act="' + action + '"]') : null;
+      if (!item) return;
+      item.classList.toggle('disabled', !allowed);
+      item.setAttribute('aria-disabled', allowed ? 'false' : 'true');
+    });
+  }
+
+  function setImageActionsEnabled(enabled) {
+    IMAGE_ACTION_IDS.forEach(function (id) {
+      var button = document.getElementById(id);
+      if (button) button.disabled = !enabled;
+    });
+    IMAGE_CONTEXT_ACTIONS.forEach(function (action) {
+      var item = ctxMenu && ctxMenu.querySelector
+        ? ctxMenu.querySelector('[data-act="' + action + '"]')
+        : null;
+      if (!item) return;
+      item.classList.toggle('disabled', !enabled);
+      item.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+    });
+    setTransformActionsEnabled(enabled);
+  }
+
+  function updateImageLoadUI(loadState) {
+    loadState = loadState || {};
+    var statusEl = document.getElementById('pinImageStatus');
+    var titleEl = document.getElementById('pinImageStatusTitle');
+    var detailEl = document.getElementById('pinImageStatusDetail');
+    var retryEl = document.getElementById('btnRetryImage');
+    var hasCommittedImage = Boolean(loadState.committedDataURL);
+    state.imageReady = hasCommittedImage;
+    state.imageError = loadState.status === 'error' ? String(loadState.error || '图片解码失败。') : '';
+    setImageActionsEnabled(hasCommittedImage);
+    document.body.classList.toggle('pin-image-ready', hasCommittedImage);
+
+    if (!statusEl) return;
+    if (loadState.status === 'ready' || loadState.status === 'idle') {
+      statusEl.hidden = true;
+      return;
+    }
+    statusEl.hidden = false;
+    if (loadState.status === 'decoding') {
+      if (titleEl) titleEl.textContent = hasCommittedImage ? '正在载入新图片…' : '正在加载贴图…';
+      if (detailEl) detailEl.textContent = hasCommittedImage ? '当前图片会保留到新图片确认可显示。' : '图片完成解码后即可复制、保存和标注。';
+      if (retryEl) retryEl.hidden = true;
+      return;
+    }
+    if (titleEl) titleEl.textContent = hasCommittedImage ? '新图片显示失败' : '贴图显示失败';
+    if (detailEl) {
+      var prefix = hasCommittedImage ? '已保留上一张图片。' : '';
+      detailEl.textContent = (prefix + ' ' + state.imageError).trim().slice(0, 240);
+    }
+    if (retryEl) retryEl.hidden = false;
+  }
+
+  function decodePinImageDataURL(dataURL) {
+    return new Promise(function (resolve, reject) {
+      if (typeof window.Image !== 'function') {
+        reject(new Error('当前环境无法解码贴图图片。'));
+        return;
+      }
+      var probe = new window.Image();
+      var settled = false;
+      var timer = setTimeout(function () {
+        finish(new Error('图片解码超时，请重试。'));
+      }, 10000);
+      function cleanup() {
+        clearTimeout(timer);
+        probe.onload = null;
+        probe.onerror = null;
+      }
+      function finish(error) {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) {
+          reject(error);
+          return;
+        }
+        var width = Number(probe.naturalWidth || probe.width);
+        var height = Number(probe.naturalHeight || probe.height);
+        if (!(width > 0) || !(height > 0)) {
+          reject(new Error('图片已载入但尺寸无效。'));
+          return;
+        }
+        resolve({ width: width, height: height });
+      }
+      probe.onload = function () { finish(); };
+      probe.onerror = function () { finish(new Error('图片数据无法解码。')); };
+      probe.src = dataURL;
+      if (typeof probe.decode === 'function') {
+        Promise.resolve(probe.decode()).then(function () { finish(); }, function (error) {
+          finish(error || new Error('图片数据无法解码。'));
+        });
+      }
+    });
+  }
+
+  function commitDecodedImage(result) {
+    var payload = pendingImagePayload || {};
+    var nextUpdater = createContentUpdater(payload.dataURL, payload.contentRevision);
+    if (state.sourceDataURL && state.sourceDataURL !== result.dataURL) {
+      // 只有候选图已经成功解码后才清理旧图状态；失败时旧图与标注继续保留。
+      exitTextSelect();
+      state.ocrLines = null;
+      state.ocrBusy = false;
+      setAnnotationMode(false);
+      annotationDoc = annotationApi ? new annotationApi.AnnotationDocument() : null;
+      if (annotationCanvas) annotationCanvas.hidden = true;
+    }
+    ocrRequestToken += 1;
+    state.kind = 'image';
+    state.ocrLines = null;
+    state.ocrBusy = false;
+    state.sourceDataURL = result.dataURL;
+    state.dataURL = result.dataURL;
+    contentUpdater = nextUpdater;
+    imgEl.src = result.dataURL;
+    imgEl.hidden = false;
+  }
+
+  function initializeImageLoader() {
+    if (!imageLoaderApi || typeof imageLoaderApi.createPinImageLoader !== 'function') {
+      updateImageLoadUI({ status: 'error', error: '贴图图片加载组件不可用。' });
+      return;
+    }
+    imageLoader = imageLoaderApi.createPinImageLoader({
+      decode: decodePinImageDataURL,
+      onCommit: commitDecodedImage,
+      onState: updateImageLoadUI,
+    });
+    updateImageLoadUI(imageLoader.getState());
+  }
+
+  function requireReadyImage() {
+    if (state.kind !== 'image' || state.imageReady) return true;
+    toast(state.imageError ? '图片显示失败，请先重试' : '图片尚未就绪，稍后再试', 'err');
+    return false;
+  }
+
+  function bindImageRetry() {
+    var retry = document.getElementById('btnRetryImage');
+    if (!retry) return;
+    retry.addEventListener('click', function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (imageLoader) imageLoader.retry();
+    });
   }
 
   function currentWindowState() {
@@ -184,6 +356,235 @@
     return getCurrentDataURL();
   }
 
+  function decodeTransformSource(dataURL) {
+    return new Promise(function (resolve, reject) {
+      var image = new window.Image();
+      image.onload = function () {
+        var width = Number(image.naturalWidth || image.width);
+        var height = Number(image.naturalHeight || image.height);
+        if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1) {
+          reject(new Error('贴图像素尺寸无效。'));
+          return;
+        }
+        if (width * height > 100 * 1024 * 1024) {
+          reject(new Error('贴图像素过大，无法安全变换。'));
+          return;
+        }
+        try {
+          var canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          var context = canvas.getContext('2d', { willReadFrequently: true });
+          if (!context) throw new Error('无法读取贴图像素。');
+          context.drawImage(image, 0, 0, width, height);
+          resolve({ width: width, height: height, pixels: context.getImageData(0, 0, width, height) });
+        } catch (error) {
+          reject(error);
+        }
+      };
+      image.onerror = function () { reject(new Error('贴图图片解码失败。')); };
+      image.src = dataURL;
+    });
+  }
+
+  function cropOperationForPixels(selection, width, height) {
+    var x = Math.max(0, Math.min(width - 1, Math.floor(selection.x * width)));
+    var y = Math.max(0, Math.min(height - 1, Math.floor(selection.y * height)));
+    var right = Math.max(x + 1, Math.min(width, Math.ceil((selection.x + selection.width) * width)));
+    var bottom = Math.max(y + 1, Math.min(height, Math.ceil((selection.y + selection.height) * height)));
+    return { type: 'crop', crop: { x: x, y: y, width: right - x, height: bottom - y } };
+  }
+
+  function publishImageReplacement(bridge, payload) {
+    // invoke 可能在主进程已落盘后丢失回执；用完全相同的 payload 自动重放一次。
+    // windows.replacePinImage 对相同 revision + dataURL 幂等，不会重复旋转。
+    return Promise.resolve().then(function () { return bridge.pinReplaceImage(payload); }).catch(function () {
+      return bridge.pinReplaceImage(payload);
+    });
+  }
+
+  async function applyImageTransform(operation) {
+    if (state.transformBusy || state.cropMode && operation.type !== 'crop-normalized') return;
+    if (isCloseBarrierActive() || !requireReadyImage() || state.kind !== 'image') return;
+    var bridge = api();
+    if (!transformApi || typeof transformApi.transformImageData !== 'function' ||
+        !bridge || typeof bridge.pinReplaceImage !== 'function' || !contentUpdater) {
+      toast('当前版本不支持图片变换', 'err');
+      return;
+    }
+    state.transformBusy = true;
+    document.body.classList.add('transform-busy');
+    setTransformActionsEnabled(false);
+    var applyCropButton = document.getElementById('btnApplyCrop');
+    if (applyCropButton) applyCropButton.disabled = true;
+    try {
+      var activeWasCommitted = finishActiveAnnotationForClose();
+      var sourceDataURL = activeWasCommitted ? await queueContentUpdate(false) : await getCurrentDataURL();
+      var decoded = await decodeTransformSource(sourceDataURL);
+      var normalizedOperation = operation.type === 'crop-normalized'
+        ? cropOperationForPixels(operation.selection, decoded.width, decoded.height)
+        : operation;
+      var transformed = transformApi.transformImageData(decoded.pixels, normalizedOperation);
+      var targetCanvas = document.createElement('canvas');
+      targetCanvas.width = transformed.width;
+      targetCanvas.height = transformed.height;
+      var targetContext = targetCanvas.getContext('2d');
+      if (!targetContext) throw new Error('无法创建图片变换画布。');
+      var targetPixels = targetContext.createImageData(transformed.width, transformed.height);
+      targetPixels.data.set(transformed.data);
+      targetContext.putImageData(targetPixels, 0, 0);
+      var targetDataURL = targetCanvas.toDataURL('image/png');
+      var baseRevision = contentUpdater.getPublishedRevision();
+      var replacement = {
+        baseRevision: baseRevision,
+        revision: baseRevision + 1,
+        dataURL: targetDataURL,
+        sourceWidth: decoded.width,
+        sourceHeight: decoded.height,
+        width: transformed.width,
+        height: transformed.height,
+      };
+      var result = await publishImageReplacement(bridge, replacement);
+      if (!result || result.ok !== true || result.revision !== replacement.revision || !result.bounds) {
+        throw new Error((result && result.error) || '主进程未确认图片变换。');
+      }
+      pendingImagePayload = { dataURL: targetDataURL, contentRevision: result.revision };
+      state.bounds = result.bounds;
+      state.baseW = Math.round(result.bounds.width);
+      state.baseH = Math.round(result.bounds.height);
+      state.scale = 1;
+      setCropMode(false);
+      var loadResult = await imageLoader.load(targetDataURL);
+      if (!loadResult || loadResult.status !== 'ready') {
+        toast('图片已更新，但显示解码失败，请点击重试', 'err');
+      } else {
+        toast(normalizedOperation.type === 'crop' ? '已裁剪' : '图片变换已应用', 'ok');
+      }
+    } catch (error) {
+      toast('图片变换失败：' + String((error && error.message) || error).slice(0, 180), 'err');
+    } finally {
+      state.transformBusy = false;
+      document.body.classList.remove('transform-busy');
+      setTransformActionsEnabled(state.imageReady);
+      if (applyCropButton) applyCropButton.disabled = false;
+    }
+  }
+
+  function updateCropSelection() {
+    var selection = document.getElementById('pinCropSelection');
+    if (!selection) return;
+    selection.style.left = (state.cropSelection.x * 100) + '%';
+    selection.style.top = (state.cropSelection.y * 100) + '%';
+    selection.style.width = (state.cropSelection.width * 100) + '%';
+    selection.style.height = (state.cropSelection.height * 100) + '%';
+  }
+
+  function setCropMode(enabled) {
+    enabled = Boolean(enabled);
+    if (enabled && (!requireReadyImage() || state.kind !== 'image' || state.transformBusy || isCloseBarrierActive())) return;
+    if (enabled) {
+      if (state.selectMode) exitTextSelect();
+      if (state.annotationMode) setAnnotationMode(false);
+      state.cropSelection = { x: 0.08, y: 0.08, width: 0.84, height: 0.84 };
+    }
+    state.cropMode = enabled;
+    document.body.classList.toggle('crop-mode', enabled);
+    var layer = document.getElementById('pinCropLayer');
+    var bar = document.getElementById('pinCropToolbar');
+    if (layer) layer.hidden = !enabled;
+    if (bar) bar.hidden = !enabled;
+    if (enabled) updateCropSelection();
+  }
+
+  function bindCrop() {
+    var layer = document.getElementById('pinCropLayer');
+    var applyButton = document.getElementById('btnApplyCrop');
+    var cancelButton = document.getElementById('btnCancelCrop');
+    if (!layer || !applyButton || !cancelButton) return;
+    var start = null;
+    function point(event) {
+      var rect = layer.getBoundingClientRect();
+      return {
+        x: Math.max(0, Math.min(1, rect.width ? (event.clientX - rect.left) / rect.width : 0)),
+        y: Math.max(0, Math.min(1, rect.height ? (event.clientY - rect.top) / rect.height : 0)),
+      };
+    }
+    layer.addEventListener('pointerdown', function (event) {
+      if (event.button !== 0 || state.transformBusy) return;
+      start = point(event);
+      state.cropSelection = { x: start.x, y: start.y, width: 0, height: 0 };
+      if (layer.setPointerCapture) layer.setPointerCapture(event.pointerId);
+      updateCropSelection();
+      event.preventDefault();
+    });
+    layer.addEventListener('pointermove', function (event) {
+      if (!start) return;
+      var current = point(event);
+      state.cropSelection = {
+        x: Math.min(start.x, current.x),
+        y: Math.min(start.y, current.y),
+        width: Math.abs(current.x - start.x),
+        height: Math.abs(current.y - start.y),
+      };
+      updateCropSelection();
+      event.preventDefault();
+    });
+    function finish(event) {
+      if (!start) return;
+      start = null;
+      if (layer.releasePointerCapture && layer.hasPointerCapture && layer.hasPointerCapture(event.pointerId)) {
+        layer.releasePointerCapture(event.pointerId);
+      }
+      event.preventDefault();
+    }
+    layer.addEventListener('pointerup', finish);
+    layer.addEventListener('pointercancel', finish);
+    cancelButton.addEventListener('click', function (event) {
+      event.stopPropagation();
+      setCropMode(false);
+    });
+    applyButton.addEventListener('click', function (event) {
+      event.stopPropagation();
+      var rect = layer.getBoundingClientRect();
+      if (state.cropSelection.width * rect.width < 8 || state.cropSelection.height * rect.height < 8) {
+        toast('裁剪区域太小，请重新框选', 'err');
+        return;
+      }
+      applyImageTransform({ type: 'crop-normalized', selection: { ...state.cropSelection } });
+    });
+  }
+
+  function updateGroupActions() {
+    ['groupVisibility', 'ungroup'].forEach(function (action) {
+      var item = ctxMenu && typeof ctxMenu.querySelector === 'function'
+        ? ctxMenu.querySelector('[data-act="' + action + '"]')
+        : null;
+      if (!item) return;
+      var disabled = !state.groupId;
+      item.classList.toggle('disabled', disabled);
+      item.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+    });
+  }
+
+  function runGroupAction(action) {
+    var bridge = api();
+    if (!bridge || typeof bridge.pinGroupAction !== 'function') {
+      toast('当前版本不支持贴图分组', 'err');
+      return;
+    }
+    Promise.resolve(bridge.pinGroupAction(action)).then(function (result) {
+      if (!result || result.ok !== true) throw new Error((result && result.error) || '分组操作失败。');
+      state.groupId = result.groupId || '';
+      state.groupCollapsed = Boolean(result.collapsed);
+      updateGroupActions();
+      if (action === 'create') toast('已将 ' + result.count + ' 张当前贴图分组', 'ok');
+      else if (action === 'ungroup') toast('已移出分组', 'ok');
+      else toast(result.collapsed ? '已折叠同组贴图' : '已展开同组贴图', 'ok');
+    }).catch(function (error) {
+      toast(String((error && error.message) || error).slice(0, 180), 'err');
+    });
+  }
+
   function isCloseBarrierActive() {
     return closeBarrierMode !== '';
   }
@@ -246,7 +647,7 @@
         .catch(function () { toast('复制失败', 'err'); });
       return;
     }
-    if (!state.dataURL) return;
+    if (!requireReadyImage() || !state.dataURL) return;
     getComposedDataURL()
       .then(function (dataURL) { return k.copyImage(dataURL); })
       .then(function () {
@@ -259,7 +660,7 @@
 
   function doSave() {
     var k = api();
-    if (!k || !state.dataURL) return;
+    if (!k || !requireReadyImage() || !state.dataURL) return;
     getComposedDataURL()
       .then(function (dataURL) { return k.saveImage(dataURL); })
       .then(function (res) {
@@ -277,7 +678,7 @@
 
   function doOcr() {
     var k = api();
-    if (!k || !state.dataURL) return;
+    if (!k || !requireReadyImage() || !state.dataURL) return;
     // 打开 AI 面板进行 OCR
     getCurrentDataURL()
       .then(function (dataURL) { return k.openAIPanel({ mode: 'ocr', dataURL: dataURL }); })
@@ -286,7 +687,7 @@
 
   function doAsk() {
     var k = api();
-    if (!k || !state.dataURL) return;
+    if (!k || !requireReadyImage() || !state.dataURL) return;
     // 打开 AI 面板进行问图
     getCurrentDataURL()
       .then(function (dataURL) { return k.openAIPanel({ mode: 'ask', dataURL: dataURL }); })
@@ -392,6 +793,29 @@
     applicationCloseEpoch += 1;
     applicationClosePreparation = null;
     releaseCloseBarrier('application');
+  }
+
+  function syncPinContent(requestId) {
+    var k = api();
+    if (!k || typeof k.pinSyncReady !== 'function') return;
+    function reply(payload) {
+      try { return Promise.resolve(k.pinSyncReady(payload)).catch(function () {}); }
+      catch (_) { return Promise.resolve(); }
+    }
+    // 结束当前可见笔画并发布一个时点快照，但不启用关闭屏障；ACK 后仍可继续编辑。
+    var activeWasCommitted = finishActiveAnnotationForClose();
+    var pending = activeWasCommitted && contentUpdater && annotationDoc
+      ? queueContentUpdate(false)
+      : getCurrentDataURL();
+    Promise.resolve(pending).then(function () {
+      return reply({ requestId: requestId, ok: true });
+    }, function (error) {
+      return reply({
+        requestId: requestId,
+        ok: false,
+        error: String((error && error.message) || error || '未知错误').slice(0, 1000),
+      });
+    });
   }
 
   // ====== 贴图内选字（PixPin 式：OCR 行级坐标 → 悬停高亮 → 点击复制）======
@@ -504,10 +928,7 @@
       toast('当前版本不支持贴图选字', 'err');
       return;
     }
-    if (!state.dataURL) {
-      toast('图片尚未就绪，稍后再试', 'err');
-      return;
-    }
+    if (!requireReadyImage() || !state.dataURL) return;
     state.selectMode = true;
     document.body.classList.add('ocr-mode');
     var layer = document.getElementById('pinOcrLayer');
@@ -566,8 +987,14 @@
           doClose({ interactive: false });
         } else if (msg.cmd === 'prepare-close') {
           prepareApplicationClose(msg.requestId);
+        } else if (msg.cmd === 'sync-content') {
+          syncPinContent(msg.requestId);
         } else if (msg.cmd === 'cancel-prepare-close') {
           cancelApplicationClose();
+        } else if (msg.cmd === 'group-state') {
+          state.groupId = typeof msg.groupId === 'string' ? msg.groupId : '';
+          state.groupCollapsed = Boolean(msg.collapsed);
+          updateGroupActions();
         }
       });
     }
@@ -661,6 +1088,8 @@
 
   function setAnnotationMode(enabled) {
     if (isCloseBarrierActive()) return;
+    if (enabled && state.cropMode) return;
+    if (enabled && !requireReadyImage()) return;
     if (!annotationDoc || !annotationCanvas || state.kind !== 'image') {
       if (enabled) toast('只有图片贴图可以标注', 'err');
       return;
@@ -803,6 +1232,14 @@
     title: promptTitle,
     textSel: toggleTextSelect,
     annotate: toggleAnnotation,
+    crop: function () { setCropMode(true); },
+    rotateCW: function () { applyImageTransform({ type: 'rotate-cw' }); },
+    rotateCCW: function () { applyImageTransform({ type: 'rotate-ccw' }); },
+    flipHorizontal: function () { applyImageTransform({ type: 'flip-horizontal' }); },
+    flipVertical: function () { applyImageTransform({ type: 'flip-vertical' }); },
+    groupAll: function () { runGroupAction('create'); },
+    groupVisibility: function () { runGroupAction('toggle-visibility'); },
+    ungroup: function () { runGroupAction('ungroup'); },
     zoomIn: zoomIn,
     zoomOut: zoomOut,
     zoomReset: zoomReset,
@@ -830,6 +1267,15 @@
         if (act) act();
       });
     });
+    var transformButton = document.getElementById('btnTransform');
+    if (transformButton) {
+      transformButton.addEventListener('click', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var rect = transformButton.getBoundingClientRect();
+        showCtxMenu(rect.right, rect.bottom + 4);
+      });
+    }
   }
 
   // ====== 悬停显示工具栏（CSS 已有 :hover，这里加 body class 兼容拖动期间）======
@@ -854,7 +1300,7 @@
       'wheel',
       function (e) {
         e.preventDefault();
-        if (state.annotationMode) return;
+        if (state.annotationMode || state.cropMode || state.transformBusy) return;
         if (state.locked) return; // 锁定：不缩放不调透明度
         if (e.ctrlKey) {
           doPinchZoom(e);
@@ -925,7 +1371,7 @@
     wrapEl.addEventListener('mousedown', function (e) {
       if (e.button !== 0) return; // 仅左键
       // 锁定 / 选字模式下点击不触发窗口拖动
-      if (state.locked || state.selectMode || state.annotationMode) return;
+      if (state.locked || state.selectMode || state.annotationMode || state.cropMode || state.transformBusy) return;
       // Ctrl+左键：准备拖出内容
       if (e.ctrlKey || e.metaKey) {
         dragOutArmed = true;
@@ -982,7 +1428,7 @@
   function bindCloseGestures() {
     // 双击图片区关闭（选字模式下双击文字块不关闭窗口）
     wrapEl.addEventListener('dblclick', function (e) {
-      if (state.selectMode || state.annotationMode) {
+      if (state.selectMode || state.annotationMode || state.cropMode || state.transformBusy) {
         e.preventDefault();
         return;
       }
@@ -1002,6 +1448,10 @@
         if (ctxMenu.classList.contains('show')) {
           e.preventDefault();
           hideCtxMenu(true);
+          return;
+        }
+        if (state.cropMode) {
+          setCropMode(false);
           return;
         }
         if (state.annotationMode) {
@@ -1129,6 +1579,11 @@
     ctxMenu.addEventListener('click', function (e) {
       var item = e.target.closest ? e.target.closest('.ctx-item') : null;
       if (!item) return;
+      if (item.classList.contains('disabled')) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       var act = ACTIONS[item.getAttribute('data-act')];
       hideCtxMenu(true);
       if (act) act();
@@ -1177,8 +1632,13 @@
   // ====== 接收初始化 payload ======
   function applyInit(payload) {
     if (!payload) return;
-    if (payload.state) applyWindowState(payload.state);
+    if (payload.state) {
+      applyWindowState(payload.state);
+      state.groupId = typeof payload.state.groupId === 'string' ? payload.state.groupId : '';
+      updateGroupActions();
+    }
     if (payload.text) {
+      if (imageLoader) imageLoader.cancel();
       state.kind = 'text';
       state.text = payload.text;
       const t = document.getElementById('pinText');
@@ -1187,8 +1647,10 @@
         t.hidden = false;
       }
       imgEl.hidden = true;
+      setImageActionsEnabled(true);
     }
     if (payload.color) {
+      if (imageLoader) imageLoader.cancel();
       state.kind = 'color';
       state.color = payload.color;
       const c = document.getElementById('pinColor');
@@ -1198,8 +1660,10 @@
         c.hidden = false;
       }
       imgEl.hidden = true;
+      setImageActionsEnabled(true);
     }
     if (payload.file) {
+      if (imageLoader) imageLoader.cancel();
       state.kind = 'file';
       state.file = payload.file;
       const f = document.getElementById('pinFile');
@@ -1209,24 +1673,23 @@
         f.hidden = false;
       }
       imgEl.hidden = true;
+      setImageActionsEnabled(true);
     }
     if (payload.dataURL) {
-      if (state.sourceDataURL && state.sourceDataURL !== payload.dataURL) {
-        // 换了新图：退出选字模式并清空 OCR 缓存，避免旧坐标/旧文字张冠李戴
-        exitTextSelect();
-        state.ocrLines = null;
-        state.ocrBusy = false;
-        setAnnotationMode(false);
-        annotationDoc = annotationApi ? new annotationApi.AnnotationDocument() : null;
-        if (annotationCanvas) annotationCanvas.hidden = true;
+      state.kind = 'image';
+      pendingImagePayload = {
+        dataURL: payload.dataURL,
+        contentRevision: payload.contentRevision,
+      };
+      if (imageLoader) {
+        imageLoader.load(payload.dataURL);
+      } else {
+        updateImageLoadUI({
+          status: 'error',
+          committedDataURL: state.sourceDataURL,
+          error: '贴图图片加载组件不可用。',
+        });
       }
-      ocrRequestToken += 1;
-      state.ocrLines = null;
-      state.ocrBusy = false;
-      state.sourceDataURL = payload.dataURL;
-      state.dataURL = payload.dataURL;
-      contentUpdater = createContentUpdater(payload.dataURL, payload.contentRevision);
-      imgEl.src = payload.dataURL;
     }
     if (payload.bounds) {
       state.bounds = payload.bounds;
@@ -1239,6 +1702,9 @@
 
   // ====== 启动 ======
   function init() {
+    initializeImageLoader();
+    bindImageRetry();
+    bindCrop();
     bindToolbar();
     bindHover();
     bindWheel();
@@ -1249,6 +1715,7 @@
     bindPinCmd();
     bindFileClick();
     bindAnnotations();
+    updateGroupActions();
 
     var k = api();
     if (k && typeof k.getConfig === 'function') {

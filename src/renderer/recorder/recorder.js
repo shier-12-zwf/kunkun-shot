@@ -4,10 +4,19 @@
 
   const api = window.kkapi;
   const lifecycleContract = window.KKRecorderLifecycle;
+  const overlayContract = window.KKRecorderOverlays;
   if (!lifecycleContract || typeof lifecycleContract.createRecorderLifecycle !== 'function') {
     throw new Error('录屏生命周期模块未加载');
   }
+  if (
+    !overlayContract
+    || typeof overlayContract.createRecorderOverlayState !== 'function'
+    || typeof overlayContract.resolveRecorderCaptureGeometry !== 'function'
+  ) {
+    throw new Error('录屏操作提示模块未加载');
+  }
   const { RECORDER_STATES, createRecorderLifecycle } = lifecycleContract;
+  const overlayState = overlayContract.createRecorderOverlayState();
   const stateReportsInFlight = new Set();
 
   function reportLifecycleState(snapshot) {
@@ -37,6 +46,10 @@
   const elBtnStart = document.getElementById('btnStart');
   const elBtnStop = document.getElementById('btnStop');
   const elBtnPause = document.getElementById('btnPause');
+  const elBtnCamera = document.getElementById('btnCamera');
+  const elBtnActions = document.getElementById('btnActions');
+  const elBtnPen = document.getElementById('btnPen');
+  const elBtnClearPen = document.getElementById('btnClearPen');
   const elBtnRetry = document.getElementById('btnRetry');
   const elBtnCancel = document.getElementById('btnCancel');
   const elStatus = document.getElementById('status');
@@ -60,12 +73,17 @@
   // ---- 录制运行时状态 ----
   let captureStream = null; // getUserMedia 拿到的整屏流
   let microphoneStream = null; // 可选麦克风流（与整屏流分开申请）
+  let cameraStream = null; // 用户显式开启的摄像头画中画流（不采集相机音频）
   let canvasStream = null; // canvas.captureStream 产出的裁剪流
   let audioMixContext = null; // 系统音频 + 麦克风同时开启时的 Web Audio 混音器
   let audioMixNodes = [];
   let recorder = null; // MediaRecorder 实例
   let videoEl = null; // 隐藏的 <video>
+  let cameraVideoEl = null; // 隐藏的摄像头 <video>
   let canvasEl = null; // 离屏绘制用 canvas
+  let recordingPixelWidth = 0; // 实际桌面流裁剪后的输出像素（保留至保存）
+  let recordingPixelHeight = 0;
+  let actionGeometry = init; // 输入坐标与实际录制像素的映射
   let drawTimer = null; // setInterval 句柄
   let chunks = []; // 录制数据块
   let recordedBytes = 0;
@@ -92,8 +110,43 @@
   let recorderStopWatchdog = null;
   let terminalCloseRequested = false; // 只有已保存/已确认放弃才能正常关窗
   let toastTimer = null;
+  let cameraRequested = false;
+  let cameraTrackDisposers = [];
+  let cameraStartupFailure = null;
+  let actionsRequested = false;
+  let actionMonitorActive = false;
+  let actionMonitorStartPending = false;
+  let actionMonitorGeneration = 0;
+  let penRequested = false;
 
   // ====== 工具函数 ======
+
+  function setPressed(element, value) {
+    element.classList.toggle
+      ? element.classList.toggle('active', value === true)
+      : (value === true ? element.classList.add('active') : element.classList.remove('active'));
+    if (element.setAttribute) element.setAttribute('aria-pressed', value === true ? 'true' : 'false');
+  }
+
+  function setOptionControlsVisible(visible) {
+    elBtnCamera.hidden = !visible;
+    elBtnActions.hidden = !visible;
+    elBtnPen.hidden = !visible;
+    elBtnClearPen.hidden = !visible;
+  }
+
+  function syncOptionControls() {
+    setPressed(elBtnCamera, cameraRequested);
+    setPressed(elBtnActions, actionsRequested);
+    setPressed(elBtnPen, penRequested);
+    const optionsLocked = isStarting || isRecording || isFinishing;
+    elBtnCamera.disabled = optionsLocked;
+    elBtnActions.disabled = optionsLocked;
+    // 画笔可在录制进行时开关，但媒体初始化期间不接受操作，
+    // 避免用户在 helper 尚未 ready 时看到虚假的“已开启”状态。
+    elBtnPen.disabled = !actionsRequested || isStarting || isFinishing;
+    elBtnClearPen.disabled = !actionsRequested || isStarting || isFinishing;
+  }
 
   // 显示提示信息（error 为 true 用危险色，否则用普通色）
   function showToast(msg, isError) {
@@ -105,21 +158,26 @@
     elToast.style.color = isError ? '#ef4444' : '#1f2329';
     elToast.hidden = false;
     elToast.classList.remove('with-action');
+    elToast.classList.remove('runtime-warning');
     elBtnRetry.hidden = true;
     // 隐藏其余控件，让提示占满胶囊
     elBtnStart.hidden = true;
     elStatus.hidden = true;
     elBtnStop.hidden = true;
+    setOptionControlsVisible(false);
   }
 
   // 隐藏提示，恢复正常控件
   function hideToast() {
     elToast.hidden = true;
     elToast.classList.remove('with-action');
+    elToast.classList.remove('runtime-warning');
     elBtnRetry.hidden = true;
     elBtnStart.hidden = isRecording;
     elStatus.hidden = false;
     elBtnStop.hidden = !isRecording;
+    setOptionControlsVisible(true);
+    syncOptionControls();
   }
 
   // 可恢复错误：显示红色错误文案，但保留「开始」按钮可点（不像 showToast 那样隐藏全部控件导致只能关窗重来），
@@ -130,11 +188,14 @@
     elToast.style.color = '#ef4444';
     elToast.hidden = false;
     elToast.classList.remove('with-action');
+    elToast.classList.remove('runtime-warning');
     elBtnRetry.hidden = true;
     elStatus.hidden = true;
     elBtnStop.hidden = true;
     elBtnStart.hidden = false; // 关键：保留开始按钮，允许原地重试
     elBtnStart.disabled = false;
+    setOptionControlsVisible(true);
+    syncOptionControls();
     toastTimer = setTimeout(hideToast, 4000);
   }
 
@@ -144,14 +205,31 @@
     elToast.style.color = '#ef4444';
     elToast.hidden = false;
     elToast.classList.add('with-action');
+    elToast.classList.remove('runtime-warning');
     elBtnStart.hidden = true;
     elStatus.hidden = true;
     elBtnStop.hidden = true;
     elBtnPause.hidden = true;
     elBtnRetry.hidden = false;
     elBtnRetry.disabled = false;
+    setOptionControlsVisible(false);
     elBtnCancel.title = '放弃未保存的录屏';
     elBtnCancel.setAttribute && elBtnCancel.setAttribute('aria-label', '放弃未保存的录屏');
+  }
+
+  function showRuntimeWarning(msg) {
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+    elToast.textContent = msg;
+    elToast.style.color = '#ef4444';
+    elToast.hidden = false;
+    elToast.classList.remove('with-action');
+    elToast.classList.add('runtime-warning');
+    // 摄像头/操作提示都是增强层；它们异常退出时录屏本身继续，停止按钮必须始终可用。
+    toastTimer = setTimeout(() => {
+      toastTimer = null;
+      elToast.hidden = true;
+      elToast.classList.remove('runtime-warning');
+    }, 4000);
   }
 
   // 格式化计时 mm:ss（超过一小时显示 hh:mm:ss）
@@ -269,6 +347,222 @@
     }
   }
 
+  async function acquireCameraStream() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: 'user',
+        },
+      });
+      if (!getTracks(stream, 'video').length) {
+        stopStreamTracks(stream);
+        throw captureFailure('CAMERA_UNAVAILABLE', '未找到可用摄像头，请连接或启用摄像头后重试');
+      }
+      return stream;
+    } catch (error) {
+      if (error && error.captureCode) throw error;
+      if (isPermissionError(error)) {
+        throw captureFailure('CAMERA_PERMISSION_DENIED', '摄像头权限被拒绝，请在系统设置中允许摄像头访问后重试');
+      }
+      if (isMissingDeviceError(error)) {
+        throw captureFailure('CAMERA_UNAVAILABLE', '未找到可用摄像头，请连接或启用摄像头后重试');
+      }
+      throw captureFailure(
+        'CAMERA_CAPTURE_FAILED',
+        `获取摄像头失败：${errorDetail(error, '未知错误')}，请关闭摄像头画中画或检查设备后重试`
+      );
+    }
+  }
+
+  function detachCameraTrackListeners() {
+    const disposers = cameraTrackDisposers;
+    cameraTrackDisposers = [];
+    disposers.forEach((dispose) => {
+      try { dispose(); } catch (_) { /* track may already have been destroyed */ }
+    });
+  }
+
+  function releaseCameraResources() {
+    // Detach before stop(): implementations are inconsistent about whether a
+    // programmatic stop can synchronously surface an ended-like notification.
+    detachCameraTrackListeners();
+    const stream = cameraStream;
+    const video = cameraVideoEl;
+    cameraStream = null;
+    cameraVideoEl = null;
+    if (video) {
+      try {
+        video.pause();
+        video.srcObject = null;
+      } catch (_) { /* ignore an already-detached media element */ }
+    }
+    stopStreamTracks(stream);
+  }
+
+  function cameraDisconnectedFailure() {
+    return captureFailure(
+      'CAMERA_DISCONNECTED',
+      '摄像头已断开或停止，请检查设备后重新开启摄像头画中画'
+    );
+  }
+
+  function handleCameraTrackEnded(expectedStream) {
+    if (!expectedStream || expectedStream !== cameraStream) return;
+    const failure = cameraDisconnectedFailure();
+    const failedDuringStart = isStarting && !isRecording;
+    cameraRequested = false;
+    releaseCameraResources();
+    elBtnCamera.classList.add('unavailable');
+    elBtnCamera.title = failure.message;
+    syncOptionControls();
+    if (failedDuringStart) {
+      cameraStartupFailure = failure;
+      return;
+    }
+    if (isRecording && !isFinishing) {
+      // Camera is an optional enhancement. Keep the screen encoder and stop/save
+      // controls alive, but remove the stale last camera frame immediately.
+      showRuntimeWarning('摄像头已断开；屏幕录制仍在继续');
+    }
+  }
+
+  function watchCameraTracks(stream) {
+    detachCameraTrackListeners();
+    const tracks = getTracks(stream, 'video');
+    for (const track of tracks) {
+      if (!track) continue;
+      const onEnded = () => handleCameraTrackEnded(stream);
+      if (typeof track.addEventListener === 'function') {
+        track.addEventListener('ended', onEnded);
+        cameraTrackDisposers.push(() => track.removeEventListener('ended', onEnded));
+      } else {
+        const previous = track.onended;
+        track.onended = onEnded;
+        cameraTrackDisposers.push(() => {
+          if (track.onended === onEnded) track.onended = previous || null;
+        });
+      }
+      if (track.readyState === 'ended') {
+        onEnded();
+        break;
+      }
+    }
+  }
+
+  function throwIfCameraStartupFailed() {
+    if (!cameraStartupFailure) return;
+    const failure = cameraStartupFailure;
+    cameraStartupFailure = null;
+    throw failure;
+  }
+
+  async function startActionMonitor() {
+    if (!actionsRequested) return;
+    if (typeof api.startRecordingActions !== 'function') {
+      throw captureFailure('ACTION_MONITOR_UNAVAILABLE', '当前版本无法启动鼠标/按键提示监听');
+    }
+    const generation = ++actionMonitorGeneration;
+    actionMonitorStartPending = true;
+    let result;
+    try {
+      result = await api.startRecordingActions();
+    } catch (error) {
+      if (generation !== actionMonitorGeneration) return false;
+      actionMonitorStartPending = false;
+      throw captureFailure(
+        'ACTION_MONITOR_FAILED',
+        `无法启动鼠标/按键提示：${errorDetail(error, '未知错误')}`
+      );
+    }
+    if (generation !== actionMonitorGeneration) {
+      // cancel/teardown 已在 invoke 等待期间发过 STOP。若旧主进程仍回报晚到成功，
+      // 再发一次幂等 STOP，避免关闭 renderer 后留下全局输入监听器。
+      if (result && result.ok === true && result.active === true) {
+        requestActionMonitorStop();
+      }
+      return false;
+    }
+    actionMonitorStartPending = false;
+    if (!result || result.ok !== true || result.active !== true) {
+      const detail = result && result.error ? result.error : '系统未允许输入事件监听';
+      throw captureFailure('ACTION_MONITOR_FAILED', `无法启动鼠标/按键提示：${detail}`);
+    }
+    actionMonitorActive = true;
+    elBtnActions.classList.remove('unavailable');
+    syncOptionControls();
+    return true;
+  }
+
+  function requestActionMonitorStop() {
+    if (typeof api.stopRecordingActions === 'function') {
+      try {
+        const stopping = api.stopRecordingActions();
+        if (stopping && typeof stopping.catch === 'function') stopping.catch(() => {});
+      } catch (_) { /* renderer/main may already be gone */ }
+    }
+  }
+
+  function stopActionMonitor() {
+    const shouldStop = actionMonitorActive || actionMonitorStartPending;
+    actionMonitorGeneration += 1;
+    actionMonitorStartPending = false;
+    actionMonitorActive = false;
+    if (shouldStop) requestActionMonitorStop();
+  }
+
+  function handleActionMonitorFailure(payload) {
+    if (!actionMonitorActive) return;
+    actionMonitorGeneration += 1;
+    actionMonitorStartPending = false;
+    actionMonitorActive = false;
+    actionsRequested = false;
+    penRequested = false;
+    overlayState.setPenEnabled(false);
+    const detail = payload && typeof payload.error === 'string'
+      ? payload.error.slice(0, 300)
+      : '监听器意外停止';
+    elBtnActions.classList.add('unavailable');
+    elBtnActions.title = detail;
+    syncOptionControls();
+    showRuntimeWarning(`操作提示已停止：${detail}`);
+  }
+
+  function toggleCameraOption() {
+    if (isStarting || isRecording || isFinishing) return;
+    cameraRequested = !cameraRequested;
+    elBtnCamera.classList.remove('unavailable');
+    elBtnCamera.title = '摄像头画中画（开始前设置）';
+    syncOptionControls();
+  }
+
+  function toggleActionPrompts() {
+    if (isStarting || isRecording || isFinishing) return;
+    actionsRequested = !actionsRequested;
+    elBtnActions.classList.remove('unavailable');
+    elBtnActions.title = '将鼠标点击与按键提示写入录屏（开始前设置）';
+    if (!actionsRequested) {
+      penRequested = false;
+      overlayState.setPenEnabled(false);
+      overlayState.clearStrokes();
+    }
+    syncOptionControls();
+  }
+
+  function toggleLivePen() {
+    if (!actionsRequested || isStarting || isFinishing) return;
+    penRequested = !penRequested;
+    overlayState.setPenEnabled(penRequested);
+    syncOptionControls();
+  }
+
+  function clearLivePen() {
+    if (!actionsRequested || isStarting || isFinishing) return;
+    overlayState.clearStrokes();
+  }
+
   async function attachRequestedAudio(targetStream) {
     const inputStreams = [];
     if (init.systemAudio === true) inputStreams.push(captureStream);
@@ -361,11 +655,13 @@
     // 停所有 track（整屏流 + 麦克风 + canvas/混音流）
     stopStreamTracks(captureStream);
     stopStreamTracks(microphoneStream);
+    releaseCameraResources();
     stopStreamTracks(canvasStream);
     captureStream = null;
     microphoneStream = null;
     canvasStream = null;
     closeAudioMixer();
+    stopActionMonitor();
     // 释放 video
     if (videoEl) {
       try {
@@ -385,14 +681,18 @@
     if (!startToken) return;
     isStarting = true;
     elBtnStart.disabled = true;
+    syncOptionControls();
 
     const scale = init.scaleFactor || 1;
     const rect = init.rect || {};
     const db = init.displayBounds || {};
-
-    // 计算裁剪后画布尺寸（设备像素），保证 >=1 且为整数
-    const canvasW = Math.max(1, Math.round((rect.width || 0) * scale));
-    const canvasH = Math.max(1, Math.round((rect.height || 0) * scale));
+    let captureGeometry = null;
+    let canvasW = 0;
+    let canvasH = 0;
+    recordingPixelWidth = 0;
+    recordingPixelHeight = 0;
+    actionGeometry = init;
+    cameraStartupFailure = null;
 
     try {
       // 1. 找到目标显示器对应的采集源
@@ -467,6 +767,16 @@
           return;
         }
       }
+      if (cameraRequested) {
+        cameraStream = await acquireCameraStream();
+        if (!lifecycle.isCurrentGeneration(startToken)) {
+          teardown();
+          isStarting = false;
+          return;
+        }
+        watchCameraTracks(cameraStream);
+        throwIfCameraStartupFailed();
+      }
     } catch (err) {
       if (!lifecycle.isCurrentGeneration(startToken)) {
         teardown();
@@ -491,6 +801,11 @@
       }
       teardown();
       isStarting = false;
+      if (err && String(err.captureCode || '').startsWith('CAMERA_')) {
+        cameraRequested = false;
+        elBtnCamera.classList.add('unavailable');
+        elBtnCamera.title = msg;
+      }
       lifecycle.markError();
       showRecoverableError(hint); // 保留开始按钮，允许原地重试（而非隐藏全部控件只能关窗）
       return;
@@ -525,24 +840,128 @@
         /* 自动播放可能被忽略，但 srcObject 已就绪，可继续绘制 */
       }
 
+      const desktopTrack = getTracks(captureStream, 'video')[0];
+      let desktopTrackSettings = {};
+      try {
+        desktopTrackSettings = desktopTrack && typeof desktopTrack.getSettings === 'function'
+          ? (desktopTrack.getSettings() || {})
+          : {};
+      } catch (_) { /* video metadata remains the authoritative fallback */ }
+      const desktopPixelWidth = Number(videoEl.videoWidth) || Number(desktopTrackSettings.width) || 0;
+      const desktopPixelHeight = Number(videoEl.videoHeight) || Number(desktopTrackSettings.height) || 0;
+      captureGeometry = overlayContract.resolveRecorderCaptureGeometry(init, {
+        width: desktopPixelWidth,
+        height: desktopPixelHeight,
+      });
+      if (!captureGeometry) {
+        throw captureFailure(
+          'SCREEN_GEOMETRY_UNAVAILABLE',
+          '无法确认桌面流的实际像素尺寸，请重新选择录制区域'
+        );
+      }
+      canvasW = captureGeometry.outputWidth;
+      canvasH = captureGeometry.outputHeight;
+      recordingPixelWidth = canvasW;
+      recordingPixelHeight = canvasH;
+      actionGeometry = captureGeometry.actionGeometry;
+      throwIfCameraStartupFailed();
+
+      if (cameraStream) {
+        cameraVideoEl = document.createElement('video');
+        cameraVideoEl.muted = true;
+        cameraVideoEl.playsInline = true;
+        cameraVideoEl.srcObject = cameraStream;
+        await new Promise((resolve) => {
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            resolve();
+          };
+          cameraVideoEl.onloadedmetadata = finish;
+          setTimeout(finish, 1000);
+        });
+        if (!lifecycle.isCurrentGeneration(startToken)) {
+          teardown();
+          isStarting = false;
+          return;
+        }
+        try { await cameraVideoEl.play(); } catch (_) { /* 首帧到达后定时绘制会自动恢复 */ }
+        throwIfCameraStartupFailed();
+      }
+
+      await startActionMonitor();
+      if (!lifecycle.isCurrentGeneration(startToken)) {
+        teardown();
+        isStarting = false;
+        return;
+      }
+      throwIfCameraStartupFailed();
+
       // 4. 离屏 canvas，按裁剪区域绘制
       canvasEl = document.createElement('canvas');
       canvasEl.width = canvasW;
       canvasEl.height = canvasH;
       const ctx = canvasEl.getContext('2d');
 
-      // 源裁剪坐标（设备像素）
-      const sx = Math.round((rect.x || 0) * scale);
-      const sy = Math.round((rect.y || 0) * scale);
-      const sw = canvasW;
-      const sh = canvasH;
+      // 源裁剪坐标来自实际 desktop video 像素，不假定等于 display.scaleFactor。
+      const sx = captureGeometry.sourceX;
+      const sy = captureGeometry.sourceY;
+      const sw = captureGeometry.sourceWidth;
+      const sh = captureGeometry.sourceHeight;
       const fps = init.fps && init.fps > 0 ? init.fps : 15;
+
+      function drawCameraPictureInPicture() {
+        if (!cameraVideoEl) return;
+        const diameter = Math.max(72, Math.min(canvasW, canvasH) * 0.24);
+        const margin = Math.max(16, Math.min(canvasW, canvasH) * 0.035);
+        const x = Math.max(0, canvasW - diameter - margin);
+        const y = Math.max(0, canvasH - diameter - margin);
+        const sourceW = Number(cameraVideoEl.videoWidth) || 640;
+        const sourceH = Number(cameraVideoEl.videoHeight) || 480;
+        const sourceSize = Math.min(sourceW, sourceH);
+        const sourceX = Math.max(0, (sourceW - sourceSize) / 2);
+        const sourceY = Math.max(0, (sourceH - sourceSize) / 2);
+        try {
+          if (typeof ctx.save === 'function') ctx.save();
+          if (typeof ctx.beginPath === 'function' && typeof ctx.arc === 'function' && typeof ctx.clip === 'function') {
+            ctx.beginPath();
+            ctx.arc(x + diameter / 2, y + diameter / 2, diameter / 2, 0, Math.PI * 2);
+            ctx.clip();
+          }
+          ctx.drawImage(
+            cameraVideoEl,
+            sourceX,
+            sourceY,
+            sourceSize,
+            sourceSize,
+            x,
+            y,
+            diameter,
+            diameter
+          );
+          if (typeof ctx.restore === 'function') ctx.restore();
+          if (typeof ctx.save === 'function') ctx.save();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = Math.max(3, diameter / 32);
+          if (typeof ctx.beginPath === 'function' && typeof ctx.arc === 'function' && typeof ctx.stroke === 'function') {
+            ctx.beginPath();
+            ctx.arc(x + diameter / 2, y + diameter / 2, Math.max(1, diameter / 2 - ctx.lineWidth / 2), 0, Math.PI * 2);
+            ctx.stroke();
+          }
+          if (typeof ctx.restore === 'function') ctx.restore();
+        } catch (_) {
+          // 摄像头首帧尚未就绪时不影响主屏录制。
+        }
+      }
 
       // 把 video 的裁剪区域逐帧画到 canvas
       drawTimer = setInterval(() => {
         if (!videoEl) return;
         try {
           ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, canvasW, canvasH);
+          drawCameraPictureInPicture();
+          overlayState.render(ctx, canvasW, canvasH, Date.now());
         } catch (e) {
           /* 帧未就绪时忽略 */
         }
@@ -551,6 +970,7 @@
       // 5. 从 canvas 取流并录制
       canvasStream = canvasEl.captureStream(fps);
       await attachRequestedAudio(canvasStream);
+      throwIfCameraStartupFailed();
 
       // 优先 vp9，失败退 vp8，再退默认
       const candidates = getTracks(canvasStream, 'audio').length
@@ -645,9 +1065,12 @@
         // 不再继续采集新内容；canvas/混音输出在 onstop 组装 Blob 后统一清理。
         stopStreamTracks(captureStream);
         stopStreamTracks(microphoneStream);
+        releaseCameraResources();
+        stopActionMonitor();
       };
 
       // 每秒切一个数据块，避免单块过大
+      throwIfCameraStartupFailed();
       recorder.start(1000);
 
       if (!lifecycle.markActive(startToken).accepted) {
@@ -668,6 +1091,7 @@
       elBtnPause.title = '暂停录制';
       elBtnStop.hidden = false;
       elBtnStop.disabled = false;
+      syncOptionControls();
       startTimer(true);
     } catch (err) {
       if (!lifecycle.isCurrentGeneration(startToken)) {
@@ -679,6 +1103,15 @@
       teardown();
       isStarting = false;
       isRecording = false;
+      if (err && String(err.captureCode || '').startsWith('ACTION_')) {
+        elBtnActions.classList.add('unavailable');
+        elBtnActions.title = msg;
+      }
+      if (err && String(err.captureCode || '').startsWith('CAMERA_')) {
+        cameraRequested = false;
+        elBtnCamera.classList.add('unavailable');
+        elBtnCamera.title = msg;
+      }
       lifecycle.markError();
       elBar.classList.remove('recording');
       showRecoverableError('录制失败：' + msg); // 保留开始按钮，允许原地重试
@@ -719,6 +1152,8 @@
         mime: 'video/webm',
         toGif: !!init.toGif,
         fps: init.fps && init.fps > 0 ? init.fps : 15,
+        width: recordingPixelWidth,
+        height: recordingPixelHeight,
         trimStart: parseInt(document.getElementById('trimStart').value, 10) || 0,
         trimEnd: parseInt(document.getElementById('trimEnd').value, 10) || 0,
       });
@@ -863,6 +1298,8 @@
     // 源流可立即停；canvas/混音输出由 recorder.stop 触发 onstop 后清理。
     stopStreamTracks(captureStream);
     stopStreamTracks(microphoneStream);
+    releaseCameraResources();
+    stopActionMonitor();
   }
 
   // ====== 取消录制：停一切，不保存，关窗 ======
@@ -901,9 +1338,29 @@
   // ====== 事件绑定 ======
   elBtnStart.addEventListener('click', startRecording);
   elBtnStop.addEventListener('click', stopRecording);
+  elBtnCamera.addEventListener('click', toggleCameraOption);
+  elBtnActions.addEventListener('click', toggleActionPrompts);
+  elBtnPen.addEventListener('click', toggleLivePen);
+  elBtnClearPen.addEventListener('click', clearLivePen);
   // DOM listener receives a MouseEvent; never pass it through as the lifecycle token.
   elBtnRetry.addEventListener('click', () => savePendingRecording());
   elBtnCancel.addEventListener('click', cancelRecording);
+
+  let disposeRecordingActionListener = null;
+  if (typeof api.onRecordingAction === 'function') {
+    try {
+      disposeRecordingActionListener = api.onRecordingAction((payload) => {
+        if (payload && payload.type === 'monitor-error') {
+          handleActionMonitorFailure(payload);
+          return;
+        }
+        if (!actionMonitorActive || !isRecording) return;
+        overlayState.accept(payload, actionGeometry, payload && payload.at);
+      });
+    } catch (_) {
+      // 预加载契约不完整时由用户真正开启“操作提示”时给出可恢复错误。
+    }
+  }
 
   // Esc 取消
   window.addEventListener('keydown', (e) => {
@@ -917,6 +1374,10 @@
   // saving 阶段只标记“结果未知”，不宣称已取消，因为主进程可能已写盘。
   window.addEventListener('beforeunload', () => {
     if (!terminalCloseRequested) lifecycle.detach();
+    if (typeof disposeRecordingActionListener === 'function') {
+      try { disposeRecordingActionListener(); } catch (_) { /* renderer is already unloading */ }
+      disposeRecordingActionListener = null;
+    }
     teardown();
   });
 
@@ -924,12 +1385,18 @@
   api.onInit((payload) => {
     if (payload && typeof payload === 'object') {
       init = Object.assign(init, payload);
+      cameraRequested = payload.camera === true;
+      actionsRequested = payload.actionPrompts === true;
+      penRequested = actionsRequested && payload.livePen === true;
+      overlayState.setPenEnabled(penRequested);
     }
     // 初始 UI：等待开始
     elBtnStop.hidden = true;
     elBtnStop.disabled = true;
     elBtnStart.hidden = false;
     elBtnStart.disabled = false;
+    setOptionControlsVisible(true);
+    syncOptionControls();
     // 覆盖主进程创建窗口时的 opening 状态。
     reportLifecycleState(lifecycle.snapshot());
   });

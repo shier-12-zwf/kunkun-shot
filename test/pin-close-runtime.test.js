@@ -5,6 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const PinAnnotations = require('../src/renderer/pin/pin-annotations');
+const PinImageLoader = require('../src/renderer/pin/pin-image-loader');
 const pinSource = fs.readFileSync(
   path.join(__dirname, '..', 'src', 'renderer', 'pin', 'pin.js'),
   'utf8'
@@ -96,6 +97,7 @@ function createRuntime({ update, flush, confirmAnswers = [], onConfirm }) {
   const windowListeners = new Map();
   const callbacks = {};
   const acknowledgements = [];
+  const syncAcknowledgements = [];
   const updates = [];
   let closeCalls = 0;
   let confirmCalls = 0;
@@ -111,6 +113,14 @@ function createRuntime({ update, flush, confirmAnswers = [], onConfirm }) {
   const window = {
     document,
     PinAnnotations,
+    PinImageLoader,
+    Image: class {
+      constructor() {
+        this.naturalWidth = 100;
+        this.naturalHeight = 100;
+      }
+      decode() { return Promise.resolve(); }
+    },
     PinContentUpdate: {
       createOrderedPinContentUpdater() {
         return {
@@ -131,6 +141,7 @@ function createRuntime({ update, flush, confirmAnswers = [], onConfirm }) {
       onPinCmd(listener) { callbacks.command = listener; },
       pinUpdateContent: async () => ({ ok: true, revision: 1 }),
       pinCloseReady: async (payload) => { acknowledgements.push(payload); return { ok: true }; },
+      pinSyncReady: async (payload) => { syncAcknowledgements.push(payload); return { ok: true }; },
       closeSelf() { closeCalls += 1; },
     },
     addEventListener(type, listener) { windowListeners.set(type, listener); },
@@ -162,6 +173,7 @@ function createRuntime({ update, flush, confirmAnswers = [], onConfirm }) {
     callbacks,
     elements,
     acknowledgements,
+    syncAcknowledgements,
     updates,
     body,
     get closeCalls() { return closeCalls; },
@@ -185,6 +197,7 @@ test('prepare-close freezes pointer edits and ACKs exactly the committed visible
     update: () => gate.promise,
     flush: async () => IMAGE,
   });
+  await settle();
   click(runtime.elements.get('btnAnnotate'));
   const canvas = runtime.elements.get('pinAnnotationCanvas');
   canvas.dispatch('pointerdown', { button: 0, pointerId: 7, clientX: 10, clientY: 20 });
@@ -216,6 +229,7 @@ test('failed batch close stays open without modal; only explicit interactive dis
     flush: async () => { throw new Error('flush failed'); },
     confirmAnswers: [false, true],
   });
+  await settle();
 
   runtime.callbacks.command({ cmd: 'close' });
   await settle();
@@ -249,6 +263,7 @@ test('prepare-close taking over inside the discard dialog prevents a pre-ACK clo
       callbacks.command({ cmd: 'prepare-close', requestId: 'req-takeover' });
     },
   });
+  await settle();
 
   click(runtime.elements.get('btnClose'));
   await settle();
@@ -272,6 +287,7 @@ test('canceling application quit releases the edit barrier and suppresses its st
     update: () => gate.promise,
     flush: async () => IMAGE,
   });
+  await settle();
   click(runtime.elements.get('btnAnnotate'));
   const canvas = runtime.elements.get('pinAnnotationCanvas');
   canvas.dispatch('pointerdown', { button: 0, pointerId: 11, clientX: 10, clientY: 10 });
@@ -289,4 +305,36 @@ test('canceling application quit releases the edit barrier and suppresses its st
 
   assert.equal(runtime.acknowledgements.length, 0, 'a canceled quit request must not emit a stale ACK');
   assert.equal(runtime.updates.length >= 2, true, 'editing must resume after quit cancellation');
+});
+
+test('save-all sync commits the visible stroke, waits for publication, and keeps editing enabled', async () => {
+  const gate = deferred();
+  const runtime = createRuntime({
+    update: () => gate.promise,
+    flush: async () => IMAGE,
+  });
+  await settle();
+  click(runtime.elements.get('btnAnnotate'));
+  const canvas = runtime.elements.get('pinAnnotationCanvas');
+  canvas.dispatch('pointerdown', { button: 0, pointerId: 21, clientX: 10, clientY: 20 });
+  canvas.dispatch('pointermove', { pointerId: 21, clientX: 40, clientY: 50 });
+
+  runtime.callbacks.command({ cmd: 'sync-content', requestId: 'save-1' });
+  await settle();
+  assert.equal(runtime.updates.length, 1);
+  assert.deepEqual(runtime.syncAcknowledgements, []);
+  assert.equal(runtime.body.classList.contains('pin-close-pending'), false);
+
+  gate.resolve(IMAGE);
+  await settle();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(runtime.syncAcknowledgements)),
+    [{ requestId: 'save-1', ok: true }]
+  );
+
+  canvas.dispatch('pointerdown', { button: 0, pointerId: 22, clientX: 30, clientY: 30 });
+  canvas.dispatch('pointermove', { pointerId: 22, clientX: 40, clientY: 40 });
+  canvas.dispatch('pointerup', { pointerId: 22, clientX: 40, clientY: 40 });
+  await settle();
+  assert.equal(runtime.updates.length, 2, 'point-in-time save synchronization must not freeze later edits');
 });

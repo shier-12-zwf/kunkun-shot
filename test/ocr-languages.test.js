@@ -24,20 +24,25 @@ test('bundled OCR languages are enumerated only from regular traineddata files',
 });
 
 test('OCR language selection accepts only shipped combinations and verifies every required file', () => {
-  assert.deepEqual(SUPPORTED_OCR_LANGUAGES, ['chi_sim+eng', 'chi_sim', 'eng']);
+  assert.deepEqual(SUPPORTED_OCR_LANGUAGES, [
+    'chi_sim+eng', 'chi_tra+eng', 'jpn+eng', 'kor+eng',
+    'fra+eng', 'deu+eng', 'spa+eng', 'por+eng',
+    'chi_sim', 'chi_tra', 'eng', 'jpn', 'kor', 'fra', 'deu', 'spa', 'por',
+  ]);
+  const available = ['chi_sim', 'chi_tra', 'eng', 'jpn', 'kor', 'fra', 'deu', 'spa', 'por'];
   for (const lang of SUPPORTED_OCR_LANGUAGES) {
-    assert.equal(normalizeBundledOCRLanguage(lang, ['chi_sim', 'eng']), lang);
+    assert.equal(normalizeBundledOCRLanguage(lang, available), lang);
   }
   assert.throws(
-    () => normalizeBundledOCRLanguage('chi_sim+jpn', ['chi_sim', 'eng']),
+    () => normalizeBundledOCRLanguage('chi_sim+jpn', available),
     /OCR.*语言/,
   );
   assert.throws(
-    () => normalizeBundledOCRLanguage('eng+chi_sim', ['chi_sim', 'eng']),
+    () => normalizeBundledOCRLanguage('eng+chi_sim', available),
     /OCR.*语言/,
   );
   assert.throws(
-    () => normalizeBundledOCRLanguage('chi_sim+eng+chi_sim', ['chi_sim', 'eng']),
+    () => normalizeBundledOCRLanguage('chi_sim+eng+chi_sim', available),
     /OCR.*语言/,
   );
   assert.throws(
@@ -45,7 +50,7 @@ test('OCR language selection accepts only shipped combinations and verifies ever
     /未安装.*chi_sim/,
   );
   assert.throws(
-    () => normalizeBundledOCRLanguage('', ['chi_sim', 'eng']),
+    () => normalizeBundledOCRLanguage('', available),
     /OCR.*语言/,
   );
 });
@@ -60,6 +65,11 @@ test('settings and release docs expose a closed offline OCR contract', () => {
   assert.match(settings, /const selOcrLang = h\('select'/);
   assert.doesNotMatch(settings, /const inLang = h\('input'/);
   for (const lang of SUPPORTED_OCR_LANGUAGES) assert.match(settings, new RegExp(lang.replace('+', '\\+')));
+
+  const shipped = listBundledOCRLanguages(path.join(root, 'tessdata'));
+  for (const code of ['chi_sim', 'chi_tra', 'eng', 'jpn', 'kor', 'fra', 'deu', 'spa', 'por']) {
+    assert.ok(shipped.includes(code), `missing bundled OCR language ${code}`);
+  }
 
   assert.match(readmeZh, /缺失[^\n]*明确失败[^\n]*(?:绝不|不会)[^\n]*(?:CDN|网络)/i);
   assert.doesNotMatch(readmeZh, /OCR[^\n]*可能回退[^\n]*网络/i);

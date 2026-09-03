@@ -17,6 +17,7 @@ const EXPECTED_CHECKS = [
   'ai',
   'overlay',
   'pin',
+  'formula',
   'recorder',
   'longshot',
   'translate-popup',

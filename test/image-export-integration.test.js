@@ -148,6 +148,31 @@ test('quick save and main-process history contract use configured export without
     quality: 76,
   }]);
 
+  const occupiedName = 'shot-region-640x480-4-123456.avif';
+  fs.writeFileSync(path.join(dir, occupiedName), 'existing');
+  const templated = await imageExport.quickSaveImage(
+    {
+      dataURL: PNG_DATA_URL,
+      config: {
+        capture: {
+          exportFormat: 'avif',
+          quality: 76,
+          fileNameTemplate: 'shot-{type}-{width}x{height}-{index}-{timestamp}',
+        },
+      },
+      defaultDirectory: dir,
+      timestamp: 123456,
+      type: 'region',
+      index: 4,
+      width: 640,
+      height: 480,
+    },
+    {
+      exportImage: async (options) => ({ path: options.outputPath, format: options.format, quality: options.quality }),
+    },
+  );
+  assert.equal(templated.path, path.join(dir, 'shot-region-640x480-4-123456-2.avif'));
+
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8');
   const overlayStart = mainSource.indexOf('ipcMain.handle(C.OVERLAY_RESULT');
   const imageSaveStart = mainSource.indexOf('ipcMain.handle(C.IMAGE_SAVE', overlayStart);
@@ -180,4 +205,9 @@ test('settings expose format and quality controls and preserve quality for lossl
   assert.match(source, /cap\.quality\s*!=\s*null\s*\?\s*cap\.quality\s*:\s*90/);
   assert.match(source, /无损格式[^\n]*(?:不使用|无效)[^\n]*质量/);
   assert.match(source, /inExportQuality\.disabled\s*=\s*lossless/);
+  assert.match(source, /capture:\s*\{\s*fileNameTemplate:/);
+  assert.match(source, /recording:\s*\{\s*fileNameTemplate:/);
+  for (const token of ['datetime', 'date', 'time', 'timestamp', 'type', 'index', 'width', 'height']) {
+    assert.match(source, new RegExp(`\\{${token}\\}`));
+  }
 });

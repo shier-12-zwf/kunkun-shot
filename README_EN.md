@@ -2,9 +2,11 @@
 
 [简体中文](README.md) | English
 
-An open-source, macOS-first Electron screenshot utility with capture and annotation, pinned reference windows, OCR, QR recognition, experimental scrolling capture, region recording with optional system/microphone audio, and optional AI-assisted image Q&A, translation, table recognition, and formula recognition.
+An open-source, macOS-first Electron screenshot utility with precision capture and annotation, pinned reference windows, multilingual offline OCR, QR/barcode recognition, editable scrolling capture, region recording with camera/action overlays, and optional AI-assisted image Q&A, translation, table recognition, and formula recognition.
 
 > Status: early preview. Available source code and automated tests do not imply that every hands-on flow has passed acceptance. The project does not claim Windows/Linux support, nor does it claim that public builds are Apple-signed or notarized. See the [release checklist](docs/RELEASE_CHECKLIST.md) for the evidence required before a release.
+
+> Current source version: `v0.3.0`.
 
 Start with the [complete Chinese user guide](docs/使用指南.md). The [PixPin comparison and improvement report](docs/PixPin-竞品对比与改进报告.md) documents the evidence, current gaps, and priorities. See the [changelog](CHANGELOG.md) for version history.
 
@@ -18,16 +20,17 @@ Start with the [complete Chinese user guide](docs/使用指南.md). The [PixPin 
 
 ## Capabilities
 
-- Region, window, full-screen, and timed capture, including adjustable regions and multi-display selection.
-- Rectangle, ellipse, arrow, line, pen, highlighter, polyline, text, mosaic, and numbered annotations with undo/redo.
-- Pin images, text, colors, or Finder files to the desktop; pins support always-on-top, locking, mouse pass-through, thumbnails, and restoring the most recently closed item. Image pins can be annotated with pen, line, arrow, shapes, text, and eraser tools; the composite is used for copy, save, OCR, AI, and file drag-out. Open pins are saved on normal exit and restored as a local workspace.
-- Local OCR using Tesseract.js and the repository's Chinese/English language data; macOS also has a system Vision-based text-box recognition path.
-- QR recognition and copying from a selected region.
+- Region, window, full-screen, and timed capture. Regions support exact source-pixel width/height, common size presets, free/1:1/4:3/16:9 ratios, keyboard adjustment, and independent X/Y mapping for scaled displays.
+- Rectangle, ellipse, arrow, line, pen, highlighter, polyline, text, mosaic, numbered marker, real blur, elliptical spotlight, text watermark, and exportable magnifier annotations with undo/redo.
+- Translation is the first top-level capture action, followed by OCR. Pin, Copy, and Cancel also remain top-level; lower-frequency actions live under More.
+- Pin images, text, colors, or Finder files to the desktop. Image pins support annotation, crop, 90-degree rotation, horizontal/vertical flip, and composite copy/save/OCR/AI/drag-out. Multiple pins can be grouped for movement, collapsed/expanded, and ungrouped. A local KaTeX window creates LaTeX formula pins without a network request. Open pins are restored as a local workspace after a normal quit.
+- Offline OCR with bundled Simplified Chinese, Traditional Chinese, English, Japanese, Korean, French, German, Spanish, and Portuguese data, plus preset language-plus-English combinations. macOS Vision provides a separate local text-box path.
+- Persistent QR/common-barcode results, with a manual full-resolution rescan when the initial scan fails.
 - Screenshot history is stored under `history/` in Electron's user-data directory. Automatic history capture is off by default, but a successful Save or Quick Save still stores another copy in history. Clearing history removes only those history copies, not files saved elsewhere by the user. History supports search, filters, copy, export, and bulk deletion.
-- Screenshot export to PNG, JPEG, WebP, BMP, AVIF, or single-page PDF, with configurable default format and applicable quality.
-- Region recording to WebM, or conversion through FFmpeg to H.264 MP4/GIF. System audio and microphone capture are independent opt-ins and are mixed when both are enabled; both remain off by default for backward compatibility.
-- An AI workspace for OCR-assisted Q&A, translation, summarization, and rewriting, plus table recognition (Markdown/CSV) and formula recognition (LaTeX); a configured vision model can receive a selected image directly.
-- A basic scrolling-capture flow. This remains experimental and can fail on complex pages.
+- Screenshot export to PNG, JPEG, WebP, BMP, AVIF, or single-page PDF. Separate screenshot/recording filename templates support date, time, timestamp, type, index, width, and height variables. History can merge up to 100 selected images into one ordered multi-page PDF.
+- Region recording to WebM, or conversion through FFmpeg to H.264 MP4/GIF. System audio and microphone are independent opt-ins. Camera picture-in-picture, click/special-key or modifier-shortcut prompts, and encoded pen strokes can be written into the output. Cropping and overlays use the desktop stream's actual pixel dimensions for Retina/multi-display mapping.
+- An AI workspace for OCR-assisted Q&A, translation, summarization, and rewriting. Recognized tables are editable cell by cell and can be copied as CSV, TSV, or GFM Markdown with spreadsheet-formula-injection protection. Formula recognition returns LaTeX; a configured vision model can receive the selected image directly.
+- Vertical or horizontal scrolling capture with pause/continue, raw-frame deletion and restitching, undo/redo, fixed top/bottom-region assistance, and output cropping. It remains experimental and requires manual scrolling and review on complex pages.
 
 ## Quick start
 
@@ -98,7 +101,7 @@ Understand the data flow before enabling AI:
 - AI table/formula recognition follows the same boundary: the vision route sends the selected image, while a text-only route sends only local OCR text and may be unable to reconstruct a complex table reliably.
 - “Auto” uses a fixed route: text-only tasks go only to DeepSeek and vision tasks go only to MiniMax, so both must be configured. If the provider required for a task is incomplete, the request stops with an explicit error and never switches to another provider using residual credentials.
 - Connection tests and model-list requests also contact the configured endpoint.
-- Local OCR reads only the repository/application `tessdata` resources; settings support `chi_sim+eng`, `chi_sim`, and `eng`. If required language data is missing, OCR fails explicitly and never falls back to a CDN or any other network download.
+- Local OCR reads only the repository/application `tessdata` resources. Settings support `chi_sim`, `chi_tra`, `eng`, `jpn`, `kor`, `fra`, `deu`, `spa`, `por`, and the bundled language-plus-English presets. If required language data is missing, OCR fails explicitly and never falls back to a CDN or any other network download.
 - API keys are persisted only after Electron `safeStorage` encrypts them successfully. If secure storage is unavailable or encryption fails, saving reports an explicit error—keys are never written as plaintext or falsely reported as saved.
 
 Do not send screenshots containing personal data, trade secrets, or restricted third-party content to an untrusted model provider. Provider privacy, retention, and billing terms apply independently.
@@ -140,9 +143,10 @@ Automated tests cannot replace hands-on checks for screen permission, multiple d
 ## Known limitations
 
 - macOS is the only current support and acceptance focus. Generic Electron APIs in the source are not a cross-platform support commitment.
-- Scrolling capture is experimental; complex scroll containers, dynamic content, and fixed elements may produce bad stitching.
+- Scrolling capture still requires manual scrolling and remains experimental. Animation, live updates, reverse scrolling, and complex nested containers can prevent reliable stitching; fixed top/bottom assistance still requires human confirmation.
 - GIF conversion can be slow and storage-intensive, especially for long, high-resolution recordings.
-- System audio, microphone capture, AVIF/PDF behavior in Preview/Finder, and cross-restart pin-workspace restoration still require acceptance on target macOS hardware.
+- System audio, microphone and camera hot-plug behavior, mixed-DPI multi-display mapping, AVIF/PDF behavior in Preview/Finder, and cross-restart pin-workspace restoration still require acceptance on target macOS hardware.
+- The recording pen is encoded into the resulting video but is not shown as a separate live desktop overlay. A camera disconnected during recording does not stop the screen recording, but it cannot hot-reconnect within that same recording.
 - Global shortcuts may conflict with macOS or other applications.
 - OCR accuracy depends on image quality, language data, and layout. AI output can also be wrong.
 - There is no in-app auto-update or notarized public installer. GitHub Releases are source-only, and local development installs are updated manually.

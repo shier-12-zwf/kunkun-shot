@@ -181,7 +181,7 @@ function add(dataURL, type) {
 
 // 录屏成功导出后，把视频/GIF 复制到受管历史目录。这与截图历史保留 PNG
 // 副本的语义一致：删除/清空历史只删受管副本，不会删用户选择位置上的原始导出。
-async function addMedia(sourcePath, type) {
+async function addMedia(sourcePath, type, metadata = {}) {
   ensureDirs();
   if (type !== 'recording' || typeof sourcePath !== 'string' || !path.isAbsolute(sourcePath)) return null;
   const ext = path.extname(sourcePath).toLowerCase();
@@ -214,12 +214,18 @@ async function addMedia(sourcePath, type) {
   // 放到最后加载最新 cache；多个并发 addMedia 在每次无 await 的提交段内依次合并，
   // 不会用复制开始前的旧快照互相覆盖。
   const idx = loadIndex();
+  const normalizedWidth = Number.isInteger(metadata.width) && metadata.width >= 0 && metadata.width <= 32768
+    ? metadata.width
+    : 0;
+  const normalizedHeight = Number.isInteger(metadata.height) && metadata.height >= 0 && metadata.height <= 32768
+    ? metadata.height
+    : 0;
   const item = {
     id,
     file,
     time: Date.now(),
-    width: 0,
-    height: 0,
+    width: normalizedWidth,
+    height: normalizedHeight,
     type: 'recording',
     kind: 'media',
     size: stat.size,

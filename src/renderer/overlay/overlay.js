@@ -3,13 +3,18 @@
  *
  * 坐标系说明：
  *  - 显示器 CSS 像素：window/body 尺寸 = displayCssW × displayCssH（= payload.width × height）。
- *  - 背景截图为物理像素，分辨率 = displayCssW*scaleFactor × displayCssH*scaleFactor。
+ *  - 背景截图为源图物理像素；横纵缩放分别由源图尺寸与编辑视口尺寸推导。
  *  - 选区 rect 用 CSS px（相对显示器左上角）。
  *  - 标注画在 annoCanvas，其内部分辨率与选区 CSS 尺寸 1:1，绘制时用 CSS px 坐标。
- *  - 提交合成时：新 canvas 物理分辨率 = rect 尺寸 × scaleFactor，从背景物理像素裁剪 + 把标注放大叠加。
+ *  - 提交合成时：选择框先映射为精确源图边缘，再按独立 X/Y 比例叠加标注。
  */
 (function () {
   'use strict';
+
+  var OverlayGeometry = typeof globalThis !== 'undefined' ? globalThis.KKOverlayGeometry : null;
+  if (!OverlayGeometry && typeof module !== 'undefined' && module.exports) {
+    OverlayGeometry = require('./overlay-geometry');
+  }
 
   // 只有主进程明确确认动作成功后才关闭截图层。保存对话框取消、写盘失败或
   // IPC 异常都会走 onFailure，由界面恢复 S.finished，保留选区与标注供重试。
@@ -60,20 +65,89 @@
   // CSS 窗口必须是整数尺寸，原图像素尺寸不一定能被它整除。
   // 分别映射四条边再相减，可以保证整图选区恒等于整张原图，且局部选区不会越界。
   function mapOverlayRectToSource(rect, viewport, source) {
-    var vw = Number(viewport && viewport.width);
-    var vh = Number(viewport && viewport.height);
-    var sw = Math.floor(Number(source && source.width));
-    var sh = Math.floor(Number(source && source.height));
-    if (!(vw > 0) || !(vh > 0) || !(sw > 0) || !(sh > 0) || !rect) return null;
-    var x0 = Math.max(0, Math.min(vw, Number(rect.x) || 0));
-    var y0 = Math.max(0, Math.min(vh, Number(rect.y) || 0));
-    var x1 = Math.max(x0, Math.min(vw, x0 + Math.max(0, Number(rect.width) || 0)));
-    var y1 = Math.max(y0, Math.min(vh, y0 + Math.max(0, Number(rect.height) || 0)));
-    var left = Math.max(0, Math.min(sw - 1, Math.round((x0 / vw) * sw)));
-    var top = Math.max(0, Math.min(sh - 1, Math.round((y0 / vh) * sh)));
-    var right = Math.max(left + 1, Math.min(sw, Math.round((x1 / vw) * sw)));
-    var bottom = Math.max(top + 1, Math.min(sh, Math.round((y1 / vh) * sh)));
-    return { x: left, y: top, width: right - left, height: bottom - top };
+    return OverlayGeometry.mapOverlayRectToSource(rect, viewport, source);
+  }
+
+  function createAnnotationDraft(tool, point, color, width, numberSequence) {
+    var p = point || { x: 0, y: 0 };
+    var style = { color: color, width: width };
+    if (tool === 'text' || tool === 'watermark') return null;
+    if (tool === 'number') {
+      return {
+        type: 'number', x: p.x, y: p.y, n: numberSequence,
+        color: color, size: Math.max(14, width * 4),
+      };
+    }
+    if (tool === 'pen' || tool === 'mosaic' || tool === 'highlight' || tool === 'blur' || tool === 'polyline') {
+      return { type: tool, points: [{ x: p.x, y: p.y }], color: style.color, width: style.width };
+    }
+    var draft = {
+      type: tool, x1: p.x, y1: p.y, x2: p.x, y2: p.y,
+      color: style.color, width: style.width,
+    };
+    if (tool === 'spotlight') draft.opacity = 0.58;
+    if (tool === 'magnifier') draft.zoom = 2;
+    return draft;
+  }
+
+  function normalizeMagnifierZoom(value) {
+    var zoom = Number(value);
+    if (!Number.isFinite(zoom)) zoom = 2;
+    return Math.min(8, Math.max(1.25, zoom));
+  }
+
+  // 放大镜的镜片和取样区都使用 annoCanvas 坐标。取样区始终以镜片中心为锚点，
+  // 到边界时整体向内平移，而不是压缩取样宽高，避免边缘处倍率突变。
+  function getMagnifierSampleRect(shape, canvasWidth, canvasHeight) {
+    var width = Math.max(1, Number(canvasWidth) || 1);
+    var height = Math.max(1, Number(canvasHeight) || 1);
+    var left = Math.min(Number(shape && shape.x1) || 0, Number(shape && shape.x2) || 0);
+    var top = Math.min(Number(shape && shape.y1) || 0, Number(shape && shape.y2) || 0);
+    var lensWidth = Math.max(1, Math.abs((Number(shape && shape.x2) || 0) - (Number(shape && shape.x1) || 0)));
+    var lensHeight = Math.max(1, Math.abs((Number(shape && shape.y2) || 0) - (Number(shape && shape.y1) || 0)));
+    var zoom = normalizeMagnifierZoom(shape && shape.zoom);
+    var sampleWidth = Math.min(width, lensWidth / zoom);
+    var sampleHeight = Math.min(height, lensHeight / zoom);
+    var centerX = left + lensWidth / 2;
+    var centerY = top + lensHeight / 2;
+    return {
+      x: Math.min(Math.max(0, centerX - sampleWidth / 2), width - sampleWidth),
+      y: Math.min(Math.max(0, centerY - sampleHeight / 2), height - sampleHeight),
+      width: sampleWidth,
+      height: sampleHeight,
+      zoom: zoom,
+    };
+  }
+
+  function createOverlayTextAnnotation(tool, point, text, color, size) {
+    var shape = {
+      type: tool === 'watermark' ? 'watermark' : 'text',
+      x: point.x,
+      y: point.y,
+      text: text,
+      color: color,
+      size: size,
+    };
+    if (shape.type === 'watermark') {
+      shape.opacity = 0.35;
+      shape.angle = -20;
+    }
+    return shape;
+  }
+
+  function partitionAnnotationShapes(shapes) {
+    var groups = { backgroundEffects: [], spotlights: [], foreground: [] };
+    (Array.isArray(shapes) ? shapes : []).forEach(function (shape) {
+      if (!shape) return;
+      if (shape.type === 'mosaic' || shape.type === 'blur') groups.backgroundEffects.push(shape);
+      else if (shape.type === 'spotlight') groups.spotlights.push(shape);
+      else groups.foreground.push(shape);
+    });
+    return groups;
+  }
+
+  function buildOverlayOCRRequest(dataURL) {
+    return { dataURL: dataURL };
   }
 
   function buildOverlayResultGeometry(rect, viewport, source, displayBounds) {
@@ -191,6 +265,17 @@
     };
   }
 
+  function createBarcodeScanPlan(rect, viewport, source, maxEdge, maxPixels) {
+    var sourceRect = mapOverlayRectToSource(rect, viewport, source);
+    if (!sourceRect) return { sourceRect: null, attempts: [] };
+    var bounded = calculateBarcodeScanSize(sourceRect.width, sourceRect.height, maxEdge, maxPixels);
+    var attempts = [{ kind: 'bounded', width: bounded.width, height: bounded.height }];
+    if (bounded.width !== sourceRect.width || bounded.height !== sourceRect.height) {
+      attempts.push({ kind: 'original', width: sourceRect.width, height: sourceRect.height });
+    }
+    return { sourceRect: sourceRect, attempts: attempts };
+  }
+
   function normalizeBarcodeResults(results, limit) {
     var max = Math.max(1, Math.min(MAX_BARCODE_RESULTS, Math.floor(Number(limit) || MAX_BARCODE_RESULTS)));
     var seen = Object.create(null);
@@ -227,6 +312,33 @@
       .map(function (item) {
         return { value: item.value, format: item.format, x: item.x, y: item.y };
       });
+  }
+
+  async function runBarcodeScanAttempts(attempts, scan) {
+    var list = Array.isArray(attempts) ? attempts : [];
+    var last = { engine: null, results: [], attempt: null, error: null };
+    for (var index = 0; index < list.length; index += 1) {
+      var attempt = list[index];
+      try {
+        var outcome = await scan(attempt, index);
+        last = {
+          engine: outcome && outcome.engine ? outcome.engine : null,
+          results: normalizeBarcodeResults(outcome && outcome.results, MAX_BARCODE_RESULTS),
+          attempt: attempt && attempt.kind ? attempt.kind : null,
+          error: null,
+        };
+        if (last.results.length) return last;
+      } catch (error) {
+        last = {
+          engine: null,
+          results: [],
+          attempt: attempt && attempt.kind ? attempt.kind : null,
+          error: error,
+        };
+        if (error && error.cancelled) return last;
+      }
+    }
+    return last;
   }
 
   function formatBarcodeResultsForCopy(results) {
@@ -310,6 +422,9 @@
     state.qrResults = [];
     state.qrData = null;
     state.qrOpenURL = null;
+    state.qrStatus = 'scanning';
+    state.qrEngine = null;
+    state.qrAttempt = null;
     return state.qrRequestId;
   }
 
@@ -317,6 +432,7 @@
     if (!state || state.qrRequestId !== requestId) return false;
     state.qrResults = normalizeBarcodeResults(results, MAX_BARCODE_RESULTS);
     state.qrData = state.qrResults.length ? state.qrResults[0].value : null;
+    state.qrStatus = state.qrResults.length ? 'success' : 'empty';
     return true;
   }
 
@@ -592,6 +708,12 @@
       resolveInitialOverlayRect,
       mapOverlayRectToSource,
       buildOverlayResultGeometry,
+      createAnnotationDraft,
+      createOverlayTextAnnotation,
+      getMagnifierSampleRect,
+      normalizeMagnifierZoom,
+      partitionAnnotationShapes,
+      buildOverlayOCRRequest,
       prepareInlineTranslation,
       openStructuredRecognition,
       clearInlineTranslationState,
@@ -603,6 +725,8 @@
       beginBarcodeScan,
       commitBarcodeScan,
       calculateBarcodeScanSize,
+      createBarcodeScanPlan,
+      runBarcodeScanAttempts,
       detectBarcodeResults,
       formatBarcodeResultsForCopy,
       normalizeBarcodeResults,
@@ -637,7 +761,13 @@
     qrResults: [],
     qrRequestId: 0,
     qrOpenURL: null,
-    ratioLock: 0, // 锁定宽高比(>0)；0=不锁
+    qrStatus: 'idle',
+    qrEngine: null,
+    qrAttempt: null,
+    ratioLock: null, // null=自由；对象={width,height} 表示源像素固定比例
+    ratioValue: 'free',
+    sourcePixelW: 0,
+    sourcePixelH: 0,
     rounded: false, // 圆角截图
     axMode: false, // 智能 UI 元素识别
     axFrame: null, // 当前高亮元素(显示器CSS坐标)
@@ -655,9 +785,10 @@
     dragStart: null, // {mx,my, rect}
 
     // 标注
-    tool: null, // null | rect|ellipse|arrow|pen|text|mosaic|number
+    tool: null, // null | rect|ellipse|arrow|pen|text|mosaic|number|magnifier|...
     color: '#ef4444',
     width: 4,
+    magnifierZoom: 2,
     shapes: [], // 已确认的标注
     history: [], // 撤销栈：整状态快照 {shapes, numberSeq}
     redoStack: [], // 重做栈：整状态快照
@@ -699,9 +830,11 @@
   var magColor = document.getElementById('magColor');
   var qrPanel = document.getElementById('qrPanel');
   var qrText = document.getElementById('qrText');
+  var qrStatus = document.getElementById('qrStatus');
   var btnQR = document.getElementById('btnQR');
   var btnQrCopy = document.getElementById('btnQrCopy');
   var btnQrOpen = document.getElementById('btnQrOpen');
+  var btnQrRetry = document.getElementById('btnQrRetry');
   var btnQrClose = document.getElementById('btnQrClose');
   var ocrPanel = document.getElementById('ocrPanel');
   var ocrTextArea = document.getElementById('ocrTextArea');
@@ -710,6 +843,10 @@
   var btnOcrPolish = document.getElementById('btnOcrPolish');
   var btnOcrClose = document.getElementById('btnOcrClose');
   var btnRatioLock = document.getElementById('btnRatioLock');
+  var selectionWidth = document.getElementById('selectionWidth');
+  var selectionHeight = document.getElementById('selectionHeight');
+  var selectionSizePreset = document.getElementById('selectionSizePreset');
+  var selectionRatio = document.getElementById('selectionRatio');
   var btnRounded = document.getElementById('btnRounded');
   var btnAx = document.getElementById('btnAx');
   var btnFrame = document.getElementById('btnFrame');
@@ -719,6 +856,8 @@
   var btnUndo = document.getElementById('btnUndo');
   var btnRedo = document.getElementById('btnRedo');
   var btnDelete = document.getElementById('btnDelete');
+  var magnifierZoomGroup = document.getElementById('magnifierZoomGroup');
+  var magnifierZoom = document.getElementById('magnifierZoom');
   var btnToolMore = document.getElementById('btnToolMore');
   var annotationMenu = document.getElementById('annotationMenu');
   var btnActionMore = document.getElementById('btnActionMore');
@@ -734,9 +873,65 @@
   function dpr() {
     return S.scaleFactor || 1;
   }
-  // CSS 坐标 → 背景物理像素坐标
-  function toPhys(v) {
-    return Math.round(v * dpr());
+
+  function currentViewportSize() {
+    return { width: S.displayCssW, height: S.displayCssH };
+  }
+  function currentSourceSize() {
+    if (S.bgReady && bgCanvas.width > 0 && bgCanvas.height > 0) {
+      return { width: bgCanvas.width, height: bgCanvas.height };
+    }
+    return {
+      width: Math.max(1, S.sourcePixelW || Math.round(S.displayCssW * dpr())),
+      height: Math.max(1, S.sourcePixelH || Math.round(S.displayCssH * dpr())),
+    };
+  }
+  function currentSourceRect() {
+    if (!S.rect) return null;
+    return mapOverlayRectToSource(S.rect, currentViewportSize(), currentSourceSize());
+  }
+
+  function setControlValue(control, value, force) {
+    if (!control || (!force && document.activeElement === control)) return;
+    control.value = String(value);
+  }
+
+  function syncSelectionGeometryControls(force) {
+    var mapped = currentSourceRect();
+    if (!mapped) return;
+    setControlValue(selectionWidth, mapped.width, force);
+    setControlValue(selectionHeight, mapped.height, force);
+    if (selectionRatio && (force || document.activeElement !== selectionRatio)) selectionRatio.value = S.ratioValue || 'free';
+    if (selectionSizePreset && (force || document.activeElement !== selectionSizePreset)) {
+      var value = mapped.width + 'x' + mapped.height;
+      var option = selectionSizePreset.querySelector('option[value="' + value + '"]');
+      selectionSizePreset.value = option ? value : 'custom';
+    }
+  }
+
+  function applySelectionSourceSize(primary, requestedWidth, requestedHeight) {
+    if (!S.rect) return;
+    var mapped = currentSourceRect();
+    if (!mapped) return;
+    var width = Math.round(Number(requestedWidth));
+    var height = Math.round(Number(requestedHeight));
+    if (!(width > 0)) width = mapped.width;
+    if (!(height > 0)) height = mapped.height;
+    if (typeof clearInlineTranslate === 'function') clearInlineTranslate();
+    var oldX = S.rect.x;
+    var oldY = S.rect.y;
+    S.rect = OverlayGeometry.setOverlayRectSourceSize(
+      S.rect,
+      { width: width, height: height, primary: primary },
+      currentViewportSize(),
+      currentSourceSize(),
+      S.ratioLock
+    );
+    shiftShapes(oldX - S.rect.x, oldY - S.rect.y);
+    updateSelectionView();
+    syncSelectionGeometryControls(true);
+    positionToolbar();
+    scanQr();
   }
 
   // ---------- 内置快捷键（设置页可自定义；字母统一小写比较）----------
@@ -763,12 +958,17 @@
       .catch(function () {});
     if (!payload) return;
     beginBarcodeScan(S);
-    btnQR.hidden = true;
     hideQrPanel();
     S.payload = payload;
     S.scaleFactor = payload.scaleFactor || 1;
     S.displayCssW = payload.width || window.innerWidth;
     S.displayCssH = payload.height || window.innerHeight;
+    S.sourcePixelW = Math.max(1, Math.round(
+      Number(payload.pixelWidth) || S.displayCssW * (Number(payload.scaleFactorX) || S.scaleFactor)
+    ));
+    S.sourcePixelH = Math.max(1, Math.round(
+      Number(payload.pixelHeight) || S.displayCssH * (Number(payload.scaleFactorY) || S.scaleFactor)
+    ));
     S.displayBounds = payload.displayBounds || payload.bounds || { x: 0, y: 0, width: S.displayCssW, height: S.displayCssH };
     S.displayId = payload.displayId;
     S.mode = payload.mode || 'region';
@@ -782,12 +982,15 @@
       S.bgImage = img;
       bgCanvas.width = img.naturalWidth;
       bgCanvas.height = img.naturalHeight;
+      S.sourcePixelW = img.naturalWidth;
+      S.sourcePixelH = img.naturalHeight;
       // CSS 尺寸已由样式 100vw/100vh 控制
       bgCtx.drawImage(img, 0, 0);
       S.bgReady = true;
       // 用户可能在大图完成解码前已经框选；底图就绪后补扫一次。
       if (S.rect) {
         hint.hidden = true;
+        updateSelectionView();
         scanQr();
         showToolbar();
       }
@@ -860,11 +1063,14 @@
     }
     redrawAnno();
 
-    // 尺寸标签（显示物理像素尺寸，更符合用户对清晰度的预期）
+    // 尺寸标签与最终导出共用源图边缘映射；不能用单一 DPR 推算，
+    // 因为图片编辑窗口的 X/Y 比例可能不同，窗口 CSS 尺寸也可能经过整数取整。
     sizeLabel.hidden = false;
-    var pw = Math.round(r.width * dpr());
-    var ph = Math.round(r.height * dpr());
+    var sourceSize = OverlayGeometry.getOverlayRectSourceSize(r, currentViewportSize(), currentSourceSize());
+    var pw = sourceSize.width;
+    var ph = sourceSize.height;
     sizeLabel.textContent = pw + ' × ' + ph;
+    syncSelectionGeometryControls();
     var ly = r.y - 24;
     if (ly < 2) ly = r.y + 4;
     sizeLabel.style.left = r.x + 'px';
@@ -975,9 +1181,9 @@
     if (typeof updateEditButtons === 'function') updateEditButtons();
     selectionEl.classList.remove('annotating');
     toolbar.hidden = true;
+    updateMagnifierZoomControl();
     hint.hidden = true;
     beginBarcodeScan(S);
-    btnQR.hidden = true;
     hideQrPanel();
     hideOcrPanel();
     hideAx();
@@ -1024,25 +1230,13 @@
     S.lastMouse = { x: e.clientX, y: e.clientY };
 
     if (S.selecting) {
-      var sx = S.startPt.x, sy = S.startPt.y;
-      var x = Math.min(sx, e.clientX);
-      var y = Math.min(sy, e.clientY);
-      var w = Math.abs(e.clientX - sx);
-      var h = Math.abs(e.clientY - sy);
-      if (e.shiftKey) {
-        // Shift 固定 1:1：以较大边为准，并沿拖拽方向收缩
-        var side = Math.max(w, h);
-        w = side;
-        h = side;
-        if (e.clientX < sx) x = sx - side;
-        if (e.clientY < sy) y = sy - side;
-      }
-      // 限制在显示器范围内
-      x = clamp(x, 0, S.displayCssW);
-      y = clamp(y, 0, S.displayCssH);
-      w = clamp(w, 0, S.displayCssW - x);
-      h = clamp(h, 0, S.displayCssH - y);
-      S.rect = { x: x, y: y, width: w, height: h };
+      S.rect = OverlayGeometry.createOverlayRectFromDrag(
+        S.startPt,
+        { x: e.clientX, y: e.clientY },
+        currentViewportSize(),
+        currentSourceSize(),
+        e.shiftKey ? { width: 1, height: 1 } : S.ratioLock
+      );
       updateSelectionView();
       showMagnifier(e);
       return;
@@ -1051,10 +1245,12 @@
     if (S.dragMode === 'move') {
       var dx = e.clientX - S.dragStart.mx;
       var dy = e.clientY - S.dragStart.my;
-      var nr = S.dragStart.rect;
-      var nx = clamp(nr.x + dx, 0, S.displayCssW - nr.width);
-      var ny = clamp(nr.y + dy, 0, S.displayCssH - nr.height);
-      S.rect = { x: nx, y: ny, width: nr.width, height: nr.height };
+      S.rect = OverlayGeometry.moveOverlayRect(
+        S.dragStart.rect,
+        { x: dx, y: dy },
+        currentViewportSize(),
+        currentSourceSize()
+      );
       updateSelectionView();
       return;
     }
@@ -1103,47 +1299,14 @@
   });
 
   function applyResize(e) {
-    var or = S.dragStart.rect;
-    var pos = S.resizeHandle;
-    var left = or.x;
-    var top = or.y;
-    var right = or.x + or.width;
-    var bottom = or.y + or.height;
-    var mx = clamp(e.clientX, 0, S.displayCssW);
-    var my = clamp(e.clientY, 0, S.displayCssH);
-
-    if (pos.indexOf('w') !== -1) left = mx;
-    if (pos.indexOf('e') !== -1) right = mx;
-    if (pos.indexOf('n') !== -1) top = my;
-    if (pos.indexOf('s') !== -1) bottom = my;
-
-    // 处理翻转：保证 left<right, top<bottom
-    var nx = Math.min(left, right);
-    var ny = Math.min(top, bottom);
-    var nw = Math.abs(right - left);
-    var nh = Math.abs(bottom - top);
-    if (S.ratioLock > 0) {
-      // 锁定比例：仅左右边 → 高度跟随；仅上下边 → 宽度跟随；角点 → 取更大者
-      var ratio = S.ratioLock;
-      var hEdge = pos.indexOf('n') !== -1 || pos.indexOf('s') !== -1;
-      var wEdge = pos.indexOf('w') !== -1 || pos.indexOf('e') !== -1;
-      if (wEdge && !hEdge) {
-        nh = nw / ratio;
-      } else if (hEdge && !wEdge) {
-        nw = nh * ratio;
-      } else {
-        nw = Math.max(nw, nh * ratio);
-        nh = nw / ratio;
-      }
-      if (pos.indexOf('n') !== -1) top = bottom - nh;
-      else bottom = top + nh;
-      if (pos.indexOf('w') !== -1) left = right - nw;
-      else right = left + nw;
-      // 比例调整可能改变了左/上边，重算原点
-      nx = Math.min(left, right);
-      ny = Math.min(top, bottom);
-    }
-    S.rect = { x: nx, y: ny, width: nw, height: nh };
+    S.rect = OverlayGeometry.resizeOverlayRect(
+      S.dragStart.rect,
+      S.resizeHandle,
+      { x: e.clientX, y: e.clientY },
+      currentViewportSize(),
+      currentSourceSize(),
+      S.ratioLock
+    );
   }
 
   // ================= 全局 mouseup =================
@@ -1299,6 +1462,7 @@
     if (!ensureOverlayActionReady(S.defaultAction || 'copy')) return;
     closeToolbarMenus();
     toolbar.hidden = false;
+    updateMagnifierZoomControl();
     positionToolbar();
     applyDefaultAction();
     updateUndoRedo();
@@ -1448,6 +1612,7 @@
     selectionEl.classList.toggle('annotating', !!S.tool);
     // 选择工具用默认箭头光标（覆盖 annotating 的十字光标）；其它工具回退到样式表
     annoCanvas.style.cursor = S.tool === 'select' ? 'default' : '';
+    updateMagnifierZoomControl();
     redrawAnno();
   }
 
@@ -1480,6 +1645,32 @@
     }
   }
 
+  function updateMagnifierZoomControl() {
+    if (!magnifierZoomGroup || !magnifierZoom) return;
+    var selectedMagnifier = S.tool === 'select' && S.selected && S.selected.type === 'magnifier'
+      ? S.selected
+      : null;
+    var visible = S.tool === 'magnifier' || !!selectedMagnifier;
+    magnifierZoomGroup.hidden = !visible;
+    var value = selectedMagnifier ? normalizeMagnifierZoom(selectedMagnifier.zoom) : S.magnifierZoom;
+    magnifierZoom.value = String(value);
+    if (S.rect && !toolbar.hidden) positionToolbar();
+  }
+
+  if (magnifierZoom) {
+    magnifierZoom.addEventListener('change', function () {
+      var zoom = normalizeMagnifierZoom(magnifierZoom.value);
+      S.magnifierZoom = zoom;
+      magnifierZoom.value = String(zoom);
+      if (S.tool === 'select' && S.selected && S.selected.type === 'magnifier' && S.selected.zoom !== zoom) {
+        pushHistory();
+        S.selected.zoom = zoom;
+        redrawAnno();
+        updateUndoRedo();
+      }
+    });
+  }
+
   // 初始化默认色/粗细高亮
   setColor('#ef4444');
   setWidth(4);
@@ -1505,27 +1696,20 @@
   function startAnnotate(e) {
     e.preventDefault();
     var p = evtToAnno(e);
-    if (S.tool === 'text') {
+    if (S.tool === 'text' || S.tool === 'watermark') {
       openTextEditor(e);
       return;
     }
     if (S.tool === 'number') {
       // 序号笔：单击即放置一个递增数字圆圈（计数由 pushShape 统一推进）
-      pushShape({
-        type: 'number',
-        x: p.x,
-        y: p.y,
-        n: S.numberSeq,
-        color: S.color,
-        size: Math.max(14, S.width * 4),
-      });
+      pushShape(createAnnotationDraft(S.tool, p, S.color, S.width, S.numberSeq));
       return;
     }
     if (S.tool === 'polyline') {
       // 折线：单击加点（双击/Enter 完成，Esc 取消），不进入拖拽绘制流
       if (!S.cur) {
         S.drawing = true;
-        S.cur = { type: 'polyline', points: [{ x: p.x, y: p.y }], color: S.color, width: S.width };
+        S.cur = createAnnotationDraft(S.tool, p, S.color, S.width, S.numberSeq);
       } else if (S.cur.type === 'polyline') {
         S.cur.points.push({ x: p.x, y: p.y });
       }
@@ -1533,12 +1717,8 @@
       return;
     }
     S.drawing = true;
-    if (S.tool === 'pen' || S.tool === 'mosaic' || S.tool === 'highlight') {
-      S.cur = { type: S.tool, points: [{ x: p.x, y: p.y }], color: S.color, width: S.width };
-    } else {
-      // rect / ellipse / arrow
-      S.cur = { type: S.tool, x1: p.x, y1: p.y, x2: p.x, y2: p.y, color: S.color, width: S.width };
-    }
+    S.cur = createAnnotationDraft(S.tool, p, S.color, S.width, S.numberSeq);
+    if (S.cur && S.cur.type === 'magnifier') S.cur.zoom = normalizeMagnifierZoom(S.magnifierZoom);
     redrawAnno();
   }
 
@@ -1554,7 +1734,7 @@
     var p = evtToAnno(e);
     p.x = clamp(p.x, 0, annoCanvas.width);
     p.y = clamp(p.y, 0, annoCanvas.height);
-    if (S.cur.type === 'pen' || S.cur.type === 'mosaic' || S.cur.type === 'highlight') {
+    if (S.cur.type === 'pen' || S.cur.type === 'mosaic' || S.cur.type === 'highlight' || S.cur.type === 'blur') {
       S.cur.points.push({ x: p.x, y: p.y });
     } else {
       S.cur.x2 = p.x;
@@ -1570,7 +1750,7 @@
     var c = S.cur;
     S.cur = null;
     // 丢弃过小的图形
-    if (c.type === 'pen' || c.type === 'mosaic' || c.type === 'highlight') {
+    if (c.type === 'pen' || c.type === 'mosaic' || c.type === 'highlight' || c.type === 'blur') {
       if (c.points.length < 2) {
         redrawAnno();
         return;
@@ -1596,9 +1776,9 @@
   function shiftShapeList(shapes, dx, dy) {
     for (var i = 0; i < shapes.length; i++) {
       var s = shapes[i];
-      if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'arrow' || s.type === 'line') {
+      if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'arrow' || s.type === 'line' || s.type === 'spotlight' || s.type === 'magnifier') {
         s.x1 += dx; s.y1 += dy; s.x2 += dx; s.y2 += dy;
-      } else if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight' || s.type === 'polyline') {
+      } else if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight' || s.type === 'blur' || s.type === 'polyline') {
         for (var j = 0; j < s.points.length; j++) { s.points[j].x += dx; s.points[j].y += dy; }
       } else { // text / number
         s.x += dx; s.y += dy;
@@ -1640,6 +1820,7 @@
     S.shapes = JSON.parse(JSON.stringify(s.shapes));
     S.numberSeq = s.numberSeq;
     S.selected = null;
+    updateMagnifierZoomControl();
   }
   function pushHistory() {
     S.history.push(currentSnapshot());
@@ -1649,10 +1830,10 @@
 
   // ---- 包围盒 ----
   function getBBox(s) {
-    if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'arrow' || s.type === 'line') {
+    if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'arrow' || s.type === 'line' || s.type === 'spotlight' || s.type === 'magnifier') {
       return { x: Math.min(s.x1, s.x2), y: Math.min(s.y1, s.y2), w: Math.abs(s.x2 - s.x1), h: Math.abs(s.y2 - s.y1) };
     }
-    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight' || s.type === 'polyline') {
+    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight' || s.type === 'blur' || s.type === 'polyline') {
       var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (var i = 0; i < s.points.length; i++) {
         var p = s.points[i];
@@ -1663,7 +1844,7 @@
       }
       return { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) };
     }
-    if (s.type === 'text') {
+    if (s.type === 'text' || s.type === 'watermark') {
       annoCtx.save();
       annoCtx.font = s.size + 'px ' + '-apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif';
       var lines = String(s.text).split('\n');
@@ -1714,14 +1895,16 @@
   // ---- 变换（基于原始快照计算，避免累积误差）----
   function translateShape(src, dx, dy) {
     var s = JSON.parse(JSON.stringify(src));
-    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight' || s.type === 'polyline') {
+    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight' || s.type === 'blur' || s.type === 'polyline') {
       for (var i = 0; i < s.points.length; i++) {
         s.points[i].x += dx;
         s.points[i].y += dy;
       }
-    } else if (s.type === 'text' || s.type === 'number') {
+    } else if (s.type === 'text' || s.type === 'watermark' || s.type === 'number') {
       s.x += dx;
       s.y += dy;
+    } else if (s.type === 'magnifier') {
+      s.x1 += dx; s.y1 += dy; s.x2 += dx; s.y2 += dy;
     } else {
       s.x1 += dx; s.y1 += dy; s.x2 += dx; s.y2 += dy;
     }
@@ -1735,12 +1918,12 @@
     var s = JSON.parse(JSON.stringify(src));
     function rx(x) { return remap(x, ob.x, ob.w, nb.x, nb.w); }
     function ry(y) { return remap(y, ob.y, ob.h, nb.y, nb.h); }
-    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight' || s.type === 'polyline') {
+    if (s.type === 'pen' || s.type === 'mosaic' || s.type === 'highlight' || s.type === 'blur' || s.type === 'polyline') {
       for (var i = 0; i < s.points.length; i++) {
         s.points[i].x = rx(s.points[i].x);
         s.points[i].y = ry(s.points[i].y);
       }
-    } else if (s.type === 'text') {
+    } else if (s.type === 'text' || s.type === 'watermark') {
       s.x = rx(s.x);
       s.y = ry(s.y);
       s.size = Math.max(8, s.size * (ob.h > 0 ? nb.h / ob.h : 1));
@@ -1749,6 +1932,8 @@
       s.x = rx(s.x);
       s.y = ry(s.y);
       s.size = Math.max(10, s.size * sc);
+    } else if (s.type === 'magnifier') {
+      s.x1 = rx(s.x1); s.x2 = rx(s.x2); s.y1 = ry(s.y1); s.y2 = ry(s.y2);
     } else {
       s.x1 = rx(s.x1); s.x2 = rx(s.x2); s.y1 = ry(s.y1); s.y2 = ry(s.y2);
     }
@@ -1758,8 +1943,12 @@
   // ---- 选择交互 ----
   function setSelected(shape) {
     S.selected = shape || null;
-    if (shape) syncStyleButtons();
+    if (shape) {
+      syncStyleButtons();
+      if (shape.type === 'magnifier') S.magnifierZoom = normalizeMagnifierZoom(shape.zoom);
+    }
     updateEditButtons();
+    updateMagnifierZoomControl();
     redrawAnno();
   }
   function syncStyleButtons() {
@@ -1848,6 +2037,7 @@
     if (idx !== -1) S.shapes.splice(idx, 1);
     S.selected = null;
     updateEditButtons();
+    updateMagnifierZoomControl();
     redrawAnno();
     updateUndoRedo();
   }
@@ -1873,6 +2063,7 @@
     commitText();
     var p = evtToAnno(e);
     S._textPos = { x: p.x, y: p.y };
+    S._textType = S.tool === 'watermark' ? 'watermark' : 'text';
     textInput.hidden = false;
     textInput.value = '';
     textInput.style.left = e.clientX + 'px';
@@ -1893,6 +2084,7 @@
     S.editingTextShape = shape;
     shape._editing = true; // 渲染时跳过，避免与输入框重影
     S._textPos = { x: shape.x, y: shape.y };
+    S._textType = shape.type === 'watermark' ? 'watermark' : 'text';
     S._textFontSize = shape.size;
     textInput.hidden = false;
     textInput.value = shape.text;
@@ -1920,7 +2112,7 @@
     }
     if (S.tool !== 'select') return;
     var hit = hitTestShapes(evtToAnno(e));
-    if (hit && hit.type === 'text') {
+    if (hit && (hit.type === 'text' || hit.type === 'watermark')) {
       setSelected(hit);
       openTextEditorForShape(hit, e);
     }
@@ -1984,27 +2176,89 @@
 
     // 新建文字
     if (val && val.trim() !== '' && pos) {
-      pushShape({
-        type: 'text',
-        x: pos.x,
-        y: pos.y,
-        text: val,
-        color: S.color,
-        size: S._textFontSize || 18,
-      });
+      pushShape(createOverlayTextAnnotation(
+        S._textType,
+        pos,
+        val,
+        S.color,
+        S._textFontSize || 18
+      ));
     }
   }
 
   // ================= 重绘标注画布 =================
+  function createSelectionBaseCanvas(width, height) {
+    var sourceRect = currentSourceRect();
+    if (!sourceRect || !bgCanvas.width || !bgCanvas.height) return null;
+    var base = document.createElement('canvas');
+    base.width = Math.max(1, Math.round(width));
+    base.height = Math.max(1, Math.round(height));
+    var baseCtx = base.getContext('2d');
+    if (!baseCtx) return null;
+    try {
+      baseCtx.drawImage(
+        bgCanvas,
+        sourceRect.x,
+        sourceRect.y,
+        sourceRect.width,
+        sourceRect.height,
+        0,
+        0,
+        base.width,
+        base.height
+      );
+    } catch (_) {
+      return null;
+    }
+    return base;
+  }
+
+  // 预览和导出都走这个分层渲染器，保证背景特效、聚光灯和前景标注的顺序一致。
+  function renderAnnotationLayers(ctx, shapes, baseCanvas, canvasWidth, canvasHeight) {
+    var visible = (Array.isArray(shapes) ? shapes : []).filter(function (shape) {
+      return shape && !shape._editing;
+    });
+    var groups = partitionAnnotationShapes(visible);
+    var hasMagnifier = groups.foreground.some(function (shape) { return shape.type === 'magnifier'; });
+    // 放大镜不得绕过马赛克/模糊再次暴露原图：它取样的底图先合成背景特效。
+    var magnifierBase = hasMagnifier
+      ? createMagnifierSourceCanvas(baseCanvas, groups.backgroundEffects)
+      : baseCanvas;
+    for (var i = 0; i < groups.backgroundEffects.length; i++) {
+      drawShape(ctx, groups.backgroundEffects[i], 1, baseCanvas);
+    }
+    drawSpotlightLayer(ctx, groups.spotlights, canvasWidth, canvasHeight, 1);
+    for (var j = 0; j < groups.foreground.length; j++) {
+      drawShape(
+        ctx,
+        groups.foreground[j],
+        1,
+        groups.foreground[j].type === 'magnifier' ? magnifierBase : baseCanvas
+      );
+    }
+  }
+
+  function createMagnifierSourceCanvas(baseCanvas, backgroundEffects) {
+    if (!baseCanvas) return null;
+    var source = document.createElement('canvas');
+    source.width = baseCanvas.width;
+    source.height = baseCanvas.height;
+    var sourceCtx = source.getContext('2d');
+    if (!sourceCtx) return baseCanvas;
+    sourceCtx.drawImage(baseCanvas, 0, 0);
+    for (var index = 0; index < backgroundEffects.length; index++) {
+      drawShape(sourceCtx, backgroundEffects[index], 1, baseCanvas);
+    }
+    return source;
+  }
+
   function redrawAnno() {
     if (!annoCanvas.width || !annoCanvas.height) return;
     annoCtx.clearRect(0, 0, annoCanvas.width, annoCanvas.height);
     var all = S.shapes.slice();
     if (S.cur) all.push(S.cur);
-    for (var i = 0; i < all.length; i++) {
-      if (all[i]._editing) continue; // 正在再编辑的文字暂不绘制（由输入框接管）
-      drawShape(annoCtx, all[i], 1);
-    }
+    var baseCanvas = createSelectionBaseCanvas(annoCanvas.width, annoCanvas.height);
+    renderAnnotationLayers(annoCtx, all, baseCanvas, annoCanvas.width, annoCanvas.height);
     drawSelectionChrome();
   }
 
@@ -2033,8 +2287,8 @@
     ctx.restore();
   }
 
-  // scale：1 表示画在 annoCanvas（CSS 坐标）；合成时传 scaleFactor 放大
-  function drawShape(ctx, s, scale) {
+  // 标注保持 CSS 坐标；预览与导出由外层 transform 统一映射，避免效果层走不同缩放路径。
+  function drawShape(ctx, s, scale, baseCanvas) {
     ctx.save();
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -2058,6 +2312,8 @@
       ctx.beginPath();
       ctx.ellipse(cx, cy, Math.max(1, rx), Math.max(1, ry), 0, 0, Math.PI * 2);
       ctx.stroke();
+    } else if (s.type === 'magnifier') {
+      drawMagnifier(ctx, s, scale, baseCanvas);
     } else if (s.type === 'arrow') {
       drawArrow(ctx, s.x1 * scale, s.y1 * scale, s.x2 * scale, s.y2 * scale, lw, s.color);
     } else if (s.type === 'line') {
@@ -2107,14 +2363,25 @@
       }
       ctx.stroke();
     } else if (s.type === 'mosaic') {
-      drawMosaic(ctx, s, scale);
-    } else if (s.type === 'text') {
+      drawMosaic(ctx, s, scale, baseCanvas);
+    } else if (s.type === 'blur') {
+      drawBlur(ctx, s, scale, baseCanvas);
+    } else if (s.type === 'text' || s.type === 'watermark') {
       var fs = s.size * scale;
       ctx.font = fs + 'px ' + '-apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif';
       ctx.textBaseline = 'top';
       var lines = String(s.text).split('\n');
+      if (s.type === 'watermark') {
+        ctx.globalAlpha = Number.isFinite(s.opacity) ? s.opacity : 0.35;
+        ctx.translate(s.x * scale, s.y * scale);
+        ctx.rotate(((Number(s.angle) || -20) * Math.PI) / 180);
+      }
       for (var li = 0; li < lines.length; li++) {
-        ctx.fillText(lines[li], s.x * scale, s.y * scale + li * fs * 1.25);
+        ctx.fillText(
+          lines[li],
+          s.type === 'watermark' ? 0 : s.x * scale,
+          s.type === 'watermark' ? li * fs * 1.25 : s.y * scale + li * fs * 1.25
+        );
       }
     } else if (s.type === 'number') {
       var rad = (s.size / 2) * scale;
@@ -2131,6 +2398,43 @@
       ctx.fillText(String(s.n), ncx, ncy + 1 * scale);
       ctx.textAlign = 'start';
     }
+    ctx.restore();
+  }
+
+  function drawMagnifier(ctx, s, scale, baseCanvas) {
+    if (!baseCanvas) return;
+    var left = Math.min(s.x1, s.x2);
+    var top = Math.min(s.y1, s.y2);
+    var width = Math.abs(s.x2 - s.x1);
+    var height = Math.abs(s.y2 - s.y1);
+    if (width < 1 || height < 1) return;
+    var sample = getMagnifierSampleRect(s, baseCanvas.width, baseCanvas.height);
+    var dx = left * scale;
+    var dy = top * scale;
+    var dw = width * scale;
+    var dh = height * scale;
+    var cx = dx + dw / 2;
+    var cy = dy + dh / 2;
+    var rx = Math.max(1, dw / 2);
+    var ry = Math.max(1, dh / 2);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(baseCanvas, sample.x, sample.y, sample.width, sample.height, dx, dy, dw, dh);
+    ctx.restore();
+
+    // 外圈是镜片本身的持久标注样式；颜色/粗细与其他标注一样可调且会进入导出。
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.lineWidth = Math.max(1, (s.width || S.width) * scale);
+    ctx.strokeStyle = s.color || '#2563eb';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.32)';
+    ctx.shadowBlur = 5 * scale;
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -2162,53 +2466,94 @@
     ctx.fill();
   }
 
-  // 马赛克：沿笔迹涂抹，把底图对应区域像素化
-  function drawMosaic(ctx, s, scale) {
-    if (!S.bgImage || !S.rect) return;
-    var block = Math.max(6, (s.width || S.width) * 2) * scale; // 马赛克块大小
-    var radius = Math.max(block, (s.width || S.width) * 3) * scale; // 涂抹笔半径
-    var pts = s.points;
-    var phys = dpr();
-    // 背景在选区内对应的物理像素起点
-    var baseX = S.rect.x * phys;
-    var baseY = S.rect.y * phys;
-    ctx.save();
-    // 用裁剪路径限定在笔迹圆形区域内
+  function traceBrushMask(ctx, points, radius, scale) {
+    var pts = Array.isArray(points) ? points : [];
+    var rr = Math.max(1, radius * scale);
     ctx.beginPath();
-    for (var i = 0; i < pts.length; i++) {
-      ctx.moveTo(pts[i].x * scale + radius, pts[i].y * scale);
-      ctx.arc(pts[i].x * scale, pts[i].y * scale, radius, 0, Math.PI * 2);
-    }
-    ctx.clip();
-    // 在裁剪区域内逐块绘制马赛克：从背景采样块中心颜色，填充整块
-    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (var j = 0; j < pts.length; j++) {
-      minX = Math.min(minX, pts[j].x);
-      minY = Math.min(minY, pts[j].y);
-      maxX = Math.max(maxX, pts[j].x);
-      maxY = Math.max(maxY, pts[j].y);
-    }
-    minX = (minX * scale) - radius;
-    minY = (minY * scale) - radius;
-    maxX = (maxX * scale) + radius;
-    maxY = (maxY * scale) + radius;
-    minX = clamp(minX, 0, annoCanvas.width * scale);
-    minY = clamp(minY, 0, annoCanvas.height * scale);
-    for (var by = Math.floor(minY / block) * block; by < maxY; by += block) {
-      for (var bx = Math.floor(minX / block) * block; bx < maxX; bx += block) {
-        // 该块在背景物理像素中的源位置（块中心）
-        var srcX = baseX + (bx + block / 2) / scale * phys;
-        var srcY = baseY + (by + block / 2) / scale * phys;
-        srcX = clamp(srcX, 0, S.bgImage.naturalWidth - 1);
-        srcY = clamp(srcY, 0, S.bgImage.naturalHeight - 1);
-        // 直接把背景对应 1px 放大成整块，实现像素化
-        try {
-          ctx.drawImage(S.bgImage, srcX, srcY, 1, 1, bx, by, block, block);
-        } catch (err) {
-          /* 忽略越界采样 */
-        }
+    for (var index = 0; index < pts.length; index++) {
+      var from = index > 0 ? pts[index - 1] : pts[index];
+      var to = pts[index];
+      var dx = to.x - from.x;
+      var dy = to.y - from.y;
+      var distance = Math.sqrt(dx * dx + dy * dy);
+      var steps = Math.max(1, Math.ceil(distance / Math.max(1, radius * 0.55)));
+      for (var step = 0; step <= steps; step++) {
+        var t = step / steps;
+        var x = (from.x + dx * t) * scale;
+        var y = (from.y + dy * t) * scale;
+        ctx.moveTo(x + rr, y);
+        ctx.arc(x, y, rr, 0, Math.PI * 2);
       }
     }
+  }
+
+  function drawSpotlightLayer(ctx, spotlights, canvasWidth, canvasHeight, scale) {
+    if (!spotlights || !spotlights.length || !(canvasWidth > 0) || !(canvasHeight > 0)) return;
+    var dim = document.createElement('canvas');
+    dim.width = Math.max(1, Math.round(canvasWidth * scale));
+    dim.height = Math.max(1, Math.round(canvasHeight * scale));
+    var dimCtx = dim.getContext('2d');
+    if (!dimCtx) return;
+    var opacity = 0.58;
+    for (var oi = 0; oi < spotlights.length; oi++) {
+      opacity = Math.max(opacity, Number(spotlights[oi].opacity) || 0);
+    }
+    dimCtx.fillStyle = 'rgba(0, 0, 0, ' + Math.min(0.85, opacity) + ')';
+    dimCtx.fillRect(0, 0, dim.width, dim.height);
+    dimCtx.globalCompositeOperation = 'destination-out';
+    for (var index = 0; index < spotlights.length; index++) {
+      var spotlight = spotlights[index];
+      var cx = ((spotlight.x1 + spotlight.x2) / 2) * scale;
+      var cy = ((spotlight.y1 + spotlight.y2) / 2) * scale;
+      var rx = Math.max(1, Math.abs(spotlight.x2 - spotlight.x1) * scale / 2);
+      var ry = Math.max(1, Math.abs(spotlight.y2 - spotlight.y1) * scale / 2);
+      dimCtx.beginPath();
+      dimCtx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+      dimCtx.fill();
+    }
+    dimCtx.globalCompositeOperation = 'source-over';
+    ctx.drawImage(dim, 0, 0, canvasWidth * scale, canvasHeight * scale);
+  }
+
+  function drawBlur(ctx, s, scale, baseCanvas) {
+    if (!baseCanvas || !s.points || !s.points.length) return;
+    var blurred = document.createElement('canvas');
+    blurred.width = baseCanvas.width;
+    blurred.height = baseCanvas.height;
+    var blurredCtx = blurred.getContext('2d');
+    if (!blurredCtx) return;
+    var blurRadius = Math.max(3, (s.width || S.width) * 1.8);
+    blurredCtx.filter = 'blur(' + blurRadius + 'px)';
+    blurredCtx.drawImage(baseCanvas, 0, 0);
+    blurredCtx.filter = 'none';
+    ctx.save();
+    traceBrushMask(ctx, s.points, Math.max(8, (s.width || S.width) * 3.2), scale);
+    ctx.clip();
+    ctx.drawImage(blurred, 0, 0, baseCanvas.width * scale, baseCanvas.height * scale);
+    ctx.restore();
+  }
+
+  // 马赛克：对当前选区的精确背景裁剪做像素化，再用笔迹裁剪。
+  function drawMosaic(ctx, s, scale, baseCanvas) {
+    if (!baseCanvas || !s.points || !s.points.length) return;
+    var block = Math.max(6, (s.width || S.width) * 2);
+    var reduced = document.createElement('canvas');
+    reduced.width = Math.max(1, Math.ceil(baseCanvas.width / block));
+    reduced.height = Math.max(1, Math.ceil(baseCanvas.height / block));
+    var reducedCtx = reduced.getContext('2d');
+    var pixelated = document.createElement('canvas');
+    pixelated.width = baseCanvas.width;
+    pixelated.height = baseCanvas.height;
+    var pixelCtx = pixelated.getContext('2d');
+    if (!reducedCtx || !pixelCtx) return;
+    reducedCtx.drawImage(baseCanvas, 0, 0, reduced.width, reduced.height);
+    pixelCtx.imageSmoothingEnabled = false;
+    pixelCtx.drawImage(reduced, 0, 0, pixelated.width, pixelated.height);
+    ctx.save();
+    traceBrushMask(ctx, s.points, Math.max(block, (s.width || S.width) * 3), scale);
+    ctx.clip();
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(pixelated, 0, 0, baseCanvas.width * scale, baseCanvas.height * scale);
     ctx.restore();
   }
 
@@ -2264,14 +2609,14 @@
   // 读取背景底图上某 CSS 坐标处的像素颜色（物理像素采样）。越界 / 未就绪返回 null。
   function colorAt(x, y) {
     if (!S.bgReady || !S.bgImage) return null;
-    var phys = dpr();
-    var px = Math.round(x * phys);
-    var py = Math.round(y * phys);
-    var W = bgCanvas.width;
-    var H = bgCanvas.height;
-    if (px < 0 || py < 0 || px >= W || py >= H) return null;
+    var point = OverlayGeometry.mapOverlayPointToSource(
+      { x: x, y: y },
+      currentViewportSize(),
+      currentSourceSize()
+    );
+    if (!point) return null;
     try {
-      var d = bgCtx.getImageData(px, py, 1, 1).data;
+      var d = bgCtx.getImageData(point.x, point.y, 1, 1).data;
       return { r: d[0], g: d[1], b: d[2] };
     } catch (err) {
       return null;
@@ -2281,20 +2626,26 @@
   function showMagnifier(e) {
     if (!S.bgImage) return;
     magnifier.hidden = false;
-    var phys = dpr();
     var srcW = 24; // 采样区域（CSS px）
     var srcH = 18;
-    var sx = e.clientX * phys - (srcW * phys) / 2;
-    var sy = e.clientY * phys - (srcH * phys) / 2;
+    var viewport = currentViewportSize();
+    var sampleW = Math.min(srcW, viewport.width);
+    var sampleH = Math.min(srcH, viewport.height);
+    var sampleRect = mapOverlayRectToSource({
+      x: clamp(e.clientX - sampleW / 2, 0, viewport.width - sampleW),
+      y: clamp(e.clientY - sampleH / 2, 0, viewport.height - sampleH),
+      width: sampleW,
+      height: sampleH,
+    }, viewport, currentSourceSize());
     magCtx.imageSmoothingEnabled = false;
     magCtx.clearRect(0, 0, magCanvas.width, magCanvas.height);
     try {
       magCtx.drawImage(
         bgCanvas,
-        sx,
-        sy,
-        srcW * phys,
-        srcH * phys,
+        sampleRect.x,
+        sampleRect.y,
+        sampleRect.width,
+        sampleRect.height,
         0,
         0,
         magCanvas.width,
@@ -2344,7 +2695,8 @@
     if (!dataURL) return;
     showOcrPanel('', true);
     try {
-      var res = await kkapi.runOCR({ dataURL, engine: 'local' });
+      // 不在 overlay 里锁死本地引擎；主进程按用户持久化的 OCR 配置选路。
+      var res = await kkapi.runOCR(buildOverlayOCRRequest(dataURL));
       if (res && res.error) {
         showOcrPanel('识别失败：' + res.error, false);
         return;
@@ -2378,55 +2730,13 @@
   }
 
   // ================= 二维码 / 条码识别（PixPin 式：框选后自动检测）=================
-  function scanQr() {
-    var requestId = beginBarcodeScan(S);
-    btnQR.hidden = true;
-    hideQrPanel();
-    if (!S.rect || !S.bgReady || !S.bgImage) return;
-    var Detector = typeof window.BarcodeDetector === 'function' ? window.BarcodeDetector : null;
-    var qrDecoder = typeof jsQR === 'function' ? jsQR : null;
-    if (!Detector && !qrDecoder) return;
-    var phys = dpr();
-    var r = S.rect;
-    var w = Math.round(r.width * phys);
-    var h = Math.round(r.height * phys);
-    if (w < 40 || h < 40) return;
-    // 同时限制长边和总像素数，避免超宽/超高选区在渲染进程卡住。
-    var scanSize = calculateBarcodeScanSize(w, h, 1280, 1500000);
-    var cw = scanSize.width;
-    var ch = scanSize.height;
-    var tmp = document.createElement('canvas');
-    tmp.width = cw;
-    tmp.height = ch;
-    var tctx = tmp.getContext('2d');
-    try {
-      tctx.drawImage(bgCanvas, Math.round(r.x * phys), Math.round(r.y * phys), w, h, 0, 0, cw, ch);
-    } catch (_) {
-      return;
-    }
-    try {
-      var img = tctx.getImageData(0, 0, cw, ch);
-      detectBarcodeResults({
-        source: tmp,
-        BarcodeDetectorCtor: Detector,
-        jsQRFn: qrDecoder,
-        imageData: img,
-        width: cw,
-        height: ch,
-        maxResults: MAX_BARCODE_RESULTS,
-      }).then(function (outcome) {
-        if (!commitBarcodeScan(S, requestId, outcome && outcome.results)) return;
-        btnQR.hidden = !S.qrResults.length;
-      }).catch(function () {
-        if (!commitBarcodeScan(S, requestId, [])) return;
-        btnQR.hidden = true;
-      });
-    } catch (_) {
-      // canvas 因内存或安全限制读取失败时，保持无结果即可。
-    }
+  function barcodeEngineLabel(engine) {
+    if (engine === 'barcode-detector') return 'BarcodeDetector';
+    if (engine === 'jsqr') return 'jsQR';
+    return '';
   }
-  function showQrPanel() {
-    if (!S.qrResults.length) return;
+
+  function updateQrPanel() {
     qrText.textContent = '';
     S.qrResults.forEach(function (result) {
       var row = document.createElement('div');
@@ -2441,6 +2751,16 @@
       row.appendChild(value);
       qrText.appendChild(row);
     });
+    if (!S.qrResults.length && S.qrStatus !== 'scanning') {
+      var empty = document.createElement('div');
+      empty.className = 'qr-empty';
+      empty.textContent = S.qrStatus === 'unavailable'
+        ? '当前环境缺少可用的条码解码器。'
+        : S.qrStatus === 'error'
+          ? '扫描失败，请缩小选区或重新扫描。'
+          : '当前选区未识别到条码。';
+      qrText.appendChild(empty);
+    }
     S.qrOpenURL = null;
     for (var index = 0; index < S.qrResults.length; index += 1) {
       if (/^https?:\/\//i.test(S.qrResults[index].value)) {
@@ -2448,13 +2768,118 @@
         break;
       }
     }
+    var engine = barcodeEngineLabel(S.qrEngine);
+    if (S.qrStatus === 'scanning') {
+      qrStatus.textContent = '正在扫描（快速扫描 + 原分辨率复扫）…';
+    } else if (S.qrStatus === 'success') {
+      qrStatus.textContent = '已识别 ' + S.qrResults.length + ' 个' +
+        (engine ? ' · ' + engine : '') +
+        (S.qrAttempt === 'original' ? ' · 原分辨率复扫' : '');
+    } else if (S.qrStatus === 'unavailable') {
+      qrStatus.textContent = '解码器不可用';
+    } else if (S.qrStatus === 'error') {
+      qrStatus.textContent = '扫描失败';
+    } else {
+      qrStatus.textContent = '未识别到条码 · 可手动重试';
+    }
+    btnQrCopy.disabled = !S.qrResults.length;
     btnQrOpen.hidden = !S.qrOpenURL;
+  }
+
+  function scanQr(options) {
+    var opts = options || {};
+    var keepPanelOpen = !!opts.showPanel || !qrPanel.hidden;
+    var requestId = beginBarcodeScan(S);
+    S.qrAttempt = null;
+    if (keepPanelOpen) {
+      qrPanel.hidden = false;
+      updateQrPanel();
+    }
+    if (!S.rect || !S.bgReady || !S.bgImage) {
+      if (S.qrRequestId === requestId) S.qrStatus = 'idle';
+      if (keepPanelOpen) updateQrPanel();
+      return Promise.resolve(null);
+    }
+    var Detector = typeof window.BarcodeDetector === 'function' ? window.BarcodeDetector : null;
+    var qrDecoder = typeof jsQR === 'function' ? jsQR : null;
+    if (!Detector && !qrDecoder) {
+      S.qrStatus = 'unavailable';
+      if (keepPanelOpen) updateQrPanel();
+      return Promise.resolve(null);
+    }
+
+    var plan = createBarcodeScanPlan(S.rect, currentViewportSize(), currentSourceSize(), 1280, 1500000);
+    if (!plan.sourceRect || plan.sourceRect.width < 40 || plan.sourceRect.height < 40) {
+      commitBarcodeScan(S, requestId, []);
+      if (keepPanelOpen) updateQrPanel();
+      return Promise.resolve(null);
+    }
+
+    return runBarcodeScanAttempts(plan.attempts, async function (attempt) {
+      if (S.qrRequestId !== requestId) {
+        var cancelled = new Error('Barcode scan superseded');
+        cancelled.cancelled = true;
+        throw cancelled;
+      }
+      var tmp = document.createElement('canvas');
+      tmp.width = attempt.width;
+      tmp.height = attempt.height;
+      var tctx = tmp.getContext('2d');
+      if (!tctx) throw new Error('Canvas context unavailable');
+      tctx.drawImage(
+        bgCanvas,
+        plan.sourceRect.x,
+        plan.sourceRect.y,
+        plan.sourceRect.width,
+        plan.sourceRect.height,
+        0,
+        0,
+        attempt.width,
+        attempt.height
+      );
+      var imageData = null;
+      if (qrDecoder) {
+        try {
+          imageData = tctx.getImageData(0, 0, attempt.width, attempt.height);
+        } catch (_) {}
+      }
+      return detectBarcodeResults({
+        source: tmp,
+        BarcodeDetectorCtor: Detector,
+        jsQRFn: qrDecoder,
+        imageData: imageData,
+        width: attempt.width,
+        height: attempt.height,
+        maxResults: MAX_BARCODE_RESULTS,
+      });
+    }).then(function (outcome) {
+      if (!commitBarcodeScan(S, requestId, outcome && outcome.results)) return outcome;
+      S.qrEngine = outcome && outcome.engine ? outcome.engine : null;
+      S.qrAttempt = outcome && outcome.attempt ? outcome.attempt : null;
+      if (outcome && outcome.error && !S.qrResults.length) S.qrStatus = 'error';
+      if (keepPanelOpen || !qrPanel.hidden) updateQrPanel();
+      return outcome;
+    }).catch(function () {
+      if (S.qrRequestId !== requestId) return null;
+      commitBarcodeScan(S, requestId, []);
+      S.qrStatus = 'error';
+      if (keepPanelOpen || !qrPanel.hidden) updateQrPanel();
+      return null;
+    });
+  }
+
+  function showQrPanel() {
     qrPanel.hidden = false;
+    updateQrPanel();
+    if (S.qrStatus === 'idle') scanQr({ showPanel: true });
   }
   function hideQrPanel() {
     qrPanel.hidden = true;
   }
   function bindQrPanel() {
+    btnQrRetry.addEventListener('click', function () {
+      scanQr({ showPanel: true });
+    });
     btnQrCopy.addEventListener('click', function () {
       var text = formatBarcodeResultsForCopy(S.qrResults);
       if (!text) return;
@@ -2489,15 +2914,11 @@
   function composeImage(opts) {
     if (!S.rect) return null;
     var clean = !!(opts && opts.clean);
-    var phys = dpr();
     var r = S.rect;
-    var sourceRect = mapOverlayRectToSource(
-      r,
-      { width: S.displayCssW, height: S.displayCssH },
-      { width: bgCanvas.width, height: bgCanvas.height }
-    );
-    var outW = sourceRect ? sourceRect.width : Math.max(1, Math.round(r.width * phys));
-    var outH = sourceRect ? sourceRect.height : Math.max(1, Math.round(r.height * phys));
+    var sourceRect = currentSourceRect();
+    if (!sourceRect) return null;
+    var outW = sourceRect.width;
+    var outH = sourceRect.height;
     var out = document.createElement('canvas');
     out.width = outW;
     out.height = outH;
@@ -2528,10 +2949,8 @@
 
     // 1) 从背景物理像素裁剪选区
     if (S.bgImage && bgCanvas.width > 0) {
-      var srcX = sourceRect ? sourceRect.x : Math.round(r.x * phys);
-      var srcY = sourceRect ? sourceRect.y : Math.round(r.y * phys);
       try {
-        ctx.drawImage(bgCanvas, srcX, srcY, outW, outH, 0, 0, outW, outH);
+        ctx.drawImage(bgCanvas, sourceRect.x, sourceRect.y, outW, outH, 0, 0, outW, outH);
       } catch (err) {
         /* 忽略 */
       }
@@ -2540,15 +2959,31 @@
     // clean 模式到此结束：只要纯底图（OCR 输入用）。
     if (clean) return out.toDataURL('image/png');
 
-    // 2) 叠加标注（按 phys 放大）
+    // 2) 叠加标注（横纵分别映射到源图裁剪尺寸）
     ctx.imageSmoothingEnabled = true;
-    var annotationScaleX = outW / r.width;
-    var annotationScaleY = outH / r.height;
+    // 屏幕预览最终由浏览器把 annoCanvas 的整数 backing size 缩放到小数 CSS 选区；
+    // 导出从同一个整数坐标系出发，才能让笔迹、模糊遮罩和聚光灯边缘逐像素一致。
+    var annotationCanvasWidth = Math.max(1, annoCanvas.width || Math.round(r.width));
+    var annotationCanvasHeight = Math.max(1, annoCanvas.height || Math.round(r.height));
+    var annotationScaleX = outW / annotationCanvasWidth;
+    var annotationScaleY = outH / annotationCanvasHeight;
+    // Export-only decorations need one scalar for stroke/padding. Use the
+    // smaller independent axis scale so non-uniform image-editor mapping
+    // cannot over-inflate borders, shadows, or translated text.
+    var phys = Math.min(outW / r.width, outH / r.height);
+    var annotationBase = createSelectionBaseCanvas(
+      annotationCanvasWidth,
+      annotationCanvasHeight
+    );
     ctx.save();
     ctx.scale(annotationScaleX, annotationScaleY);
-    for (var i = 0; i < S.shapes.length; i++) {
-      drawShape(ctx, S.shapes[i], 1);
-    }
+    renderAnnotationLayers(
+      ctx,
+      S.shapes,
+      annotationBase,
+      annotationCanvasWidth,
+      annotationCanvasHeight
+    );
     ctx.restore();
 
     // 3) 叠加原位译文层（若已翻译）：把屏幕上的译文格子按相对坐标画进导出图，使保存/复制也含译文。
@@ -2690,7 +3125,6 @@
   function doCancel() {
     hideQrPanel();
     beginBarcodeScan(S);
-    btnQR.hidden = true;
     if (S.finished) return;
     S.finished = true;
     try {
@@ -3280,44 +3714,20 @@
     if (!S.rect) return;
     // 译文层不随选区微调，先清除避免错位残留（与拖动/缩放一致）
     if (typeof clearInlineTranslate === 'function') clearInlineTranslate();
-    var r = S.rect;
-    if (delta === 0) {
-      var dx = key === 'ArrowLeft' ? -1 : key === 'ArrowRight' ? 1 : 0;
-      var dy = key === 'ArrowUp' ? -1 : key === 'ArrowDown' ? 1 : 0;
-      S.rect = {
-        x: clamp(r.x + dx, 0, S.displayCssW - r.width),
-        y: clamp(r.y + dy, 0, S.displayCssH - r.height),
-        width: r.width,
-        height: r.height,
-      };
-    } else {
-      var edge = key === 'ArrowLeft' ? 'w' : key === 'ArrowRight' ? 'e' : key === 'ArrowUp' ? 'n' : 's';
-      var left = r.x;
-      var top = r.y;
-      var right = r.x + r.width;
-      var bottom = r.y + r.height;
-      if (edge === 'w') left += delta;
-      else if (edge === 'e') right += delta;
-      else if (edge === 'n') top += delta;
-      else bottom += delta;
-      var MIN = 3; // 与最终选区最小尺寸一致
-      if (right - left < MIN) {
-        if (edge === 'w') left = right - MIN;
-        else right = left + MIN;
-      }
-      if (bottom - top < MIN) {
-        if (edge === 'n') top = bottom - MIN;
-        else bottom = top + MIN;
-      }
-      left = clamp(left, 0, S.displayCssW);
-      right = clamp(right, 0, S.displayCssW);
-      top = clamp(top, 0, S.displayCssH);
-      bottom = clamp(bottom, 0, S.displayCssH);
-      var ox = r.x;
-      var oy = r.y;
-      S.rect = { x: left, y: top, width: right - left, height: bottom - top };
+    var oldX = S.rect.x;
+    var oldY = S.rect.y;
+    var mode = delta === 0 ? 'move' : delta < 0 ? 'shrink' : 'expand';
+    S.rect = OverlayGeometry.nudgeOverlayRect(
+      S.rect,
+      key,
+      mode,
+      currentViewportSize(),
+      currentSourceSize(),
+      S.ratioLock
+    );
+    if (mode !== 'move') {
       // 原点变化时把标注反向平移，保持锚定在原底图内容上（与鼠标缩放一致）
-      shiftShapes(ox - S.rect.x, oy - S.rect.y);
+      shiftShapes(oldX - S.rect.x, oldY - S.rect.y);
     }
     updateSelectionView();
     positionToolbar();
@@ -3398,14 +3808,50 @@
   });
 
   // 比例锁定 / 圆角开关
+  function setSelectionRatio(value, snapSelection) {
+    var normalizedValue = value === '1:1' || value === '4:3' || value === '16:9' ? value : 'free';
+    S.ratioValue = normalizedValue;
+    S.ratioLock = OverlayGeometry.normalizeRatio(normalizedValue);
+    if (selectionRatio) selectionRatio.value = normalizedValue;
+    setSelectionOptionActive(btnRatioLock, !!S.ratioLock);
+    btnRatioLock.title = S.ratioLock ? '固定比例：' + normalizedValue + '（点击解除）' : '启用固定比例';
+    if (snapSelection && S.ratioLock && S.rect) {
+      var mapped = currentSourceRect();
+      applySelectionSourceSize('width', mapped.width, mapped.height);
+    } else {
+      syncSelectionGeometryControls();
+    }
+  }
+
   btnRatioLock.addEventListener('click', function () {
     if (S.ratioLock) {
-      S.ratioLock = 0;
+      setSelectionRatio('free', false);
     } else {
-      S.ratioLock = S.rect && S.rect.height > 0 ? S.rect.width / S.rect.height : 1;
+      setSelectionRatio(selectionRatio && selectionRatio.value !== 'free' ? selectionRatio.value : '1:1', true);
     }
-    setSelectionOptionActive(btnRatioLock, !!S.ratioLock);
   });
+  if (selectionRatio) {
+    selectionRatio.addEventListener('change', function () {
+      setSelectionRatio(selectionRatio.value, true);
+    });
+  }
+  if (selectionWidth) {
+    selectionWidth.addEventListener('change', function () {
+      applySelectionSourceSize('width', selectionWidth.value, selectionHeight && selectionHeight.value);
+    });
+  }
+  if (selectionHeight) {
+    selectionHeight.addEventListener('change', function () {
+      applySelectionSourceSize('height', selectionWidth && selectionWidth.value, selectionHeight.value);
+    });
+  }
+  if (selectionSizePreset) {
+    selectionSizePreset.addEventListener('change', function () {
+      var match = selectionSizePreset.value.match(/^(\d+)x(\d+)$/);
+      if (!match) return;
+      applySelectionSourceSize('width', Number(match[1]), Number(match[2]));
+    });
+  }
   btnRounded.addEventListener('click', function () {
     S.rounded = !S.rounded;
     setSelectionOptionActive(btnRounded, S.rounded);
@@ -3421,7 +3867,6 @@
     S.numberSeq = 1;
     toolbar.hidden = true;
     beginBarcodeScan(S);
-    btnQR.hidden = true;
     hideQrPanel();
     updateSelectionView();
     hint.hidden = false;
@@ -3430,11 +3875,11 @@
   function loadHistoryImage(dataURL, notice) {
     var img = new Image();
     img.onload = function () {
-      // 历史截图多为区域裁剪图：等比 contain 居中铺到全屏画布上，四周留黑边，
-      // 这样选区/裁剪/放大镜/取色的坐标系全部保持不变。
-      var phys = dpr();
-      var W = Math.round(S.displayCssW * phys);
-      var H = Math.round(S.displayCssH * phys);
+      // 历史截图多为区域裁剪图：等比 contain 居中铺到当前源图画布，四周留黑边。
+      // 保留横纵独立的源图像素尺寸，切换历史后选区/取色/导出的映射仍与初始截图一致。
+      var sourceSize = currentSourceSize();
+      var W = sourceSize.width;
+      var H = sourceSize.height;
       bgCanvas.width = W;
       bgCanvas.height = H;
       bgCtx.fillStyle = '#000';

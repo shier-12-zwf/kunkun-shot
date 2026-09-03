@@ -31,6 +31,9 @@ function normalizePinWorkspaceState(value) {
   if (typeof value.locked === 'boolean') state.locked = value.locked;
   if (typeof value.onTop === 'boolean') state.onTop = value.onTop;
   if (typeof value.title === 'string' && value.title.length <= 512) state.title = value.title;
+  if (typeof value.groupId === 'string' && /^group-[a-z0-9-]{1,120}$/i.test(value.groupId)) {
+    state.groupId = value.groupId;
+  }
   return Object.keys(state).length ? state : null;
 }
 

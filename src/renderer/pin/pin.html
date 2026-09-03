@@ -12,6 +12,12 @@
   <div class="pin-wrap" id="pinWrap">
     <img class="pin-img" id="pinImg" alt="贴图" draggable="false" />
 
+    <div class="pin-image-status" id="pinImageStatus" role="status" aria-live="polite" hidden>
+      <div class="pin-image-status-title" id="pinImageStatusTitle">正在加载贴图…</div>
+      <div class="pin-image-status-detail" id="pinImageStatusDetail"></div>
+      <button class="pin-image-retry" id="btnRetryImage" type="button" hidden>重试显示</button>
+    </div>
+
     <!-- 文本贴图内容（剪贴板文字贴图时显示） -->
     <div class="pin-text" id="pinText" hidden></div>
     <!-- 颜色贴图内容（剪贴板颜色值贴图时显示） -->
@@ -25,6 +31,11 @@
 
     <!-- 独立标注层：只擦除标注，不会破坏底图 -->
     <canvas class="pin-annotation-canvas" id="pinAnnotationCanvas" hidden></canvas>
+
+    <!-- 裁剪选区：只在裁剪模式接管指针，不会覆盖已合成的旧图 -->
+    <div class="pin-crop-layer" id="pinCropLayer" hidden>
+      <div class="pin-crop-selection" id="pinCropSelection"></div>
+    </div>
 
     <!-- 贴图标题栏（F2 设置后显示在底部） -->
     <div class="pin-title" id="pinTitle" hidden></div>
@@ -77,6 +88,11 @@
           <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"></path>
         </svg>
       </button>
+      <button class="tool-btn" id="btnTransform" title="裁剪 / 旋转 / 翻转" aria-label="图片变换">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 4v6h6"></path><path d="M20 20v-6h-6"></path><path d="M5.5 15A8 8 0 0 0 19 8.5"></path><path d="M18.5 9A8 8 0 0 0 5 15.5"></path>
+        </svg>
+      </button>
       <span class="tool-sep" aria-hidden="true"></span>
       <button class="tool-btn tool-danger" id="btnClose" title="关闭贴图（Esc）" aria-label="关闭">
         <!-- 关闭：叉 -->
@@ -101,6 +117,12 @@
       <button class="annotation-btn" data-pin-edit="redo" title="重做（Cmd+Shift+Z）">&#8631;</button>
       <button class="annotation-btn" data-pin-edit="clear" title="清空标注">&#128465;</button>
     </div>
+
+    <div class="pin-crop-toolbar" id="pinCropToolbar" role="toolbar" aria-label="裁剪工具" hidden>
+      <span>拖拽框选保留区域</span>
+      <button type="button" id="btnCancelCrop">取消</button>
+      <button type="button" class="primary" id="btnApplyCrop">应用裁剪</button>
+    </div>
   </div>
 
   <!-- 自绘右键菜单 -->
@@ -113,6 +135,16 @@
     <div class="ctx-item" data-act="topToggle" role="menuitem" tabindex="-1">置顶 / 取消置顶　T</div>
     <div class="ctx-item" data-act="textSel" role="menuitem" tabindex="-1">选择文字　S</div>
     <div class="ctx-item" data-act="annotate" role="menuitem" tabindex="-1">标注贴图</div>
+    <div class="ctx-sep" aria-hidden="true"></div>
+    <div class="ctx-item" data-act="crop" role="menuitem" tabindex="-1">裁剪图片…</div>
+    <div class="ctx-item" data-act="rotateCW" role="menuitem" tabindex="-1">顺时针旋转 90°</div>
+    <div class="ctx-item" data-act="rotateCCW" role="menuitem" tabindex="-1">逆时针旋转 90°</div>
+    <div class="ctx-item" data-act="flipHorizontal" role="menuitem" tabindex="-1">水平翻转</div>
+    <div class="ctx-item" data-act="flipVertical" role="menuitem" tabindex="-1">垂直翻转</div>
+    <div class="ctx-sep" aria-hidden="true"></div>
+    <div class="ctx-item" data-act="groupAll" role="menuitem" tabindex="-1">将当前所有贴图分组</div>
+    <div class="ctx-item" data-act="groupVisibility" role="menuitem" tabindex="-1">折叠 / 展开同组贴图</div>
+    <div class="ctx-item" data-act="ungroup" role="menuitem" tabindex="-1">将此贴图移出分组</div>
     <div class="ctx-item" data-act="passthrough" role="menuitem" tabindex="-1">鼠标穿透　P</div>
     <div class="ctx-item" data-act="title" role="menuitem" tabindex="-1">设置标题　F2</div>
     <div class="ctx-item" data-act="ask" role="menuitem" tabindex="-1">问 AI</div>
@@ -129,6 +161,8 @@
 
   <script src="../../shared/pin-content-update.js"></script>
   <script src="./pin-annotations.js"></script>
+  <script src="./pin-image-loader.js"></script>
+  <script src="./pin-image-transform.js"></script>
   <script src="./pin.js"></script>
 </body>
 </html>

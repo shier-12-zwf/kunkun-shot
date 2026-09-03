@@ -21,7 +21,7 @@ function rfile(...p) {
 }
 
 // 单例窗口引用
-const refs = { settings: null, ai: null, main: null };
+const refs = { settings: null, ai: null, main: null, formula: null };
 let popoverWin = null;
 // 截图层一次一个
 let overlayWin = null;
@@ -31,6 +31,10 @@ const overlayCaptureTypes = new Map();
 const pins = new Set();
 // 贴图内容登记：webContents.id -> 原始 payload（批量保存 / 历史恢复用）
 const pinPayloads = new Map();
+// 折叠状态只属于当前会话，绝不持久化（否则恢复工作区后可能得到不可见且无入口的窗口）。
+// 每组始终保留 anchorId 对应的可见贴图，用户可从它重新展开整组。
+const collapsedPinGroups = new Map();
+let pinGroupSequence = 0;
 // 最近关闭的贴图（Ctrl+3 / 托盘「恢复最近关闭的贴图」）
 const pinHistory = [];
 // 明确销毁的贴图不得进入恢复历史；WeakSet 不延长窗口或敏感 payload 的生命周期。
@@ -44,6 +48,9 @@ const pinWorkspaceChangedListeners = new Set();
 // Map 只保留当前轮次，超时、回执或窗口销毁都会立即清理。
 const pinCloseWaiters = new Map();
 let pinCloseRequestSequence = 0;
+// “保存全部”只需要一个不冻结编辑的时点快照，使用独立 waiter，避免与退出屏障互相覆盖。
+const pinSyncWaiters = new Map();
+let pinSyncRequestSequence = 0;
 // 录屏控制条
 let recorderWin = null;
 let recorderLifecycleState = null;
@@ -282,15 +289,36 @@ function settlePinCloseWaiter(webContentsId, result) {
   return true;
 }
 
+function settlePinSyncWaiter(webContentsId, result) {
+  const waiter = pinSyncWaiters.get(webContentsId);
+  if (!waiter) return false;
+  pinSyncWaiters.delete(webContentsId);
+  clearTimeout(waiter.timer);
+  waiter.resolve(result);
+  return true;
+}
+
 function removeTrackedPin(win, webContentsId, payload) {
   // closed 与显式 destroy 可能先后触发；以 Set.delete 的返回值保证只清理、通知一次。
-  if (!pins.delete(win)) return false;
+  if (!pins.has(win)) return false;
+  const removedGroupId = payload && payload.state && payload.state.groupId;
+  if (removedGroupId && collapsedPinGroups.has(removedGroupId)) expandPinGroup(removedGroupId);
+  pins.delete(win);
   settlePinCloseWaiter(webContentsId, {
     ok: false,
     webContentsId,
     error: '贴图窗口在退出同步完成前已关闭。',
   });
+  settlePinSyncWaiter(webContentsId, {
+    ok: false,
+    webContentsId,
+    error: '贴图窗口在内容同步完成前已关闭。',
+  });
   pinPayloads.delete(webContentsId);
+  if (removedGroupId) {
+    const remaining = pinGroupMembers(removedGroupId);
+    if (remaining.length < 2) remaining.forEach((member) => setPinGroupId(member, ''));
+  }
   const shouldSuppressHistory = suppressPinHistory.delete(win);
   if (!shouldSuppressHistory && payload) {
     // 正常关闭的贴图进历史（最多保留 10 条），供 Ctrl+3 恢复
@@ -354,6 +382,11 @@ function createPin(payload) {
     backgroundColor: '#00000000',
     webPreferences: baseWebPrefs(),
   }, 'pin');
+  if (safePayload.dataURL && typeof win.setAspectRatio === 'function') {
+    // 图片贴图的 bounds 由原图尺寸等比计算；把该比例交给原生窗口管理器，
+    // 避免用户拖拽边缘后出现“图片正常解码但窗口把它拉伸成空白/变形”的错觉。
+    win.setAspectRatio(bounds.width / bounds.height);
+  }
   win.setAlwaysOnTop(keepOnTop, 'floating');
   applyPinWorkspaceState(win, state);
   win.loadFile(rfile('pin', 'pin.html'));
@@ -407,6 +440,200 @@ function updatePinContent(webContentsId, update) {
   return { revision: update.revision };
 }
 
+function findPin(webContentsId) {
+  return Array.from(pins).find((candidate) => (
+    !candidate.isDestroyed() && candidate.webContents.id === webContentsId
+  )) || null;
+}
+
+function pinGroupIdOf(win) {
+  const payload = win && !win.isDestroyed() ? pinPayloads.get(win.webContents.id) : null;
+  return payload && payload.state && typeof payload.state.groupId === 'string'
+    ? payload.state.groupId
+    : '';
+}
+
+function pinGroupMembers(groupId) {
+  if (!groupId) return [];
+  return Array.from(pins).filter((win) => !win.isDestroyed() && pinGroupIdOf(win) === groupId);
+}
+
+function sendPinGroupState(win, collapsed, anchorId) {
+  if (!win || win.isDestroyed()) return;
+  const groupId = pinGroupIdOf(win);
+  try {
+    win.webContents.send(C.PIN_CMD, {
+      cmd: 'group-state',
+      groupId,
+      collapsed: Boolean(groupId && collapsed),
+      anchor: Boolean(groupId && anchorId === win.webContents.id),
+      count: groupId ? pinGroupMembers(groupId).length : 1,
+    });
+  } catch (_) {}
+}
+
+function setPinGroupId(win, groupId) {
+  if (!win || win.isDestroyed()) return;
+  const payload = pinPayloads.get(win.webContents.id);
+  if (!payload) return;
+  const next = { ...(payload.state || {}) };
+  if (groupId) next.groupId = groupId;
+  else delete next.groupId;
+  if (Object.keys(next).length) payload.state = next;
+  else delete payload.state;
+}
+
+function showPinWithoutFocus(win) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    if (typeof win.showInactive === 'function') win.showInactive();
+    else if (typeof win.show === 'function') win.show();
+  } catch (_) {}
+}
+
+function expandPinGroup(groupId) {
+  const members = pinGroupMembers(groupId);
+  members.forEach(showPinWithoutFocus);
+  collapsedPinGroups.delete(groupId);
+  members.forEach((member) => sendPinGroupState(member, false, null));
+  return members;
+}
+
+function nextPinGroupId() {
+  pinGroupSequence = (pinGroupSequence + 1) % Number.MAX_SAFE_INTEGER;
+  return `group-${Date.now().toString(36)}-${pinGroupSequence.toString(36)}`;
+}
+
+function pinGroupAction(webContentsId, action) {
+  const caller = findPin(webContentsId);
+  if (!caller) throw new Error('贴图窗口不存在。');
+
+  if (action === 'create') {
+    const members = Array.from(pins).filter((win) => !win.isDestroyed());
+    if (members.length < 2) throw new Error('至少需要两张贴图才能分组。');
+    const oldGroups = new Set(members.map(pinGroupIdOf).filter(Boolean));
+    oldGroups.forEach(expandPinGroup);
+    const groupId = nextPinGroupId();
+    members.forEach((member) => setPinGroupId(member, groupId));
+    members.forEach((member) => sendPinGroupState(member, false, null));
+    notifyPinWorkspaceChanged('group');
+    return { ok: true, groupId, collapsed: false, count: members.length };
+  }
+
+  const groupId = pinGroupIdOf(caller);
+  if (!groupId) throw new Error('当前贴图尚未分组。');
+  const members = pinGroupMembers(groupId);
+
+  if (action === 'toggle-visibility') {
+    const current = collapsedPinGroups.get(groupId);
+    if (current) {
+      expandPinGroup(groupId);
+      return { ok: true, groupId, collapsed: false, count: members.length };
+    }
+    members.forEach((member) => {
+      if (member.webContents.id === webContentsId) showPinWithoutFocus(member);
+      else if (typeof member.hide === 'function') member.hide();
+    });
+    collapsedPinGroups.set(groupId, { anchorId: webContentsId });
+    members.forEach((member) => sendPinGroupState(member, true, webContentsId));
+    return { ok: true, groupId, collapsed: true, count: members.length };
+  }
+
+  if (action === 'ungroup') {
+    if (collapsedPinGroups.has(groupId)) expandPinGroup(groupId);
+    setPinGroupId(caller, '');
+    sendPinGroupState(caller, false, null);
+    const remaining = pinGroupMembers(groupId);
+    let count = remaining.length;
+    if (remaining.length < 2) {
+      remaining.forEach((member) => {
+        setPinGroupId(member, '');
+        sendPinGroupState(member, false, null);
+      });
+      count = 0;
+    } else {
+      remaining.forEach((member) => sendPinGroupState(member, false, null));
+    }
+    notifyPinWorkspaceChanged('group');
+    return { ok: true, groupId: '', collapsed: false, count };
+  }
+
+  throw new Error('贴图分组操作无效。');
+}
+
+function movePinGroup(webContentsId, dx, dy) {
+  const caller = findPin(webContentsId);
+  if (!caller) return 0;
+  const groupId = pinGroupIdOf(caller);
+  const members = groupId ? pinGroupMembers(groupId) : [caller];
+  members.forEach((win) => {
+    const bounds = win.getBounds();
+    win.setBounds({
+      x: Math.round(bounds.x + dx),
+      y: Math.round(bounds.y + dy),
+      width: bounds.width,
+      height: bounds.height,
+    });
+  });
+  notifyPinWorkspaceChanged(groupId ? 'group-bounds' : 'bounds');
+  return members.length;
+}
+
+function replacePinImage(webContentsId, update) {
+  const payload = pinPayloads.get(webContentsId);
+  const win = findPin(webContentsId);
+  if (!payload || typeof payload.dataURL !== 'string' || !win) throw new Error('图片贴图窗口不存在。');
+  if (!update || typeof update !== 'object') throw new Error('贴图图片替换无效。');
+  const current = Number.isSafeInteger(payload.contentRevision) ? payload.contentRevision : 0;
+  const currentBounds = win.getBounds();
+  const isExactReplay = update.revision === current
+    && update.baseRevision === current - 1
+    && update.dataURL === payload.dataURL;
+  if (isExactReplay) return { revision: current, bounds: currentBounds };
+  if (update.baseRevision !== current || update.revision !== current + 1) {
+    throw new Error('贴图内容版本已过期，请重试。');
+  }
+  for (const key of ['sourceWidth', 'sourceHeight', 'width', 'height']) {
+    if (!Number.isSafeInteger(update[key]) || update[key] < 1 || update[key] > 32768) {
+      throw new Error('贴图图片尺寸无效。');
+    }
+  }
+
+  const currentScale = Math.min(
+    currentBounds.width / update.sourceWidth,
+    currentBounds.height / update.sourceHeight
+  );
+  const minimumScale = Math.max(40 / update.width, 40 / update.height);
+  const maximumScale = Math.min(8000 / update.width, 8000 / update.height);
+  const nextScale = Math.max(minimumScale, Math.min(maximumScale, currentScale));
+  const width = Math.max(40, Math.min(8000, Math.round(update.width * nextScale)));
+  const height = Math.max(40, Math.min(8000, Math.round(update.height * nextScale)));
+  const centerX = currentBounds.x + currentBounds.width / 2;
+  const centerY = currentBounds.y + currentBounds.height / 2;
+  const nextBounds = {
+    x: Math.round(centerX - width / 2),
+    y: Math.round(centerY - height / 2),
+    width,
+    height,
+  };
+
+  try {
+    if (typeof win.setAspectRatio === 'function') win.setAspectRatio(update.width / update.height);
+    win.setBounds(nextBounds);
+  } catch (error) {
+    try {
+      if (typeof win.setAspectRatio === 'function') win.setAspectRatio(update.sourceWidth / update.sourceHeight);
+      win.setBounds(currentBounds);
+    } catch (_) {}
+    throw error;
+  }
+  payload.dataURL = update.dataURL;
+  payload.contentRevision = update.revision;
+  payload.bounds = nextBounds;
+  notifyPinWorkspaceChanged('content');
+  return { revision: update.revision, bounds: nextBounds };
+}
+
 function normalizePinCloseReady(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('贴图退出回执无效。');
   const allowed = new Set(['requestId', 'ok', 'error']);
@@ -435,6 +662,77 @@ function acknowledgePinClose(webContentsId, raw) {
     error: reply.ok ? '' : (reply.error || '贴图内容同步失败。'),
   });
   return { ok: true };
+}
+
+function normalizePinSyncReady(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('贴图同步回执无效。');
+  const allowed = new Set(['requestId', 'ok', 'error']);
+  for (const key of Object.keys(raw)) {
+    if (!allowed.has(key)) throw new Error(`贴图同步回执包含未知字段：${key}`);
+  }
+  if (typeof raw.requestId !== 'string' || !/^[a-z0-9-]{1,128}$/i.test(raw.requestId)) {
+    throw new Error('贴图同步回执标识无效。');
+  }
+  if (typeof raw.ok !== 'boolean') throw new Error('贴图同步回执状态无效。');
+  if (raw.error != null && (typeof raw.error !== 'string' || raw.error.length > 1000)) {
+    throw new Error('贴图同步回执错误无效。');
+  }
+  return { requestId: raw.requestId, ok: raw.ok, error: raw.error || '' };
+}
+
+function acknowledgePinSync(webContentsId, raw) {
+  const payload = pinPayloads.get(webContentsId);
+  if (!payload) throw new Error('贴图窗口不存在。');
+  const reply = normalizePinSyncReady(raw);
+  const waiter = pinSyncWaiters.get(webContentsId);
+  if (!waiter || waiter.requestId !== reply.requestId) throw new Error('贴图同步回执已过期。');
+  settlePinSyncWaiter(webContentsId, {
+    ok: reply.ok,
+    webContentsId,
+    error: reply.ok ? '' : (reply.error || '贴图内容同步失败。'),
+  });
+  return { ok: true };
+}
+
+function syncPinsContent({ timeoutMs = 5000 } = {}) {
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 50 || timeoutMs > 30000) {
+    throw new Error('贴图同步等待时间无效。');
+  }
+  const livePins = Array.from(pins).filter((win) => !win.isDestroyed());
+  if (!livePins.length) return Promise.resolve({ ok: true, results: [] });
+
+  const tasks = livePins.map((win) => new Promise((resolve) => {
+    const webContentsId = win.webContents.id;
+    settlePinSyncWaiter(webContentsId, {
+      ok: false,
+      webContentsId,
+      error: '贴图同步已被新请求取代。',
+    });
+    pinSyncRequestSequence = (pinSyncRequestSequence + 1) % Number.MAX_SAFE_INTEGER;
+    const requestId = `${Date.now().toString(36)}-${pinSyncRequestSequence.toString(36)}-${webContentsId.toString(36)}`;
+    const timer = setTimeout(() => {
+      settlePinSyncWaiter(webContentsId, {
+        ok: false,
+        webContentsId,
+        error: '等待贴图内容同步超时。',
+      });
+    }, timeoutMs);
+    pinSyncWaiters.set(webContentsId, { requestId, timer, resolve });
+    try {
+      win.webContents.send(C.PIN_CMD, { cmd: 'sync-content', requestId });
+    } catch (error) {
+      settlePinSyncWaiter(webContentsId, {
+        ok: false,
+        webContentsId,
+        error: (error && error.message) || String(error),
+      });
+    }
+  }));
+
+  return Promise.all(tasks).then((results) => ({
+    ok: results.every((result) => result.ok === true),
+    results,
+  }));
 }
 
 function preparePinsForClose({ timeoutMs = 5000 } = {}) {
@@ -561,6 +859,33 @@ function openAIPanel(payload) {
   return win;
 }
 
+// ---- LaTeX 公式贴图 ----
+// 公式编辑器是本地单例窗口：不持有 API Key，不具备网络 IPC，只能把
+// renderer 内由 KaTeX 生成的 PNG 交给主进程创建贴图。
+function createFormula() {
+  if (refs.formula && !refs.formula.isDestroyed()) {
+    refs.formula.show();
+    refs.formula.focus();
+    return refs.formula;
+  }
+  const win = newTrackedWindow({
+    width: 620,
+    height: 500,
+    minWidth: 480,
+    minHeight: 400,
+    title: 'LaTeX 公式贴图 · 困困截图',
+    autoHideMenuBar: true,
+    backgroundColor: '#f6f2ea',
+    webPreferences: baseWebPrefs(),
+  }, 'formula');
+  win.loadFile(rfile('formula', 'formula.html'));
+  win.on('closed', () => {
+    if (refs.formula === win) refs.formula = null;
+  });
+  refs.formula = win;
+  return win;
+}
+
 // ---- 录屏控制条 ----
 // 放在录制区域下方（区域外），避免把控制条录进画面。
 function createRecorder(initData) {
@@ -584,7 +909,7 @@ function createRecorder(initData) {
   }
   const r = initData.rect;
   const db = initData.displayBounds;
-  const barW = 380;
+  const barW = 520;
   const barH = 56;
   let x = Math.round(db.x + r.x + r.width / 2 - barW / 2);
   let y = Math.round(db.y + r.y + r.height + 10);
@@ -698,8 +1023,9 @@ function createLongShot(initData) {
   if (longShotWin && !longShotWin.isDestroyed()) longShotWin.close();
   const r = initData.rect;
   const db = initData.displayBounds;
-  const barW = 460;
-  const barH = 60;
+  // 两行帧/固定区域编辑器需要可见空间；宽度仍限制在当前屏幕内。
+  const barW = Math.min(860, Math.max(460, Math.floor(db.width)));
+  const barH = 126;
   let x = Math.round(db.x + r.x + r.width / 2 - barW / 2);
   let y = Math.round(db.y + r.y + r.height + 10);
   if (y + barH > db.y + db.height) y = Math.round(db.y + r.y - barH - 10);
@@ -952,6 +1278,8 @@ function closeAll() {
   closeOverlay();
   closeRecorder({ force: true });
   closeLongShot();
+  if (refs.formula && !refs.formula.isDestroyed()) refs.formula.close();
+  refs.formula = null;
   hidePopover();
   closeTranslatePopup();
   for (const p of pins) if (!p.isDestroyed()) p.close();
@@ -965,6 +1293,7 @@ module.exports = {
   createPin,
   openSettings,
   openAIPanel,
+  createFormula,
   normalizeAIPanelPayload,
   createRecorder,
   closeRecorder,
@@ -999,8 +1328,13 @@ module.exports = {
   onPinWorkspaceChanged,
   updatePinWorkspaceState,
   updatePinContent,
+  replacePinImage,
+  pinGroupAction,
+  movePinGroup,
   acknowledgePinClose,
+  acknowledgePinSync,
   preparePinsForClose,
+  syncPinsContent,
   cancelPinClosePreparation,
   getPinPayload: (id) => pinPayloads.get(id) || null,
   getOverlay: () => overlayWin,

@@ -8,7 +8,9 @@ const {
   SUPPORTED_IMAGE_FORMATS,
   listSupportedImageFormats,
   normalizeImageExportOptions,
+  normalizeMultiPdfOptions,
   buildImageConversionArgs,
+  exportImagesToPdf,
   exportImage,
 } = require('../src/main/image-export');
 
@@ -138,6 +140,89 @@ test('unsupported or failed encoders preserve an existing destination and remove
   );
   assert.equal(fs.readFileSync(outputPath, 'utf8'), 'precious-original');
   assert.deepEqual(fs.readdirSync(dir), ['capture.avif']);
+});
+
+test('multi-page PDF preserves page order, bounds count and atomic output', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kkshot-pdf-pages-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const outputPath = path.join(dir, 'merged.pdf');
+  let seq = 0;
+  const cleanup = [];
+  function minimalJpeg(marker, width, height) {
+    return Buffer.concat([
+      Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, (height >> 8) & 0xff, height & 0xff, (width >> 8) & 0xff, width & 0xff, 0x03, 0x01, 0x11]),
+      Buffer.from(marker, 'ascii'),
+      Buffer.from([0xff, 0xd9]),
+    ]);
+  }
+  const fakeTempFiles = {
+    writePrivateTempFile(buffer, _prefix, ext) {
+      const inputPath = path.join(dir, `input-${seq++}.${ext}`);
+      fs.writeFileSync(inputPath, buffer);
+      return inputPath;
+    },
+    createPrivateTempPath() {
+      return path.join(dir, `page-${seq++}.jpg`);
+    },
+    cleanupTempPath(filePath) {
+      cleanup.push(filePath);
+      fs.rmSync(filePath, { force: true });
+    },
+  };
+  let page = 0;
+  const fakeMedia = {
+    async convertImage(_input, jpegPath) {
+      page += 1;
+      fs.writeFileSync(jpegPath, minimalJpeg(`PAGE-${page}`, page, page + 1));
+    },
+  };
+
+  const result = await exportImagesToPdf({
+    dataURLs: [PNG_DATA_URL, PNG_DATA_URL],
+    outputPath,
+    quality: 81,
+  }, { media: fakeMedia, tempFiles: fakeTempFiles });
+  const pdf = fs.readFileSync(outputPath);
+  const ascii = pdf.toString('binary');
+  assert.deepEqual(result, { path: outputPath, format: 'pdf', quality: 81, pageCount: 2 });
+  assert.match(ascii, /\/Kids \[3 0 R 6 0 R\] \/Count 2/);
+  assert.equal((ascii.match(/\/Type \/Page \/Parent/g) || []).length, 2);
+  assert.ok(pdf.indexOf(Buffer.from('PAGE-1')) < pdf.indexOf(Buffer.from('PAGE-2')));
+  assert.equal(cleanup.length, 4);
+  assert.equal(fs.readdirSync(dir).some((name) => name.startsWith('.kkshot-export-')), false);
+});
+
+test('multi-page PDF rejects non-PDF targets, empty/oversized page lists and preserves destination on conversion failure', async (t) => {
+  assert.throws(() => normalizeMultiPdfOptions({ dataURLs: [], outputPath: '/tmp/a.pdf' }), /页数/);
+  assert.throws(
+    () => normalizeMultiPdfOptions({ dataURLs: Array(101).fill(PNG_DATA_URL), outputPath: '/tmp/a.pdf' }),
+    /最多 100/,
+  );
+  assert.throws(() => normalizeMultiPdfOptions({ dataURLs: [PNG_DATA_URL], outputPath: '/tmp/a.png' }), /.pdf/);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kkshot-pdf-fail-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const outputPath = path.join(dir, 'merged.pdf');
+  fs.writeFileSync(outputPath, 'precious-pdf');
+  let seq = 0;
+  const fakeTempFiles = {
+    writePrivateTempFile(buffer) {
+      const filePath = path.join(dir, `input-${seq++}.png`);
+      fs.writeFileSync(filePath, buffer);
+      return filePath;
+    },
+    createPrivateTempPath() { return path.join(dir, `page-${seq++}.jpg`); },
+    cleanupTempPath(filePath) { fs.rmSync(filePath, { force: true }); },
+  };
+  await assert.rejects(
+    exportImagesToPdf({ dataURLs: [PNG_DATA_URL], outputPath, quality: 90 }, {
+      tempFiles: fakeTempFiles,
+      media: { async convertImage() { throw new Error('encoder unavailable'); } },
+    }),
+    /PDF 导出失败.*encoder unavailable/,
+  );
+  assert.equal(fs.readFileSync(outputPath, 'utf8'), 'precious-pdf');
+  assert.deepEqual(fs.readdirSync(dir), ['merged.pdf']);
 });
 
 test('all advertised formats produce non-empty files with recognizable containers', async (t) => {

@@ -15,6 +15,11 @@
       <span class="dot"></span>
     </button>
 
+    <button class="btn btn-option" id="btnCamera" title="摄像头画中画（开始前设置）" aria-label="摄像头画中画" aria-pressed="false">◉</button>
+    <button class="btn btn-option" id="btnActions" title="将鼠标点击与按键提示写入录屏（开始前设置）" aria-label="将操作提示写入录屏" aria-pressed="false">⌨</button>
+    <button class="btn btn-option" id="btnPen" title="成片画笔：拖动时将标注写入录屏文件，不覆盖桌面实时预览" aria-label="成片画笔（写入录屏）" aria-pressed="false" disabled>✎</button>
+    <button class="btn btn-option" id="btnClearPen" title="清空成片标注" aria-label="清空成片标注" disabled>⌫</button>
+
     <!-- 录制状态指示 + 计时器 -->
     <div class="status" id="status">
       <span class="live-dot" id="liveDot"></span>
@@ -45,6 +50,7 @@
   </div>
 
   <script src="../../shared/recorder-lifecycle.js"></script>
+  <script src="../../shared/recorder-overlays.js"></script>
   <script src="./recorder.js"></script>
 </body>
 </html>

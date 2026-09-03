@@ -138,7 +138,7 @@ test('legacy unsupported OCR language migrates only that field and preserves pla
   t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
   const target = path.join(tempDir, 'config.json');
   fs.writeFileSync(target, JSON.stringify({
-    ocr: { engine: 'local', lang: 'jpn' },
+    ocr: { engine: 'local', lang: 'rus' },
     general: { theme: 'dark', saveDir: '/tmp/keep-this-directory' },
     shortcuts: { capture: 'CommandOrControl+Shift+7' },
     deepseek: { apiKey: 'legacy-key-that-must-be-preserved-securely' },
@@ -169,7 +169,7 @@ test('legacy OCR migration preserves an existing encrypted key and unrelated set
     capture: { autoPin: true },
   });
   const before = JSON.parse(fs.readFileSync(target, 'utf8'));
-  before.ocr.lang = 'deu';
+  before.ocr.lang = 'ita';
   fs.writeFileSync(target, JSON.stringify(before), { mode: 0o600 });
 
   const loaded = loadConfig(tempDir, true).get();

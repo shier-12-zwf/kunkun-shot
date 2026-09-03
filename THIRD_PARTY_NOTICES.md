@@ -16,11 +16,14 @@ Original source code in this repository is offered under the [MIT License](LICEN
 | --- | ---: | --- | --- |
 | `ffmpeg-static` | 5.3.0 | GPL-3.0-or-later | [eugeneware/ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) |
 | `jsqr` | 1.4.0 | Apache-2.0 | [cozmo/jsQR](https://github.com/cozmo/jsQR) |
+| `katex` | 0.18.5 | MIT | [KaTeX/KaTeX](https://github.com/KaTeX/KaTeX) |
 | `tesseract.js` | 5.1.1 | Apache-2.0 | [naptha/tesseract.js](https://github.com/naptha/tesseract.js) |
 
 The renderer also contains a vendored `jsQR` browser bundle at `src/renderer/overlay/vendor/jsQR.js`; the jsQR Apache-2.0 terms continue to apply to that copy. A copy of Apache-2.0 is included at [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt).
 
 渲染层还在 `src/renderer/overlay/vendor/jsQR.js` 中包含一份 jsQR 浏览器 bundle，该副本仍受 jsQR 的 Apache-2.0 条款约束。Apache-2.0 全文副本位于 [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt)。
+
+公式贴图窗口在本机加载 KaTeX 及其随附字体，不依赖 CDN。KaTeX 的 MIT 许可证副本位于 [`LICENSES/KaTeX-MIT.txt`](LICENSES/KaTeX-MIT.txt)。
 
 ### Important FFmpeg distribution note / FFmpeg 分发特别说明
 
@@ -46,7 +49,7 @@ The following packages are present in the current `npm ls --omit=dev --all` tree
 | BSD-2-Clause | `webidl-conversions@3.0.1` |
 | BSD (upstream metadata) | `parse-cache-control@1.0.1` |
 | ISC | `inherits@2.0.4` |
-| MIT | `@derhuerst/http-basic@8.2.4`, `@types/node@10.17.60`, `agent-base@6.0.2`, `bmp-js@0.1.0`, `buffer-from@1.1.2`, `concat-stream@2.0.0`, `debug@4.4.3`, `encoding@0.1.13`, `env-paths@2.2.1`, `http-response-object@3.0.2`, `https-proxy-agent@5.0.1`, `iconv-lite@0.6.3`, `is-electron@2.2.2`, `is-url@1.2.4`, `ms@2.1.3`, `node-fetch@2.7.0`, `opencollective-postinstall@2.0.3`, `progress@2.0.3`, `readable-stream@3.6.2`, `regenerator-runtime@0.13.11`, `safe-buffer@5.2.1`, `safer-buffer@2.1.2`, `string_decoder@1.3.0`, `tr46@0.0.3`, `typedarray@0.0.6`, `util-deprecate@1.0.2`, `whatwg-url@5.0.0`, `zlibjs@0.3.1` |
+| MIT | `@derhuerst/http-basic@8.2.4`, `@types/node@10.17.60`, `agent-base@6.0.2`, `bmp-js@0.1.0`, `buffer-from@1.1.2`, `commander@15.0.0`, `concat-stream@2.0.0`, `debug@4.4.3`, `encoding@0.1.13`, `env-paths@2.2.1`, `http-response-object@3.0.2`, `https-proxy-agent@5.0.1`, `iconv-lite@0.6.3`, `is-electron@2.2.2`, `is-url@1.2.4`, `ms@2.1.3`, `node-fetch@2.7.0`, `opencollective-postinstall@2.0.3`, `progress@2.0.3`, `readable-stream@3.6.2`, `regenerator-runtime@0.13.11`, `safe-buffer@5.2.1`, `safer-buffer@2.1.2`, `string_decoder@1.3.0`, `tr46@0.0.3`, `typedarray@0.0.6`, `util-deprecate@1.0.2`, `whatwg-url@5.0.0`, `zlibjs@0.3.1` |
 
 ## Electron and build tools / Electron 与构建工具
 
@@ -69,7 +72,14 @@ The repository contains the following byte-for-byte copies from the official [`t
 | Repository file | Upstream file | SHA-256 |
 | --- | --- | --- |
 | `tessdata/chi_sim.traineddata` | `chi_sim.traineddata` | `a5fcb6f0db1e1d6d8522f39db4e848f05984669172e584e8d76b6b3141e1f730` |
+| `tessdata/chi_tra.traineddata` | `chi_tra.traineddata` | `529c5b5797d64b126065cd55f2bb4c7fd7b15790798091b1ff259941a829330b` |
+| `tessdata/deu.traineddata` | `deu.traineddata` | `19d219bbb6672c869d20a9636c6816a81eb9a71796cb93ebe0cb1530e2cdb22d` |
 | `tessdata/eng.traineddata` | `eng.traineddata` | `7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2` |
+| `tessdata/fra.traineddata` | `fra.traineddata` | `ced037562e8c80c13122dece28dd477d399af80911a28791a66a63ac1e3445ca` |
+| `tessdata/jpn.traineddata` | `jpn.traineddata` | `1f5de9236d2e85f5fdf4b3c500f2d4926f8d9449f28f5394472d9e8d83b91b4d` |
+| `tessdata/kor.traineddata` | `kor.traineddata` | `6b85e11d9bbf07863b97b3523b1b112844c43e713df8b66418a081fd1060b3b2` |
+| `tessdata/por.traineddata` | `por.traineddata` | `c4932b937207a9514b7514d518b931a99938c02a28a5a5a553f8599ed58b7deb` |
+| `tessdata/spa.traineddata` | `spa.traineddata` | `6f2e04d02774a18f01bed44b1111f2cd7f3ba7ac9dc4373cd3f898a40ea6b464` |
 
 仓库包含来自官方 [`tesseract-ocr/tessdata_fast`](https://github.com/tesseract-ocr/tessdata_fast) 仓库固定提交 [`87416418657359cb625c412a48b6e1d6d41c29bd`](https://github.com/tesseract-ocr/tessdata_fast/commit/87416418657359cb625c412a48b6e1d6d41c29bd) 的逐字节一致副本，文件与 SHA-256 如上表。上游明确声明该仓库全部数据采用 Apache-2.0；对应许可证全文保存在 [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt)。若升级或替换语言数据，必须重新逐字节核验并同步更新本声明与发布清单。
 

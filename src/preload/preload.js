@@ -40,9 +40,13 @@ const C = {
   PIN_CREATE: 'pin:create', // ({ dataURL, bounds }) 在屏幕上钉一张图
   PIN_SET_STATE: 'pin:set-state', // ({ onTop?, ignoreMouse?, opacity?, locked?, title? }) 更新当前贴图窗状态
   PIN_UPDATE_CONTENT: 'pin:update-content', // ({ baseRevision, revision, dataURL }) 原子更新标注后的贴图内容
+  PIN_REPLACE_IMAGE: 'pin:replace-image', // ({ baseRevision, revision, dataURL, sourceWidth, sourceHeight, width, height }) 裁剪/旋转/翻转后原子替换图片
+  PIN_GROUP_ACTION: 'pin:group-action', // ({ action }) 分组 / 折叠或展开 / 解组
   PIN_CLOSE_READY: 'pin:close-ready', // ({ requestId, ok, error? }) 退出前已将最新标注同步到主进程
+  PIN_SYNC_READY: 'pin:sync-ready', // ({ requestId, ok, error? }) “保存全部”读取快照前的非冻结同步回执
   PIN_CMD: 'pin:cmd', // (main->pin) { cmd: 'thumb'|'passthrough-off'|'save', on? } 贴图批量指令
   PIN_START_DRAG: 'pin:start-drag', // (pin->main) 把贴图内容拖出窗口到其它应用
+  FORMULA_CREATE_PIN: 'formula:create-pin', // (formula->main) ({ dataURL }) 将本地渲染的公式 PNG 创建为贴图
 
   // ---- OCR ----
   OCR_RUN: 'ocr:run',
@@ -66,6 +70,9 @@ const C = {
   // ---- 录屏 ----
   RECORD_SAVE: 'record:save', // ({ buffer, mime, toGif, fps }) => { saved, path }
   RECORD_STATE: 'record:state', // ({ state, generation, saveAttempt }) => { ok }
+  RECORD_ACTION_START: 'record:action-start',
+  RECORD_ACTION_STOP: 'record:action-stop',
+  RECORD_ACTION_EVENT: 'record:action-event',
 
   // ---- 外部链接 ----
   OPEN_EXTERNAL: 'shell:open-external', // (url) 仅允许 http(s)，走系统浏览器
@@ -90,6 +97,7 @@ const C = {
   HISTORY_DELETE_MANY: 'history:delete-many', // (ids[]) 批量删除，一次写盘+一次广播
   HISTORY_EXPORT: 'history:export', // (id) => { saved, path }
   HISTORY_EXPORT_MANY: 'history:export-many', // (ids[]) => { saved, count, dir } 选一次目录批量导出
+  HISTORY_EXPORT_PDF: 'history:export-pdf', // (ids[]) => { saved, path, pageCount } 合并图片历史为多页 PDF
   HISTORY_CLEAR: 'history:clear',
   HISTORY_CHANGED: 'history:changed', // (main->renderer) 历史变动，刷新列表
 };
@@ -138,9 +146,13 @@ const api = {
   setPinState: (flags) => ipcRenderer.invoke(C.PIN_SET_STATE, flags),
   pinUpdateState: (flags) => ipcRenderer.invoke(C.PIN_SET_STATE, flags),
   pinUpdateContent: (payload) => ipcRenderer.invoke(C.PIN_UPDATE_CONTENT, payload),
+  pinReplaceImage: (payload) => ipcRenderer.invoke(C.PIN_REPLACE_IMAGE, payload),
+  pinGroupAction: (action) => ipcRenderer.invoke(C.PIN_GROUP_ACTION, { action }),
   pinCloseReady: (payload) => ipcRenderer.invoke(C.PIN_CLOSE_READY, payload),
+  pinSyncReady: (payload) => ipcRenderer.invoke(C.PIN_SYNC_READY, payload),
   onPinCmd: (cb) => on(C.PIN_CMD, cb),
   pinStartDrag: () => ipcRenderer.invoke(C.PIN_START_DRAG),
+  createFormulaPin: (dataURL) => ipcRenderer.invoke(C.FORMULA_CREATE_PIN, { dataURL }),
 
   // ---- OCR ----
   runOCR: (payload) => ipcRenderer.invoke(C.OCR_RUN, payload),
@@ -164,6 +176,9 @@ const api = {
   // ---- 录屏 ----
   saveRecording: (payload) => ipcRenderer.invoke(C.RECORD_SAVE, payload),
   reportRecordingState: (payload) => ipcRenderer.invoke(C.RECORD_STATE, payload),
+  startRecordingActions: () => ipcRenderer.invoke(C.RECORD_ACTION_START),
+  stopRecordingActions: () => ipcRenderer.invoke(C.RECORD_ACTION_STOP),
+  onRecordingAction: (cb) => on(C.RECORD_ACTION_EVENT, cb),
 
   // ---- 外部链接 ----
   openExternal: (url) => ipcRenderer.invoke(C.OPEN_EXTERNAL, url),
@@ -188,6 +203,7 @@ const api = {
   historyDeleteMany: (ids) => ipcRenderer.invoke(C.HISTORY_DELETE_MANY, ids),
   historyExport: (id) => ipcRenderer.invoke(C.HISTORY_EXPORT, id),
   historyExportMany: (ids) => ipcRenderer.invoke(C.HISTORY_EXPORT_MANY, ids),
+  historyExportPdf: (ids) => ipcRenderer.invoke(C.HISTORY_EXPORT_PDF, ids),
   historyClear: () => ipcRenderer.invoke(C.HISTORY_CLEAR),
   onHistoryChanged: (cb) => on(C.HISTORY_CHANGED, cb),
 };

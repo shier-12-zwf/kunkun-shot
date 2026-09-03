@@ -25,6 +25,7 @@
     关闭: '<path d="M6 6l12 12 M18 6L6 18"/>',
     勾选: '<path d="M5 12l5 5 9-11"/>',
     图片: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.6"/><path d="M5 18l5-5 3 3 3-3 4 4"/>',
+    PDF: '<path d="M6 3h8l4 4v14H6z M14 3v5h5"/><path d="M8.5 16v-5h2a1.5 1.5 0 0 1 0 3h-2 M13 16v-5h1.3c1.5 0 2.2.9 2.2 2.5S15.8 16 14.3 16z"/>',
   };
 
   // 类型元信息：键对应 item.type，名用于筛选与详情展示。
@@ -592,6 +593,11 @@
       function buildBulkPanel() {
         const box = el('div', 'kk-hist-bulk');
         const ids = Array.from(selected);
+        const selectedItems = ids.map((id) => allItems.find((item) => item.id === id)).filter(Boolean);
+        const canMergePdf = ids.length > 0
+          && ids.length <= 100
+          && selectedItems.length === ids.length
+          && selectedItems.every((item) => item.kind !== 'media');
 
         const head = el('div', 'kk-hist-detail-head');
         head.innerHTML = '<span class="eyebrow">批量操作</span>';
@@ -626,11 +632,20 @@
         const btnSelectAll = actionBtn('勾选', '全选当前', 'btn-ghost');
         const btnClearSel = actionBtn('关闭', '取消选择', 'btn-ghost');
         const btnExport = actionBtn('导出', '批量导出', 'btn-soft');
+        const btnPdf = actionBtn('PDF', '合并多页 PDF', 'btn-soft');
         const btnDel = actionBtn('删除', '批量删除', 'btn-danger');
+
+        btnPdf.disabled = !canMergePdf || typeof kkapi.historyExportPdf !== 'function';
+        if (!canMergePdf) {
+          btnPdf.title = ids.length > 100
+            ? '多页 PDF 最多合并 100 张图片'
+            : '多页 PDF 只能合并图片，请取消选中的录屏';
+        }
 
         actions.appendChild(btnSelectAll);
         actions.appendChild(btnClearSel);
         actions.appendChild(btnExport);
+        actions.appendChild(btnPdf);
         actions.appendChild(btnDel);
 
         box.appendChild(head);
@@ -668,6 +683,20 @@
             }
           } finally {
             btnExport.disabled = false;
+          }
+        });
+
+        btnPdf.addEventListener('click', async () => {
+          if (!canMergePdf || typeof kkapi.historyExportPdf !== 'function') return;
+          btnPdf.disabled = true;
+          try {
+            const res = await kkapi.historyExportPdf(ids);
+            if (res && res.saved) flashBtn(btnPdf, '已合并 ' + res.pageCount + ' 页');
+            else flashBtn(btnPdf, res && res.error ? '合并失败' : '已取消');
+          } catch (_) {
+            flashBtn(btnPdf, '合并失败');
+          } finally {
+            btnPdf.disabled = !canMergePdf;
           }
         });
 

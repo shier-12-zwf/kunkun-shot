@@ -60,7 +60,7 @@ function readParsedConfigFromDisk() {
 }
 
 // 配置 schema 收紧时要先做有边界的版本迁移，再进入严格校验。
-// v0.2.0 之前 OCR 语言是自由文本；现在发布包只携带中英三种组合。旧值不可用时
+// v0.2.0 之前 OCR 语言是自由文本；现在发布包只接受确定随包携带的离线组合。旧值不可用时
 // 只回退这一个字段，不能因此丢掉用户的快捷键、保存目录、主题或密钥。
 function migrateDiskConfig(parsed) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {

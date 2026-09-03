@@ -12,5 +12,8 @@
   <!-- Hardened Runtime 下访问麦克风 / Core Audio 输入必须显式声明。 -->
   <key>com.apple.security.device.audio-input</key>
   <true/>
+  <!-- 摄像头画中画由用户在每次录屏开始前显式开启。 -->
+  <key>com.apple.security.device.camera</key>
+  <true/>
 </dict>
 </plist>

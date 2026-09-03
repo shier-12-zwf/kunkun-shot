@@ -1,7 +1,7 @@
 {
   "name": "kunkun-shot",
   "productName": "困困截图工具",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "一款 macOS 优先的截图工具：支持区域截图与标注、贴图钉屏、长截图、OCR、录屏，以及可选的 AI 图片问答与文字处理。",
   "main": "src/main/main.js",
   "author": "困困",
@@ -29,6 +29,7 @@
   "dependencies": {
     "ffmpeg-static": "^5.2.0",
     "jsqr": "^1.4.0",
+    "katex": "0.18.5",
     "tesseract.js": "^5.1.1"
   },
   "devDependencies": {
@@ -94,6 +95,7 @@
         "NSScreenCaptureUsageDescription": "困困截图工具需要录制屏幕，用于区域截图、长截图与录屏。",
         "NSAudioCaptureUsageDescription": "困困截图工具仅在你开启系统声音录制时采集设备正在播放的音频。",
         "NSMicrophoneUsageDescription": "困困截图工具仅在你开启麦克风录制时采集麦克风声音。",
+        "NSCameraUsageDescription": "困困截图工具仅在你开启摄像头画中画时采集摄像头画面。",
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": false
         }

@@ -35,6 +35,12 @@ function loadMainLifecycleFactory() {
       ].includes(request)) {
         return originalLoad.call(this, request, parent, isMain);
       }
+      if (request === './record-action-monitor') {
+        return {
+          createRecordActionMonitor: () => ({ stop() {}, stopAll() {} }),
+          createRecordActionOwnerRegistry: () => ({ watch: () => () => {}, release() {} }),
+        };
+      }
       return request === './windows' ? fakeWindows : {};
     }
     return originalLoad.call(this, request, parent, isMain);

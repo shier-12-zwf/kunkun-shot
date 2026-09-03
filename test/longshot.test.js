@@ -47,7 +47,7 @@ test('horizontal longshot waits for frame decoding before rotating it', async ()
   const result = await resultPromise;
 
   assert.equal(canvasCreated, true);
-  assert.deepEqual(result, { canvas: rotatedCanvas, width: 180, height: 320 });
+  assert.deepEqual(result, { canvas: rotatedCanvas, ctx: rotatedContext, width: 180, height: 320 });
   assert.equal(rotatedCanvas.width, 180);
   assert.equal(rotatedCanvas.height, 320);
   assert.deepEqual(calls, [

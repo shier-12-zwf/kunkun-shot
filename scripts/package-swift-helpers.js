@@ -91,12 +91,16 @@ function copyPrebuiltSwiftHelper({ helper, prebuiltHelperDir, destinationPath, e
   }
 }
 
-async function compileThinSwiftHelper({ name, source, arch, outputPath }) {
+async function compileThinSwiftHelper({ name, source, language, arch, outputPath }) {
   const target = TARGET_TRIPLES[arch];
-  if (!target) throw new Error(`Swift helper ${name} 无法为 ${arch} 编译。`);
+  const compilerLanguage = language === undefined ? 'swift' : language;
+  if (compilerLanguage !== 'swift' && compilerLanguage !== 'c') {
+    throw new Error(`native helper ${name} 的编译语言无效：${String(compilerLanguage)}`);
+  }
+  if (!target) throw new Error(`native helper ${name} 无法为 ${arch} 编译。`);
 
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kunkun-swift-build-'));
-  const sourcePath = path.join(workDir, `${name}.swift`);
+  const sourcePath = path.join(workDir, `${name}.${compilerLanguage === 'c' ? 'c' : 'swift'}`);
   const compiledPath = path.join(workDir, name);
   try {
     fs.writeFileSync(sourcePath, source, { encoding: 'utf8', mode: 0o600 });
@@ -106,17 +110,22 @@ async function compileThinSwiftHelper({ name, source, arch, outputPath }) {
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }
     ).trim();
     if (!sdkPath) throw new Error('xcrun 未返回 macOS SDK 路径。');
-    execFileSync(
-      '/usr/bin/swiftc',
-      ['-O', '-target', target, '-sdk', sdkPath, sourcePath, '-o', compiledPath],
-      { stdio: ['ignore', 'pipe', 'pipe'], timeout: 180000 }
-    );
+    const command = compilerLanguage === 'c' ? '/usr/bin/clang' : '/usr/bin/swiftc';
+    const args = compilerLanguage === 'c'
+      ? [
+          '-O2', '-target', target, '-isysroot', sdkPath,
+          '-framework', 'ApplicationServices',
+          '-framework', 'CoreFoundation',
+          sourcePath, '-o', compiledPath
+        ]
+      : ['-O', '-target', target, '-sdk', sdkPath, sourcePath, '-o', compiledPath];
+    execFileSync(command, args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 180000 });
     fs.copyFileSync(compiledPath, outputPath);
     fs.chmodSync(outputPath, 0o755);
   } catch (error) {
     const stderr = error && error.stderr ? String(error.stderr).trim() : '';
     throw new Error(
-      `Swift helper ${name} (${arch}) 编译失败${stderr ? `：${stderr}` : ''}`,
+      `${compilerLanguage === 'c' ? 'C' : 'Swift'} helper ${name} (${arch}) 编译失败${stderr ? `：${stderr}` : ''}`,
       { cause: error }
     );
   } finally {
@@ -142,13 +151,13 @@ async function packageSwiftHelpers(context, appContentsDir, options) {
     names.add(helper.name);
 
     const destinationPath = path.join(destinationDir, helperFilename(helper.name, helper.source));
-    if (prebuiltHelperDir) {
-      copyPrebuiltSwiftHelper({
-        helper,
-        prebuiltHelperDir,
-        destinationPath,
-        expected
-      });
+    let usedPrebuilt = false;
+    const prebuiltPath = prebuiltHelperDir
+      ? path.join(prebuiltHelperDir, helperFilename(helper.name, helper.source))
+      : null;
+    if (prebuiltPath && fs.existsSync(prebuiltPath)) {
+      copyPrebuiltSwiftHelper({ helper, prebuiltHelperDir, destinationPath, expected });
+      usedPrebuilt = true;
     } else if (arch !== 'universal') {
       const suffix = `${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
       const temporaryPath = `${destinationPath}.${suffix}.tmp`;
@@ -156,6 +165,7 @@ async function packageSwiftHelpers(context, appContentsDir, options) {
         await compileThin({
           name: helper.name,
           source: helper.source,
+          language: helper.language,
           arch,
           outputPath: temporaryPath
         });
@@ -171,7 +181,7 @@ async function packageSwiftHelpers(context, appContentsDir, options) {
     }
 
     assertPackagedHelper(destinationPath, expected, helper.name, {
-      allowAdditionalArchitectures: Boolean(prebuiltHelperDir)
+      allowAdditionalArchitectures: usedPrebuilt
     });
     packagedPaths.push(destinationPath);
   }

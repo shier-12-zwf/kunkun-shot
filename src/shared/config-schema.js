@@ -1,6 +1,24 @@
 // 默认配置。config.js 会用它做深合并，保证升级后新增字段也有默认值。
 // 仅列出发布包确定携带的 tessdata 可组成的产品级选项；设置与 IPC 共用这份白名单。
-const SUPPORTED_OCR_LANGUAGES = Object.freeze(['chi_sim+eng', 'chi_sim', 'eng']);
+const SUPPORTED_OCR_LANGUAGES = Object.freeze([
+  'chi_sim+eng',
+  'chi_tra+eng',
+  'jpn+eng',
+  'kor+eng',
+  'fra+eng',
+  'deu+eng',
+  'spa+eng',
+  'por+eng',
+  'chi_sim',
+  'chi_tra',
+  'eng',
+  'jpn',
+  'kor',
+  'fra',
+  'deu',
+  'spa',
+  'por',
+]);
 
 const DEFAULT_CONFIG = {
   shortcuts: {
@@ -74,11 +92,13 @@ const DEFAULT_CONFIG = {
     copyAfterCapture: false, // 截完图自动复制到剪贴板
     autoPin: false,
     autoSaveHistory: false, // 是否把每张截图自动存入历史；关=只存手动「保存到本地」的
+    fileNameTemplate: '困困截图-{timestamp}', // 扩展名由导出格式决定，保持旧版默认命名
     exportFormat: 'png', // png | jpeg | webp | bmp | avif | pdf；旧配置缺失时保持 PNG 行为
     quality: 90, // 1–100；JPEG/WebP/AVIF/PDF 生效，PNG/BMP 无损格式保留但不使用
   },
   recording: {
     fps: 12,
+    fileNameTemplate: '困困录屏-{timestamp}', // 录屏与截图分开配置，扩展名由实际导出器决定
     toGif: true, // 同时导出 GIF
     systemAudio: false, // 显式开启后录制系统声音；旧配置缺失时保持无声录制
     microphone: false, // 显式开启后请求麦克风权限并混入录制

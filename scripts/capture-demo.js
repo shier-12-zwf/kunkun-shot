@@ -189,7 +189,7 @@ const images = ${images};
 const viewport = ${viewport};
 const appVersion = ${appVersion};
 const listeners = { stream: [], history: [], nav: [] };
-const telemetry = { finishCapture: 0, cancelCapture: 0 };
+const telemetry = { finishCapture: 0, cancelCapture: 0, lastCapture: null };
 const config = {
   shortcuts: {
     capture: 'CommandOrControl+Shift+A',
@@ -261,7 +261,11 @@ const api = {
   captureTimed: async () => ({ ok: true }),
   captureRegion: async () => images[0],
   getSources: async () => [],
-  finishCapture: async () => { telemetry.finishCapture += 1; return { ok: true }; },
+  finishCapture: async (result) => {
+    telemetry.finishCapture += 1;
+    telemetry.lastCapture = result ? clone(result) : null;
+    return { ok: true };
+  },
   cancelCapture: async () => { telemetry.cancelCapture += 1; return { ok: true }; },
   getDemoTelemetry: async () => clone(telemetry),
   copyImage: async () => ({ ok: true }),
@@ -389,6 +393,127 @@ async function dispatchMouse(win, selector, type, x, y, buttons) {
       button: 0,
       buttons: ${Number(buttons)}
     }));
+  })()`, true);
+}
+
+async function overlayAnnotationMetrics(win) {
+  return win.webContents.executeJavaScript(`(() => {
+    const canvas = document.getElementById('annoCanvas');
+    const ctx = canvas && canvas.getContext('2d');
+    if (!canvas || !ctx) throw new Error('Missing annotation canvas');
+    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let minX = canvas.width;
+    let minY = canvas.height;
+    let maxX = -1;
+    let maxY = -1;
+    let alphaPixels = 0;
+    let hash = 2166136261;
+    for (let offset = 0, index = 0; offset < pixels.length; offset += 4, index += 1) {
+      const alpha = pixels[offset + 3];
+      hash = Math.imul(hash ^ pixels[offset], 16777619);
+      hash = Math.imul(hash ^ pixels[offset + 1], 16777619);
+      hash = Math.imul(hash ^ pixels[offset + 2], 16777619);
+      hash = Math.imul(hash ^ alpha, 16777619);
+      if (alpha <= 8) continue;
+      const x = index % canvas.width;
+      const y = Math.floor(index / canvas.width);
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+      alphaPixels += 1;
+    }
+    return {
+      width: canvas.width,
+      height: canvas.height,
+      alphaPixels,
+      hash: hash >>> 0,
+      bounds: maxX < 0 ? null : {
+        x: minX,
+        y: minY,
+        width: maxX - minX + 1,
+        height: maxY - minY + 1
+      }
+    };
+  })()`, true);
+}
+
+async function waitForOverlayExport(win) {
+  let status = null;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    status = await win.webContents.executeJavaScript(`window.kkapi.getDemoTelemetry().then((telemetry) => ({
+      finishCapture: telemetry.finishCapture,
+      cancelCapture: telemetry.cancelCapture,
+      hasCapture: Boolean(telemetry.lastCapture && telemetry.lastCapture.imageDataURL)
+    }))`, true);
+    if (status.finishCapture === 1 && status.cancelCapture === 1 && status.hasCapture) return status;
+    await delay(25);
+  }
+  throw new Error(`Overlay export did not reach the capture bridge: ${JSON.stringify(status)}`);
+}
+
+async function inspectOverlayExport(win) {
+  return win.webContents.executeJavaScript(`(async () => {
+    const telemetry = await window.kkapi.getDemoTelemetry();
+    const capture = telemetry.lastCapture;
+    const image = await new Promise((resolve, reject) => {
+      const node = new Image();
+      node.onload = () => resolve(node);
+      node.onerror = () => reject(new Error('Unable to decode exported overlay image'));
+      node.src = capture.imageDataURL;
+    });
+    const actual = document.createElement('canvas');
+    actual.width = image.naturalWidth;
+    actual.height = image.naturalHeight;
+    const actualCtx = actual.getContext('2d');
+    actualCtx.drawImage(image, 0, 0);
+
+    const clean = document.createElement('canvas');
+    clean.width = image.naturalWidth;
+    clean.height = image.naturalHeight;
+    const cleanCtx = clean.getContext('2d');
+    const source = capture.sourceRect;
+    cleanCtx.drawImage(
+      document.getElementById('bgCanvas'),
+      source.x, source.y, source.width, source.height,
+      0, 0, clean.width, clean.height
+    );
+
+    const expected = document.createElement('canvas');
+    expected.width = image.naturalWidth;
+    expected.height = image.naturalHeight;
+    const expectedCtx = expected.getContext('2d');
+    expectedCtx.drawImage(clean, 0, 0);
+    const annotation = document.getElementById('annoCanvas');
+    expectedCtx.drawImage(annotation, 0, 0, annotation.width, annotation.height, 0, 0, expected.width, expected.height);
+
+    const actualPixels = actualCtx.getImageData(0, 0, actual.width, actual.height).data;
+    const cleanPixels = cleanCtx.getImageData(0, 0, clean.width, clean.height).data;
+    const expectedPixels = expectedCtx.getImageData(0, 0, expected.width, expected.height).data;
+    let changedPixels = 0;
+    let previewMismatchPixels = 0;
+    for (let offset = 0; offset < actualPixels.length; offset += 4) {
+      const cleanDelta = Math.abs(actualPixels[offset] - cleanPixels[offset])
+        + Math.abs(actualPixels[offset + 1] - cleanPixels[offset + 1])
+        + Math.abs(actualPixels[offset + 2] - cleanPixels[offset + 2])
+        + Math.abs(actualPixels[offset + 3] - cleanPixels[offset + 3]);
+      if (cleanDelta > 20) changedPixels += 1;
+      const previewDelta = Math.abs(actualPixels[offset] - expectedPixels[offset])
+        + Math.abs(actualPixels[offset + 1] - expectedPixels[offset + 1])
+        + Math.abs(actualPixels[offset + 2] - expectedPixels[offset + 2])
+        + Math.abs(actualPixels[offset + 3] - expectedPixels[offset + 3]);
+      if (previewDelta > 20) previewMismatchPixels += 1;
+    }
+    return {
+      action: capture.action,
+      width: image.naturalWidth,
+      height: image.naturalHeight,
+      sourceRect: capture.sourceRect,
+      changedPixels,
+      previewMismatchPixels,
+      finishCapture: telemetry.finishCapture,
+      cancelCapture: telemetry.cancelCapture
+    };
   })()`, true);
 }
 
@@ -676,6 +801,285 @@ async function probeOverlayToolbar() {
   }
 }
 
+async function probeEffectAnnotations() {
+  const win = await createDemoWindow('overlay', path.join('overlay', 'overlay.html'), {
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+  });
+  try {
+    await waitFor(win, `document.getElementById('bgCanvas') && document.getElementById('bgCanvas').width === 1600`);
+    const start = {
+      x: Math.round(VIEWPORT.width * 0.12),
+      y: Math.round(VIEWPORT.height * 0.12),
+    };
+    const end = {
+      x: Math.round(VIEWPORT.width * 0.76),
+      y: Math.round(VIEWPORT.height * 0.78),
+    };
+    const width = end.x - start.x;
+    const height = end.y - start.y;
+    await dispatchMouse(win, null, 'mousedown', start.x, start.y, 1);
+    await dispatchMouse(win, null, 'mousemove', end.x, end.y, 1);
+    await dispatchMouse(win, null, 'mouseup', end.x, end.y, 0);
+    await waitFor(win, `!document.getElementById('toolbar').hidden`);
+
+    const blurStart = {
+      x: start.x + Math.round(width * 0.22),
+      y: start.y + Math.round(height * 0.2),
+    };
+    const blurEnd = {
+      x: start.x + Math.round(width * 0.58),
+      y: blurStart.y + Math.max(8, Math.round(height * 0.03)),
+    };
+    await win.webContents.executeJavaScript(`document.querySelector('[data-tool="blur"]').click()`, true);
+    await dispatchMouse(win, '#annoCanvas', 'mousedown', blurStart.x, blurStart.y, 1);
+    for (let step = 1; step <= 4; step += 1) {
+      await dispatchMouse(
+        win,
+        '#annoCanvas',
+        'mousemove',
+        Math.round(blurStart.x + ((blurEnd.x - blurStart.x) * step) / 4),
+        Math.round(blurStart.y + ((blurEnd.y - blurStart.y) * step) / 4),
+        1,
+      );
+    }
+    await dispatchMouse(win, '#annoCanvas', 'mouseup', blurEnd.x, blurEnd.y, 0);
+    const afterBlur = await overlayAnnotationMetrics(win);
+
+    const spotlightStart = {
+      x: start.x + Math.round(width * 0.54),
+      y: start.y + Math.round(height * 0.2),
+    };
+    const spotlightEnd = {
+      x: start.x + Math.round(width * 0.84),
+      y: start.y + Math.round(height * 0.58),
+    };
+    await win.webContents.executeJavaScript(`document.querySelector('[data-tool="spotlight"]').click()`, true);
+    await dispatchMouse(win, '#annoCanvas', 'mousedown', spotlightStart.x, spotlightStart.y, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mousemove', spotlightEnd.x, spotlightEnd.y, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mouseup', spotlightEnd.x, spotlightEnd.y, 0);
+    const afterSpotlight = await overlayAnnotationMetrics(win);
+
+    const watermarkPoint = {
+      x: start.x + Math.round(width * 0.27),
+      y: start.y + Math.round(height * 0.73),
+    };
+    await win.webContents.executeJavaScript(`document.querySelector('[data-tool="watermark"]').click()`, true);
+    await dispatchMouse(win, '#annoCanvas', 'mousedown', watermarkPoint.x, watermarkPoint.y, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mouseup', watermarkPoint.x, watermarkPoint.y, 0);
+    const watermarkEditor = await win.webContents.executeJavaScript(`(() => {
+      const input = document.getElementById('textInput');
+      const wasVisible = !input.hidden;
+      input.value = 'CONFIDENTIAL · 困困';
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      return { wasVisible, committed: input.hidden };
+    })()`, true);
+    const afterWatermark = await overlayAnnotationMetrics(win);
+
+    await win.webContents.executeJavaScript(`document.getElementById('btnUndo').click()`, true);
+    const afterUndo = await overlayAnnotationMetrics(win);
+    await win.webContents.executeJavaScript(`document.getElementById('btnRedo').click()`, true);
+    const afterRedo = await overlayAnnotationMetrics(win);
+
+    await win.webContents.executeJavaScript(`document.querySelector('[data-action="copy"]').click()`, true);
+    await waitForOverlayExport(win);
+    const exported = await inspectOverlayExport(win);
+
+    const failures = [];
+    if (!afterBlur.bounds || afterBlur.alphaPixels < 300) {
+      failures.push(`blur brush did not render a persistent masked effect: ${JSON.stringify(afterBlur)}`);
+    }
+    if (afterSpotlight.hash === afterBlur.hash || afterSpotlight.alphaPixels < width * height * 0.5) {
+      failures.push(`spotlight did not render a dimmed layer with a cutout: ${JSON.stringify(afterSpotlight)}`);
+    }
+    if (!watermarkEditor.wasVisible || !watermarkEditor.committed || afterWatermark.hash === afterSpotlight.hash) {
+      failures.push(`watermark editor did not commit rotated text: ${JSON.stringify(watermarkEditor)}`);
+    }
+    if (afterUndo.hash !== afterSpotlight.hash) {
+      failures.push(`effect undo did not restore the pre-watermark preview: ${afterUndo.hash}/${afterSpotlight.hash}`);
+    }
+    if (afterRedo.hash !== afterWatermark.hash) {
+      failures.push(`effect redo did not restore the watermark preview: ${afterRedo.hash}/${afterWatermark.hash}`);
+    }
+    const exportedPixels = exported.width * exported.height;
+    if (exported.action !== 'copy' || exported.changedPixels < exportedPixels * 0.35
+      || exported.previewMismatchPixels > exportedPixels * 0.015) {
+      failures.push(`effect preview/export diverged: ${JSON.stringify(exported)}`);
+    }
+    if (failures.length) throw new Error(failures.join(' | '));
+
+    return {
+      afterBlur,
+      afterSpotlight,
+      watermarkEditor,
+      watermarkHashes: { before: afterSpotlight.hash, after: afterWatermark.hash },
+      undoRedo: { undoHash: afterUndo.hash, redoHash: afterRedo.hash },
+      exported,
+    };
+  } finally {
+    win.destroy();
+  }
+}
+
+// Keep this as a real renderer probe instead of a source-code contract test:
+// the persistent magnifier must survive the same mouse, history, canvas, and
+// export path that a user exercises in the production overlay.
+async function probeMagnifierAnnotation() {
+  const win = await createDemoWindow('overlay', path.join('overlay', 'overlay.html'), {
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+  });
+  try {
+    await waitFor(win, `document.getElementById('bgCanvas') && document.getElementById('bgCanvas').width === 1600`);
+
+    const selectionStart = {
+      x: Math.round(VIEWPORT.width * 0.18),
+      y: Math.round(VIEWPORT.height * 0.16),
+    };
+    const selectionEnd = {
+      x: Math.round(VIEWPORT.width * 0.68),
+      y: Math.round(VIEWPORT.height * 0.68),
+    };
+    const selectionWidth = selectionEnd.x - selectionStart.x;
+    const selectionHeight = selectionEnd.y - selectionStart.y;
+    const lensSize = Math.round(Math.min(170, selectionWidth * 0.22, selectionHeight * 0.32));
+    const lensStart = {
+      x: selectionStart.x + Math.round(selectionWidth * 0.25),
+      y: selectionStart.y + Math.round(selectionHeight * 0.2),
+    };
+    const lensEnd = { x: lensStart.x + lensSize, y: lensStart.y + lensSize };
+    const lensCenter = {
+      x: Math.round((lensStart.x + lensEnd.x) / 2),
+      y: Math.round((lensStart.y + lensEnd.y) / 2),
+    };
+    const moveDelta = {
+      x: Math.round(Math.min(70, selectionWidth * 0.12)),
+      y: Math.round(Math.min(50, selectionHeight * 0.1)),
+    };
+    const resizeDelta = Math.round(Math.min(50, lensSize * 0.35));
+
+    await dispatchMouse(win, null, 'mousedown', selectionStart.x, selectionStart.y, 1);
+    await dispatchMouse(win, null, 'mousemove', selectionEnd.x, selectionEnd.y, 1);
+    await dispatchMouse(win, null, 'mouseup', selectionEnd.x, selectionEnd.y, 0);
+    await waitFor(win, `!document.getElementById('toolbar').hidden`);
+
+    await win.webContents.executeJavaScript(`document.querySelector('[data-tool="magnifier"]').click()`, true);
+    await dispatchMouse(win, '#annoCanvas', 'mousedown', lensStart.x, lensStart.y, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mousemove', lensEnd.x, lensEnd.y, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mouseup', lensEnd.x, lensEnd.y, 0);
+    const drawn = await overlayAnnotationMetrics(win);
+
+    await win.webContents.executeJavaScript(`document.querySelector('[data-tool="select"]').click()`, true);
+    await dispatchMouse(win, '#annoCanvas', 'mousedown', lensCenter.x, lensCenter.y, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mouseup', lensCenter.x, lensCenter.y, 0);
+    const beforeZoom = await overlayAnnotationMetrics(win);
+    const zoomInteraction = await win.webContents.executeJavaScript(`(() => {
+      const group = document.getElementById('magnifierZoomGroup');
+      const select = document.getElementById('magnifierZoom');
+      const canvas = document.getElementById('annoCanvas');
+      const ctx = canvas.getContext('2d');
+      const before = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      select.value = '4';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      const after = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let changedPixels = 0;
+      for (let offset = 0; offset < before.length; offset += 4) {
+        const delta = Math.abs(before[offset] - after[offset])
+          + Math.abs(before[offset + 1] - after[offset + 1])
+          + Math.abs(before[offset + 2] - after[offset + 2])
+          + Math.abs(before[offset + 3] - after[offset + 3]);
+        if (delta > 12) changedPixels += 1;
+      }
+      return { visible: !group.hidden, value: select.value, changedPixels };
+    })()`, true);
+    const afterZoom = await overlayAnnotationMetrics(win);
+
+    // Zoom edits are ordinary annotation history entries, and must round-trip
+    // without replacing the magnifier with a transient picker overlay.
+    await win.webContents.executeJavaScript(`document.getElementById('btnUndo').click()`, true);
+    await dispatchMouse(win, '#annoCanvas', 'mousedown', lensCenter.x, lensCenter.y, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mouseup', lensCenter.x, lensCenter.y, 0);
+    const afterUndo = await overlayAnnotationMetrics(win);
+    await win.webContents.executeJavaScript(`document.getElementById('btnRedo').click()`, true);
+    await dispatchMouse(win, '#annoCanvas', 'mousedown', lensCenter.x, lensCenter.y, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mouseup', lensCenter.x, lensCenter.y, 0);
+    const afterRedo = await overlayAnnotationMetrics(win);
+
+    const movedCenter = {
+      x: lensCenter.x + moveDelta.x,
+      y: lensCenter.y + moveDelta.y,
+    };
+    const beforeMove = afterRedo;
+    await dispatchMouse(win, '#annoCanvas', 'mousedown', lensCenter.x, lensCenter.y, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mousemove', movedCenter.x, movedCenter.y, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mouseup', movedCenter.x, movedCenter.y, 0);
+    const afterMove = await overlayAnnotationMetrics(win);
+
+    // Eight-handle selection chrome is padded two pixels outside the shape.
+    const resizeStart = {
+      x: lensEnd.x + moveDelta.x + 2,
+      y: lensEnd.y + moveDelta.y + 2,
+    };
+    const resizeEnd = {
+      x: resizeStart.x + resizeDelta,
+      y: resizeStart.y + resizeDelta,
+    };
+    await dispatchMouse(win, '#annoCanvas', 'mousedown', resizeStart.x, resizeStart.y, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mousemove', resizeEnd.x, resizeEnd.y, 1);
+    await dispatchMouse(win, '#annoCanvas', 'mouseup', resizeEnd.x, resizeEnd.y, 0);
+    const afterResize = await overlayAnnotationMetrics(win);
+
+    await win.webContents.executeJavaScript(`document.querySelector('[data-action="copy"]').click()`, true);
+    await waitForOverlayExport(win);
+    const exported = await inspectOverlayExport(win);
+
+    const failures = [];
+    const expectedLensX = lensStart.x - selectionStart.x;
+    const expectedLensY = lensStart.y - selectionStart.y;
+    if (!drawn.bounds || drawn.alphaPixels < Math.max(300, lensSize * lensSize * 0.25)) {
+      failures.push(`magnifier did not render a persistent lens: ${JSON.stringify(drawn)}`);
+    } else if (Math.abs(drawn.bounds.x - expectedLensX) > 15 || Math.abs(drawn.bounds.y - expectedLensY) > 15) {
+      failures.push(`magnifier rendered at the wrong canvas position: ${JSON.stringify(drawn.bounds)}`);
+    }
+    if (!zoomInteraction.visible || zoomInteraction.value !== '4' || zoomInteraction.changedPixels < 100) {
+      failures.push(`magnifier zoom control did not update rendered pixels: ${JSON.stringify(zoomInteraction)}`);
+    }
+    if (afterZoom.hash === beforeZoom.hash) failures.push('magnifier zoom left the preview unchanged');
+    if (afterUndo.hash !== beforeZoom.hash) failures.push(`magnifier zoom undo was not lossless: ${afterUndo.hash}/${beforeZoom.hash}`);
+    if (afterRedo.hash !== afterZoom.hash) failures.push(`magnifier zoom redo was not lossless: ${afterRedo.hash}/${afterZoom.hash}`);
+    if (!beforeMove.bounds || !afterMove.bounds
+      || Math.abs((afterMove.bounds.x - beforeMove.bounds.x) - moveDelta.x) > 4
+      || Math.abs((afterMove.bounds.y - beforeMove.bounds.y) - moveDelta.y) > 4) {
+      failures.push(`magnifier drag did not move the rendered lens: ${JSON.stringify({ before: beforeMove.bounds, after: afterMove.bounds, expected: moveDelta })}`);
+    }
+    if (!afterMove.bounds || !afterResize.bounds
+      || afterResize.bounds.width - afterMove.bounds.width < resizeDelta - 5
+      || afterResize.bounds.height - afterMove.bounds.height < resizeDelta - 5) {
+      failures.push(`magnifier resize did not enlarge the rendered lens: ${JSON.stringify({ before: afterMove.bounds, after: afterResize.bounds, expected: resizeDelta })}`);
+    }
+    if (exported.action !== 'copy' || exported.finishCapture !== 1 || exported.cancelCapture !== 1
+      || exported.width !== exported.sourceRect.width || exported.height !== exported.sourceRect.height
+      || exported.changedPixels < 500) {
+      failures.push(`magnifier was not present in the final exported crop: ${JSON.stringify(exported)}`);
+    }
+    if (failures.length) throw new Error(failures.join(' | '));
+
+    return {
+      lensSize,
+      drawn,
+      zoomInteraction,
+      undoRedo: { undoHash: afterUndo.hash, redoHash: afterRedo.hash },
+      move: { expected: moveDelta, before: beforeMove.bounds, after: afterMove.bounds },
+      resize: { expected: resizeDelta, before: afterMove.bounds, after: afterResize.bounds },
+      exported,
+    };
+  } finally {
+    win.destroy();
+  }
+}
+
 async function captureAi(frames) {
   const win = await createDemoWindow('ai', path.join('main', 'main.html'));
   try {
@@ -806,8 +1210,10 @@ async function main() {
   fs.writeFileSync(PRELOAD_PATH, createPreloadSource(), { mode: 0o600 });
   await app.whenReady();
   if (process.argv.includes('--check-overlay-toolbar')) {
-    const report = await probeOverlayToolbar();
-    process.stdout.write(`OVERLAY_TOOLBAR_CHECK ${JSON.stringify(report)}\n`);
+    const toolbar = await probeOverlayToolbar();
+    const effects = await probeEffectAnnotations();
+    const magnifier = await probeMagnifierAnnotation();
+    process.stdout.write(`OVERLAY_TOOLBAR_CHECK ${JSON.stringify({ toolbar, effects, magnifier })}\n`);
     return;
   }
   const frames = [];

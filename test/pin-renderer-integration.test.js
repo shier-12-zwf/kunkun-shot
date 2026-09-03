@@ -9,9 +9,11 @@ const source = fs.readFileSync(path.join(pinDir, 'pin.js'), 'utf8');
 
 test('pin renderer exposes the complete annotation UI and loads its model before the controller', () => {
   const contentIndex = html.indexOf('pin-content-update.js');
+  const imageLoaderIndex = html.indexOf('pin-image-loader.js');
   const modelIndex = html.indexOf('pin-annotations.js');
   const controllerIndex = html.indexOf('pin.js');
   assert.ok(contentIndex >= 0 && contentIndex < controllerIndex, 'ordered content helper must load before pin.js');
+  assert.ok(imageLoaderIndex >= 0 && imageLoaderIndex < controllerIndex, 'image loader must load before pin.js');
   assert.ok(modelIndex >= 0 && modelIndex < controllerIndex, 'annotation model must load before pin.js');
   assert.match(html, /id="pinAnnotationCanvas"/);
   assert.match(html, /id="btnAnnotate"/);
@@ -21,6 +23,16 @@ test('pin renderer exposes the complete annotation UI and loads its model before
   for (const action of ['undo', 'redo', 'clear']) {
     assert.match(html, new RegExp(`data-pin-edit="${action}"`));
   }
+});
+
+test('pin image decoding has a persistent retry state and gates image actions until ready', () => {
+  assert.match(html, /id="pinImageStatus"/);
+  assert.match(html, /id="btnRetryImage"/);
+  assert.match(source, /createPinImageLoader/);
+  assert.match(source, /state\.imageReady/);
+  assert.match(source, /setImageActionsEnabled/);
+  assert.match(source, /imageLoader\.retry\(\)/);
+  assert.doesNotMatch(source, /state\.dataURL\s*=\s*payload\.dataURL;[\s\S]{0,160}imgEl\.src\s*=\s*payload\.dataURL/);
 });
 
 test('copy and save export the composed image rather than the original data URL', () => {

@@ -3,6 +3,11 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const media = require('./media');
 const tempFiles = require('./temp-files');
+const {
+  DEFAULT_SCREENSHOT_TEMPLATE,
+  buildFilename,
+  nextAvailablePath,
+} = require('./filename-template');
 
 const SUPPORTED_IMAGE_FORMATS = Object.freeze(['png', 'jpeg', 'webp', 'bmp', 'avif', 'pdf']);
 const EXTENSION_FORMATS = Object.freeze({
@@ -38,6 +43,8 @@ const MIME_EXTENSIONS = Object.freeze({
   'image/bmp': 'bmp',
   'image/avif': 'avif',
 });
+const MAX_PDF_PAGES = 100;
+const MAX_PDF_TOTAL_INPUT_BYTES = 256 * 1024 * 1024;
 
 function listSupportedImageFormats() {
   return [...SUPPORTED_IMAGE_FORMATS];
@@ -152,10 +159,22 @@ async function quickSaveImage(options, dependencies) {
   }
   const preferences = normalizeImageExportPreferences(opts.config);
   const timestamp = Number.isFinite(opts.timestamp) ? opts.timestamp : Date.now();
-  const outputPath = path.join(
-    opts.defaultDirectory,
-    `困困截图-${timestamp}.${preferredExtensionForFormat(preferences.format)}`,
-  );
+  const captureConfig = opts.config && opts.config.capture && typeof opts.config.capture === 'object'
+    ? opts.config.capture
+    : {};
+  const filename = buildFilename({
+    template: captureConfig.fileNameTemplate || DEFAULT_SCREENSHOT_TEMPLATE,
+    extension: preferredExtensionForFormat(preferences.format),
+    now: timestamp,
+    type: opts.type || 'screenshot',
+    index: opts.index == null ? 1 : opts.index,
+    width: opts.width == null ? 0 : opts.width,
+    height: opts.height == null ? 0 : opts.height,
+  });
+  const outputPath = nextAvailablePath(opts.defaultDirectory, filename, {
+    existsSync: deps.existsSync,
+    reserved: deps.reserved,
+  });
   await exportImageApi({
     dataURL: opts.dataURL,
     outputPath,
@@ -285,24 +304,35 @@ function pdfObject(id, body) {
   return Buffer.concat([Buffer.from(`${id} 0 obj\n`, 'ascii'), bodyBuffer, Buffer.from('\nendobj\n', 'ascii')]);
 }
 
-function createSingleImagePdf(jpeg) {
-  const { width, height } = readJpegDimensions(jpeg);
-  const draw = Buffer.from(`q\n${width} 0 0 ${height} 0 0 cm\n/Im0 Do\nQ\n`, 'ascii');
+function createMultiImagePdf(jpegs) {
+  if (!Array.isArray(jpegs) || !jpegs.length || jpegs.length > MAX_PDF_PAGES) {
+    throw new Error(`PDF 页数无效（最多 ${MAX_PDF_PAGES} 页）。`);
+  }
+  const pages = jpegs.map((jpeg) => ({ jpeg, ...readJpegDimensions(jpeg) }));
+  const pageIds = pages.map((_page, index) => 3 + index * 3);
   const objects = [
     pdfObject(1, '<< /Type /Catalog /Pages 2 0 R >>'),
-    pdfObject(2, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>'),
-    pdfObject(3, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>`),
-    pdfObject(4, Buffer.concat([
-      Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`, 'ascii'),
-      jpeg,
-      Buffer.from('\nendstream', 'ascii'),
-    ])),
-    pdfObject(5, Buffer.concat([
-      Buffer.from(`<< /Length ${draw.length} >>\nstream\n`, 'ascii'),
-      draw,
-      Buffer.from('endstream', 'ascii'),
-    ])),
+    pdfObject(2, `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pages.length} >>`),
   ];
+  pages.forEach(({ jpeg, width, height }, index) => {
+    const pageId = pageIds[index];
+    const imageId = pageId + 1;
+    const contentId = pageId + 2;
+    const draw = Buffer.from(`q\n${width} 0 0 ${height} 0 0 cm\n/Im0 Do\nQ\n`, 'ascii');
+    objects.push(
+      pdfObject(pageId, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /XObject << /Im0 ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>`),
+      pdfObject(imageId, Buffer.concat([
+        Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`, 'ascii'),
+        jpeg,
+        Buffer.from('\nendstream', 'ascii'),
+      ])),
+      pdfObject(contentId, Buffer.concat([
+        Buffer.from(`<< /Length ${draw.length} >>\nstream\n`, 'ascii'),
+        draw,
+        Buffer.from('endstream', 'ascii'),
+      ])),
+    );
+  });
   const header = Buffer.from('%PDF-1.4\n%\xe2\xe3\xcf\xd3\n', 'binary');
   const offsets = [];
   let cursor = header.length;
@@ -318,6 +348,66 @@ function createSingleImagePdf(jpeg) {
     'ascii'
   );
   return Buffer.concat([header, ...objects, xref]);
+}
+
+function createSingleImagePdf(jpeg) {
+  return createMultiImagePdf([jpeg]);
+}
+
+function normalizeMultiPdfOptions(options) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('PDF 导出参数无效。');
+  if (!Array.isArray(options.dataURLs) || !options.dataURLs.length || options.dataURLs.length > MAX_PDF_PAGES) {
+    throw new Error(`PDF 页数无效（最多 ${MAX_PDF_PAGES} 页）。`);
+  }
+  if (typeof options.outputPath !== 'string' || !options.outputPath.trim() || options.outputPath.includes('\0')) {
+    throw new Error('PDF 目标路径无效。');
+  }
+  if (path.extname(options.outputPath).toLowerCase() !== '.pdf') throw new Error('PDF 目标文件必须使用 .pdf 扩展名。');
+  const decoded = [];
+  let totalBytes = 0;
+  for (const dataURL of options.dataURLs) {
+    const page = decodeImageDataURL(dataURL);
+    totalBytes += page.inputBuffer.length;
+    if (totalBytes > MAX_PDF_TOTAL_INPUT_BYTES) throw new Error('PDF 图片总大小超过 256MB 上限。');
+    decoded.push(page);
+  }
+  return {
+    dataURLs: options.dataURLs,
+    outputPath: options.outputPath,
+    quality: normalizeQuality(options.quality),
+    decoded,
+  };
+}
+
+async function exportImagesToPdf(options, dependencies) {
+  const normalized = normalizeMultiPdfOptions(options);
+  const deps = dependencies || {};
+  const mediaApi = deps.media || media;
+  const tempApi = deps.tempFiles || tempFiles;
+  if (typeof tempApi.createPrivateTempPath !== 'function') throw new Error('临时文件服务不支持 PDF 导出。');
+  const cleanupPaths = [];
+  let outputStage = null;
+  try {
+    const jpegs = [];
+    for (const page of normalized.decoded) {
+      const inputPath = tempApi.writePrivateTempFile(page.inputBuffer, 'kkshot-pdf-input', page.inputExtension);
+      cleanupPaths.push(inputPath);
+      const jpegPath = tempApi.createPrivateTempPath('kkshot-pdf-page', 'jpg');
+      cleanupPaths.push(jpegPath);
+      await mediaApi.convertImage(inputPath, jpegPath, buildImageConversionArgs('jpeg', normalized.quality));
+      jpegs.push(fs.readFileSync(jpegPath));
+    }
+    outputStage = createOutputStage(normalized.outputPath, 'pdf');
+    fs.writeFileSync(outputStage, createMultiImagePdf(jpegs), { mode: 0o600 });
+    commitOutputStage(outputStage, normalized.outputPath);
+    outputStage = null;
+    return { path: normalized.outputPath, format: 'pdf', quality: normalized.quality, pageCount: jpegs.length };
+  } catch (err) {
+    cleanupFile(outputStage);
+    throw new Error(`PDF 导出失败：${err && err.message ? err.message : String(err)}`);
+  } finally {
+    cleanupPaths.forEach((filePath) => tempApi.cleanupTempPath(filePath));
+  }
 }
 
 async function exportImage(options, dependencies) {
@@ -372,6 +462,11 @@ module.exports = {
   quickSaveImage,
   normalizeImageExportOptions,
   buildImageConversionArgs,
+  MAX_PDF_PAGES,
+  MAX_PDF_TOTAL_INPUT_BYTES,
+  createMultiImagePdf,
   createSingleImagePdf,
+  normalizeMultiPdfOptions,
+  exportImagesToPdf,
   exportImage,
 };

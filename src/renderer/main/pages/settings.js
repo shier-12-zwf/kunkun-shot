@@ -689,6 +689,27 @@
         stackField('默认导出格式', selExportFormat, '用于快速保存、保存对话框默认格式和历史批量导出。')
       );
 
+      const inCaptureFileNameTemplate = h('input', {
+        class: 'input', type: 'text', maxlength: '256', placeholder: '困困截图-{timestamp}',
+      });
+      inCaptureFileNameTemplate.addEventListener('change', function () {
+        autoSave(
+          { capture: { fileNameTemplate: inCaptureFileNameTemplate.value } },
+          '截图文件名模板已更新',
+          function () {
+            inCaptureFileNameTemplate.value = (currentConfig.capture && currentConfig.capture.fileNameTemplate)
+              || '困困截图-{timestamp}';
+          }
+        );
+      });
+      gCapture.body.appendChild(
+        stackField(
+          '截图文件名模板',
+          inCaptureFileNameTemplate,
+          '可用 {datetime} {date} {time} {timestamp} {type} {index} {width} {height}；不要填扩展名或路径。'
+        )
+      );
+
       const inExportQuality = h('input', {
         class: 'input', type: 'number', min: '1', max: '100', step: '1', placeholder: '90',
       });
@@ -735,6 +756,27 @@
       });
       gRec.body.appendChild(
         stackField('录制帧率 (FPS)', inFps, '建议 12–30；帧率越高文件越大。')
+      );
+
+      const inRecordingFileNameTemplate = h('input', {
+        class: 'input', type: 'text', maxlength: '256', placeholder: '困困录屏-{timestamp}',
+      });
+      inRecordingFileNameTemplate.addEventListener('change', function () {
+        autoSave(
+          { recording: { fileNameTemplate: inRecordingFileNameTemplate.value } },
+          '录屏文件名模板已更新',
+          function () {
+            inRecordingFileNameTemplate.value = (currentConfig.recording && currentConfig.recording.fileNameTemplate)
+              || '困困录屏-{timestamp}';
+          }
+        );
+      });
+      gRec.body.appendChild(
+        stackField(
+          '录屏文件名模板',
+          inRecordingFileNameTemplate,
+          '可用变量与截图一致；{width}/{height} 为录制像素尺寸，扩展名由 GIF/WebM/MP4 导出器决定。'
+        )
       );
 
       const tgGif = toggle(false, function (v) {
@@ -816,8 +858,22 @@
       // 语言只展示随应用打包的离线模型组合，不接受任意 Tesseract 代码。
       const OCR_LANGUAGES = [
         { value: 'chi_sim+eng', label: '简体中文 + English（推荐）' },
+        { value: 'chi_tra+eng', label: '繁體中文 + English' },
+        { value: 'jpn+eng', label: '日本語 + English' },
+        { value: 'kor+eng', label: '한국어 + English' },
+        { value: 'fra+eng', label: 'Français + English' },
+        { value: 'deu+eng', label: 'Deutsch + English' },
+        { value: 'spa+eng', label: 'Español + English' },
+        { value: 'por+eng', label: 'Português + English' },
         { value: 'chi_sim', label: '简体中文' },
+        { value: 'chi_tra', label: '繁體中文' },
         { value: 'eng', label: 'English' },
+        { value: 'jpn', label: '日本語' },
+        { value: 'kor', label: '한국어' },
+        { value: 'fra', label: 'Français' },
+        { value: 'deu', label: 'Deutsch' },
+        { value: 'spa', label: 'Español' },
+        { value: 'por', label: 'Português' },
       ];
       const selOcrLang = h('select', { class: 'select' }, OCR_LANGUAGES.map(function (lang) {
         return h('option', { value: lang.value }, lang.label);
@@ -826,7 +882,7 @@
         autoSave({ ocr: { lang: selOcrLang.value } }, '已更新识别语言');
       });
       gOcr.body.appendChild(
-        stackField('识别语言', selOcrLang, '仅使用应用内置的离线中英文模型；模型缺失时会明确失败，不会联网下载。')
+        stackField('识别语言', selOcrLang, '仅使用应用内置的 9 种离线语言模型；模型缺失时会明确失败，不会联网下载。')
       );
 
       grid.appendChild(gOcr.card);
@@ -1324,10 +1380,12 @@
         tgAutoSaveHistory.querySelector('.kk-toggle-input').checked = !!cap.autoSaveHistory;
         selExportFormat.value = cap.exportFormat || 'png';
         inExportQuality.value = cap.quality != null ? cap.quality : 90;
+        inCaptureFileNameTemplate.value = cap.fileNameTemplate || '困困截图-{timestamp}';
         updateExportQualityState();
 
         // 录屏
         inFps.value = rec.fps != null ? rec.fps : '';
+        inRecordingFileNameTemplate.value = rec.fileNameTemplate || '困困录屏-{timestamp}';
         tgGif.querySelector('.kk-toggle-input').checked = !!rec.toGif;
         tgSystemAudio.querySelector('.kk-toggle-input').checked = !!rec.systemAudio;
         tgMicrophone.querySelector('.kk-toggle-input').checked = !!rec.microphone;

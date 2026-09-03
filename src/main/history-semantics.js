@@ -10,7 +10,13 @@ function historyTypeForImageSaveRole(role) {
   return 'region';
 }
 
-async function persistRecordingHistory(filePath, { addMedia, broadcast, onError } = {}) {
+async function persistRecordingHistory(filePath, {
+  addMedia,
+  broadcast,
+  onError,
+  width = 0,
+  height = 0,
+} = {}) {
   const report = (error) => {
     if (typeof onError !== 'function') return;
     try { onError(error); } catch (_) {}
@@ -22,7 +28,7 @@ async function persistRecordingHistory(filePath, { addMedia, broadcast, onError 
 
   let item = null;
   try {
-    item = await addMedia(filePath, 'recording');
+    item = await addMedia(filePath, 'recording', { width, height });
   } catch (error) {
     report(error);
     return null;

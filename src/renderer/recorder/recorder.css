@@ -75,6 +75,24 @@ body {
   cursor: default;
 }
 
+.btn-option {
+  width: 30px;
+  height: 30px;
+  font-size: 14px;
+  border: 1px solid transparent;
+}
+
+.btn-option.active {
+  color: var(--accent);
+  border-color: rgba(37, 99, 235, 0.35);
+  background: rgba(37, 99, 235, 0.1);
+}
+
+.btn-option.unavailable {
+  color: var(--danger);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
 /* 隐藏的按钮（根据录制状态切换显隐） */
 .btn[hidden],
 .status[hidden] {
@@ -199,6 +217,13 @@ body {
 .toast.with-action {
   right: 126px;
   justify-content: flex-start;
+}
+
+/* 增强层异常不应遮住录屏的停止/取消控制。 */
+.toast.runtime-warning {
+  right: 96px;
+  justify-content: flex-start;
+  pointer-events: none;
 }
 
 /* ===== 暂停按钮（P2-4） ===== */

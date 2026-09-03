@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const recorderLifecycle = require('../src/shared/recorder-lifecycle');
+const recorderOverlays = require('../src/shared/recorder-overlays');
 
 const recorderSource = fs.readFileSync(
   path.join(__dirname, '..', 'src', 'renderer', 'recorder', 'recorder.js'),
@@ -24,6 +25,15 @@ function createElement() {
       add: (...names) => names.forEach((name) => classes.add(name)),
       remove: (...names) => names.forEach((name) => classes.delete(name)),
       contains: (name) => classes.has(name),
+      toggle(name, force) {
+        const enabled = force === undefined ? !classes.has(name) : force === true;
+        if (enabled) classes.add(name);
+        else classes.delete(name);
+        return enabled;
+      },
+    },
+    setAttribute(name, value) {
+      this[name] = String(value);
     },
     addEventListener(type, listener) {
       listeners.set(type, listener);
@@ -35,16 +45,37 @@ function createElement() {
   };
 }
 
-function createTrack(kind, id) {
-  return {
+function createTrack(kind, id, options = {}) {
+  const listeners = new Map();
+  const track = {
     kind,
     id,
     enabled: true,
+    readyState: options.readyState || 'live',
     stopCalls: 0,
     stop() {
       this.stopCalls += 1;
+      this.readyState = 'ended';
+    },
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(listener);
+    },
+    removeEventListener(type, listener) {
+      const bucket = listeners.get(type);
+      if (bucket) bucket.delete(listener);
+    },
+    listenerCount(type) {
+      const bucket = listeners.get(type);
+      return bucket ? bucket.size : 0;
+    },
+    emitEnded() {
+      this.readyState = 'ended';
+      const bucket = listeners.get('ended');
+      if (bucket) [...bucket].forEach((listener) => listener({ type: 'ended', target: track }));
     },
   };
+  return track;
 }
 
 function createStream({ videoTracks = [], audioTracks = [] } = {}) {
@@ -78,6 +109,10 @@ async function createRecorderHarness(options = {}) {
     'btnStart',
     'btnStop',
     'btnPause',
+    'btnCamera',
+    'btnActions',
+    'btnPen',
+    'btnClearPen',
     'btnRetry',
     'btnCancel',
     'status',
@@ -97,6 +132,9 @@ async function createRecorderHarness(options = {}) {
   const mediaCalls = [];
   const saveCalls = [];
   const stateReports = [];
+  const actionStartCalls = [];
+  const actionStopCalls = [];
+  let actionListener = null;
   let closeCalls = 0;
   let cancelCalls = 0;
   const windowListeners = new Map();
@@ -105,6 +143,9 @@ async function createRecorderHarness(options = {}) {
   const systemAudioTrack = options.systemAudioTrack || createTrack('audio', 'system-audio');
   const microphoneTrack = options.microphoneTrack || createTrack('audio', 'microphone-audio');
   const mixedAudioTrack = options.mixedAudioTrack || createTrack('audio', 'mixed-audio');
+  const cameraVideoTrack = options.cameraVideoTrack || createTrack('video', 'camera-video', {
+    readyState: options.cameraTrackInitiallyEnded === true ? 'ended' : 'live',
+  });
   const captureStream = options.captureStream || createStream({
     videoTracks: [screenVideoTrack],
     audioTracks: options.systemAudioAvailable === true ? [systemAudioTrack] : [],
@@ -112,10 +153,16 @@ async function createRecorderHarness(options = {}) {
   const microphoneStream = options.microphoneStream || createStream({
     audioTracks: options.microphoneAvailable === false ? [] : [microphoneTrack],
   });
+  const cameraStream = options.cameraStream || createStream({
+    videoTracks: options.cameraAvailable === false ? [] : [cameraVideoTrack],
+  });
   const canvasStream = options.canvasStream || createStream({
     videoTracks: [createTrack('video', 'canvas-video')],
   });
   const mixedStream = createStream({ audioTracks: [mixedAudioTrack] });
+  const canvasDrawCalls = [];
+  const videoElements = [];
+  const canvasElements = [];
   let audioContext = null;
 
   class FakeMediaRecorder {
@@ -208,6 +255,19 @@ async function createRecorderHarness(options = {}) {
     onInit(listener) {
       initListener = listener;
     },
+    async startRecordingActions() {
+      actionStartCalls.push(true);
+      if (options.actionStartError) throw options.actionStartError;
+      return options.actionStartResult || { ok: true, active: true };
+    },
+    async stopRecordingActions() {
+      actionStopCalls.push(true);
+      return { ok: true, active: false };
+    },
+    onRecordingAction(listener) {
+      actionListener = listener;
+      return () => { if (actionListener === listener) actionListener = null; };
+    },
   };
 
   const context = {
@@ -226,6 +286,13 @@ async function createRecorderHarness(options = {}) {
             }
             return microphoneStream;
           }
+          if (!(constraints && constraints.video && constraints.video.mandatory)) {
+            if (options.cameraError) throw options.cameraError;
+            if (typeof options.acquireCamera === 'function') {
+              return options.acquireCamera(constraints);
+            }
+            return cameraStream;
+          }
           if (options.desktopError) throw options.desktopError;
           return captureStream;
         },
@@ -235,27 +302,52 @@ async function createRecorderHarness(options = {}) {
       getElementById: (id) => elements[id],
       createElement(type) {
         if (type === 'video') {
+          const videoIndex = videoElements.length;
+          const dimensions = videoIndex === 0
+            ? (options.desktopVideoSize || { width: 1280, height: 720 })
+            : (options.cameraVideoSize || { width: 1280, height: 720 });
           const video = {
             muted: false,
             playsInline: false,
             srcObject: null,
-            play: async () => {},
-            pause() {},
+            videoWidth: dimensions.width,
+            videoHeight: dimensions.height,
+            playCalls: 0,
+            pauseCalls: 0,
+            async play() {
+              this.playCalls += 1;
+              if (videoIndex === 0 && options.desktopPlayError) throw options.desktopPlayError;
+              if (videoIndex === 1 && options.cameraPlayError) throw options.cameraPlayError;
+            },
+            pause() { this.pauseCalls += 1; },
           };
           Object.defineProperty(video, 'onloadedmetadata', {
             set(listener) {
               listener();
             },
           });
+          videoElements.push(video);
           return video;
         }
         if (type === 'canvas') {
-          return {
+          const context2d = new Proxy({}, {
+            get(target, property) {
+              if (property in target) return target[property];
+              return (...args) => { canvasDrawCalls.push([property, ...args]); };
+            },
+            set(target, property, value) {
+              target[property] = value;
+              return true;
+            },
+          });
+          const canvas = {
             width: 0,
             height: 0,
-            getContext: () => ({ drawImage() {} }),
+            getContext: () => context2d,
             captureStream: () => canvasStream,
           };
+          canvasElements.push(canvas);
+          return canvas;
         }
         throw new Error(`unexpected element type: ${type}`);
       },
@@ -263,6 +355,7 @@ async function createRecorderHarness(options = {}) {
     window: {
       kkapi: api,
       KKRecorderLifecycle: recorderLifecycle,
+      KKRecorderOverlays: recorderOverlays,
       AudioContext: options.audioContextUnavailable ? undefined : FakeAudioContext,
       addEventListener(type, listener) {
         windowListeners.set(type, listener);
@@ -311,6 +404,11 @@ async function createRecorderHarness(options = {}) {
     getAudioSourceStreams: () => [...audioSourceStreams],
     getSaveCalls: () => [...saveCalls],
     getStateReports: () => [...stateReports],
+    getActionStartCalls: () => actionStartCalls.length,
+    getActionStopCalls: () => actionStopCalls.length,
+    getCanvasDrawCalls: () => [...canvasDrawCalls],
+    getVideoElements: () => [...videoElements],
+    getCanvasElements: () => [...canvasElements],
     getCloseCalls: () => closeCalls,
     getCancelCalls: () => cancelCalls,
     dispatchWindow(type, event = {}) {
@@ -319,12 +417,17 @@ async function createRecorderHarness(options = {}) {
     },
     captureStream,
     microphoneStream,
+    cameraStream,
     canvasStream,
     tracks: {
       screenVideoTrack,
       systemAudioTrack,
       microphoneTrack,
       mixedAudioTrack,
+      cameraVideoTrack,
+    },
+    dispatchAction(payload) {
+      return actionListener && actionListener(payload);
     },
     start: () => elements.btnStart.dispatch('click'),
     getPendingTimeouts: () => [...timeouts.values()].map(({ delay }) => delay),
@@ -343,8 +446,225 @@ async function createRecorderHarness(options = {}) {
       assert.ok(timer, 'recording timer interval must be active');
       timer.listener();
     },
+    tickDraw() {
+      const timer = [...intervals.values()].find(({ delay }) => delay !== 200);
+      assert.ok(timer, 'recording draw interval must be active');
+      timer.listener();
+    },
   };
 }
+
+test('camera and action prompts are explicit first-level opt-ins and clean up with the recording', async () => {
+  const harness = await createRecorderHarness({ autoStart: false });
+
+  await harness.elements.btnCamera.dispatch('click');
+  await harness.elements.btnActions.dispatch('click');
+  assert.equal(harness.elements.btnCamera.classList.contains('active'), true);
+  assert.equal(harness.elements.btnActions.classList.contains('active'), true);
+
+  await harness.start();
+  const mediaCalls = harness.getMediaCalls();
+  assert.equal(mediaCalls.length, 2, 'desktop and camera streams must be requested separately');
+  assert.ok(mediaCalls[0].video.mandatory, 'first request must remain the desktop source');
+  assert.equal(mediaCalls[1].audio, false, 'camera picture-in-picture must never capture a second audio track');
+  assert.equal(harness.getActionStartCalls(), 1);
+
+  await harness.elements.btnStop.dispatch('click');
+  assert.ok(harness.tracks.cameraVideoTrack.stopCalls > 0);
+  assert.equal(harness.getActionStopCalls(), 1);
+});
+
+test('recording action events draw click/key prompts and live pen strokes on the encoded canvas', async () => {
+  const harness = await createRecorderHarness({ autoStart: false });
+  await harness.elements.btnActions.dispatch('click');
+  await harness.start();
+  await harness.elements.btnPen.dispatch('click');
+
+  harness.dispatchAction({ type: 'mouse-down', button: 'left', x: 10, y: 10, at: 1, modifiers: {} });
+  harness.dispatchAction({ type: 'mouse-dragged', button: 'left', x: 30, y: 30, at: 2, modifiers: {} });
+  harness.dispatchAction({ type: 'mouse-up', button: 'left', x: 40, y: 40, at: 3, modifiers: {} });
+  harness.dispatchAction({ type: 'key', key: 'K', at: 4, modifiers: { meta: true } });
+  harness.tickDraw();
+
+  const methodNames = harness.getCanvasDrawCalls().map(([name]) => name);
+  assert.ok(methodNames.includes('stroke'), 'click rings and pen strokes must reach the recording canvas');
+  assert.ok(methodNames.includes('fillText'), 'keystrokes must reach the recording canvas');
+
+  await harness.elements.btnClearPen.dispatch('click');
+  assert.equal(harness.elements.btnPen.classList.contains('active'), true, 'clearing strokes must not turn the pen off');
+});
+
+test('actual desktop pixels drive crop, action, camera composition, and saved dimensions on Retina displays', async () => {
+  const harness = await createRecorderHarness({
+    autoStart: false,
+    desktopVideoSize: { width: 2560, height: 1440 },
+    cameraVideoSize: { width: 1920, height: 1080 },
+    init: {
+      rect: { x: 200, y: 100, width: 800, height: 500 },
+      displayBounds: { x: -1600, y: 40, width: 1600, height: 1000 },
+      scaleFactor: 2,
+    },
+  });
+  await harness.elements.btnCamera.dispatch('click');
+  await harness.elements.btnActions.dispatch('click');
+  await harness.start();
+  await harness.elements.btnPen.dispatch('click');
+
+  harness.dispatchAction({
+    type: 'mouse-down', button: 'left', x: -1000, y: 390, at: 1, modifiers: {},
+  });
+  harness.dispatchAction({
+    type: 'mouse-dragged', button: 'left', x: -920, y: 440, at: 2, modifiers: {},
+  });
+  harness.tickDraw();
+
+  const canvas = harness.getCanvasElements()[0];
+  assert.equal(canvas.width, 1280);
+  assert.equal(canvas.height, 720);
+  const videos = harness.getVideoElements();
+  const drawImages = harness.getCanvasDrawCalls().filter(([name]) => name === 'drawImage');
+  const desktopDraw = drawImages.find(([, video]) => video === videos[0]);
+  assert.deepEqual(desktopDraw.slice(2), [320, 144, 1280, 720, 0, 0, 1280, 720]);
+
+  const cameraDraw = drawImages.find(([, video]) => video === videos[1]);
+  assert.ok(cameraDraw, 'camera must be composited into the same actual-pixel canvas');
+  const [, , , , , , cameraX, cameraY, cameraW, cameraH] = cameraDraw;
+  assert.ok(cameraX >= 0 && cameraY >= 0);
+  assert.ok(cameraX + cameraW <= canvas.width && cameraY + cameraH <= canvas.height);
+  assert.ok(
+    harness.getCanvasDrawCalls().some(([name, x, y]) => name === 'moveTo' && x === 640 && y === 360),
+    'pen points must map through the actual horizontal and vertical stream ratios',
+  );
+
+  const mediaRecorder = harness.getMediaRecorder();
+  mediaRecorder.ondataavailable({ data: new Blob([new Uint8Array(16)]) });
+  await harness.elements.btnStop.dispatch('click');
+  await mediaRecorder.onstop();
+  assert.equal(harness.getSaveCalls()[0].width, 1280);
+  assert.equal(harness.getSaveCalls()[0].height, 720);
+});
+
+test('camera track ending at runtime removes its frame and resources but keeps screen recording stoppable', async () => {
+  const harness = await createRecorderHarness({ autoStart: false });
+  await harness.elements.btnCamera.dispatch('click');
+  await harness.start();
+  const cameraVideo = harness.getVideoElements()[1];
+
+  assert.equal(harness.tracks.cameraVideoTrack.listenerCount('ended'), 1);
+  harness.tracks.cameraVideoTrack.emitEnded();
+
+  assert.match(harness.elements.toast.textContent, /摄像头.*(断开|停止)/);
+  assert.equal(harness.elements.btnStop.disabled, false, '摄像头丢失不得中断屏幕录制');
+  assert.equal(harness.elements.btnCamera.classList.contains('active'), false);
+  assert.equal(harness.elements.btnCamera.classList.contains('unavailable'), true);
+  assert.equal(harness.tracks.cameraVideoTrack.stopCalls, 1);
+  assert.equal(harness.tracks.cameraVideoTrack.listenerCount('ended'), 0);
+  assert.equal(cameraVideo.srcObject, null);
+  assert.equal(cameraVideo.pauseCalls, 1);
+
+  const cameraDrawsBefore = harness.getCanvasDrawCalls()
+    .filter(([name, video]) => name === 'drawImage' && video === cameraVideo).length;
+  harness.tickDraw();
+  const cameraDrawsAfter = harness.getCanvasDrawCalls()
+    .filter(([name, video]) => name === 'drawImage' && video === cameraVideo).length;
+  assert.equal(cameraDrawsAfter, cameraDrawsBefore, '断开后不得继续绘制最后一帧');
+});
+
+test('an already-ended camera fails start recoverably and detaches every track listener', async () => {
+  const harness = await createRecorderHarness({
+    autoStart: false,
+    cameraTrackInitiallyEnded: true,
+  });
+  await harness.elements.btnCamera.dispatch('click');
+  await harness.start();
+
+  assert.equal(harness.getMediaRecorder(), null);
+  assert.match(harness.elements.toast.textContent, /摄像头.*(断开|不可用)/);
+  assert.equal(harness.elements.btnStart.hidden, false);
+  assert.equal(harness.elements.btnCamera.classList.contains('active'), false);
+  assert.equal(harness.elements.btnCamera.classList.contains('unavailable'), true);
+  assert.equal(harness.tracks.cameraVideoTrack.listenerCount('ended'), 0);
+  assert.ok(harness.tracks.screenVideoTrack.stopCalls > 0);
+
+  await harness.elements.btnCamera.dispatch('click');
+  assert.equal(harness.elements.btnCamera.classList.contains('active'), true, '一次点击即可重新选择摄像头');
+  assert.equal(harness.elements.btnCamera.classList.contains('unavailable'), false);
+});
+
+test('normal stop detaches camera ended listeners and clears the hidden camera video', async () => {
+  const harness = await createRecorderHarness({ autoStart: false });
+  await harness.elements.btnCamera.dispatch('click');
+  await harness.start();
+  const cameraVideo = harness.getVideoElements()[1];
+
+  await harness.elements.btnStop.dispatch('click');
+
+  assert.equal(harness.tracks.cameraVideoTrack.listenerCount('ended'), 0);
+  assert.equal(harness.tracks.cameraVideoTrack.stopCalls, 1);
+  assert.equal(cameraVideo.srcObject, null);
+  assert.equal(cameraVideo.pauseCalls, 1);
+});
+
+test('camera permission errors are retryable and release the already-open desktop stream', async () => {
+  const denied = Object.assign(new Error('camera denied'), { name: 'NotAllowedError' });
+  const harness = await createRecorderHarness({ autoStart: false, cameraError: denied });
+  await harness.elements.btnCamera.dispatch('click');
+  await harness.start();
+
+  assert.match(harness.elements.toast.textContent, /摄像头权限被拒绝/);
+  assert.equal(harness.elements.btnStart.hidden, false);
+  assert.ok(harness.tracks.screenVideoTrack.stopCalls > 0);
+  assert.equal(harness.elements.btnCamera.classList.contains('unavailable'), true);
+  assert.equal(harness.elements.btnCamera.classList.contains('active'), false);
+  await harness.elements.btnCamera.dispatch('click');
+  assert.equal(harness.elements.btnCamera.classList.contains('active'), true);
+  assert.equal(harness.elements.btnCamera.classList.contains('unavailable'), false);
+});
+
+test('cancel while the action helper is still starting requests immediate and late cleanup', async () => {
+  let resolveActionStart;
+  const actionStart = new Promise((resolve) => { resolveActionStart = resolve; });
+  const harness = await createRecorderHarness({
+    autoStart: false,
+    actionStartResult: actionStart,
+  });
+  await harness.elements.btnActions.dispatch('click');
+
+  const starting = harness.start();
+  while (harness.getActionStartCalls() === 0) await Promise.resolve();
+  await harness.elements.btnCancel.dispatch('click');
+  assert.equal(
+    harness.getActionStopCalls(),
+    1,
+    'cancel must invalidate a main-process helper even before its start invoke resolves',
+  );
+
+  resolveActionStart({ ok: true, active: true });
+  await starting;
+  assert.ok(
+    harness.getActionStopCalls() >= 2,
+    'a helper that reports a late success must receive a final defensive stop',
+  );
+  assert.equal(harness.getMediaRecorder(), null);
+});
+
+test('a runtime action-helper crash visibly disables prompts without stopping the recording', async () => {
+  const harness = await createRecorderHarness({ autoStart: false });
+  await harness.elements.btnActions.dispatch('click');
+  await harness.start();
+
+  harness.dispatchAction({
+    type: 'monitor-error',
+    error: '操作提示监听器意外退出',
+    at: 123,
+  });
+
+  assert.match(harness.elements.toast.textContent, /操作提示.*退出/);
+  assert.equal(harness.elements.toast.hidden, false);
+  assert.equal(harness.elements.btnActions.classList.contains('unavailable'), true);
+  assert.equal(harness.elements.btnActions.classList.contains('active'), false);
+  assert.equal(harness.elements.btnStop.disabled, false, 'helper failure must not interrupt screen recording');
+});
 
 test('recorder matches serialized screen_index instead of relying on source array order', async () => {
   const harness = await createRecorderHarness({

@@ -70,3 +70,33 @@ test('helper names are validated before becoming filesystem paths', async (t) =>
     /名称无效/
   );
 });
+
+test('native helper cache preserves compiler language and uses the matching source extension', async (t) => {
+  const dir = tempDir(t);
+  let seen;
+  const cache = createSwiftBinaryCache({
+    cacheDir: () => dir,
+    compile: async (sourcePath, outputPath, request) => {
+      seen = { sourcePath, request };
+      fs.writeFileSync(outputPath, 'compiled-c-helper', { mode: 0o700 });
+    }
+  });
+
+  const binary = await cache.ensureBinary({
+    name: 'record-actions',
+    source: 'int main(void) { return 0; }',
+    language: 'c'
+  });
+
+  assert.match(seen.sourcePath, /\.c$/);
+  assert.deepEqual(seen.request, {
+    name: 'record-actions',
+    source: 'int main(void) { return 0; }',
+    language: 'c'
+  });
+  assert.equal(fs.readFileSync(binary, 'utf8'), 'compiled-c-helper');
+  assert.deepEqual(
+    fs.readdirSync(dir).filter((name) => /\.(?:c|swift)$/.test(name)),
+    []
+  );
+});

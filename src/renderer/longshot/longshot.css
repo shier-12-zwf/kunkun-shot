@@ -37,15 +37,32 @@ body {
   position: absolute;
   inset: 6px; /* 给阴影留出边距 */
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 12px;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 5px;
+  padding: 7px 12px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 12px;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
   -webkit-app-region: drag; /* 允许拖动控制条 */
+}
+
+.primary-row,
+.edit-row,
+.crop-box {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  -webkit-app-region: no-drag;
+}
+
+.primary-row {
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  -webkit-app-region: drag;
 }
 
 /* ---- 左侧状态 ---- */
@@ -113,6 +130,59 @@ body {
   /* 按钮区不可拖动，否则点击会被拖动吞掉 */
   -webkit-app-region: no-drag;
 }
+
+.edit-row {
+  gap: 6px;
+  min-width: 0;
+  color: #5f6670;
+  font-size: 11px;
+}
+
+.compact-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.compact-field select {
+  width: 92px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+  color: var(--text);
+  font: inherit;
+}
+
+.compact-field input[type="number"] {
+  width: 52px;
+  height: 26px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+  color: var(--text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.mini-btn {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.mini-btn:hover { background: #eceef1; }
+.mini-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.mini-btn.danger { color: #b42318; }
+.separator { width: 1px; height: 20px; background: var(--border); margin: 0 2px; }
 
 .btn {
   display: inline-flex;
@@ -192,11 +262,10 @@ body {
 
 /* ===== 手动裁剪 ===== */
 .crop-box {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px 10px;
-  border-left: 1px solid rgba(0,0,0,0.08);
+  gap: 14px;
+  min-height: 22px;
+  padding-top: 1px;
+  border-top: 1px solid rgba(0,0,0,0.06);
 }
 .crop-label {
   display: flex;
@@ -205,7 +274,7 @@ body {
   font-size: 11px;
   color: #666;
 }
-.crop-label input[type="range"] { width: 90px; }
+.crop-label input[type="range"] { width: 150px; }
 .crop-val { min-width: 40px; font-variant-numeric: tabular-nums; }
 
 @media (prefers-reduced-motion: reduce) {

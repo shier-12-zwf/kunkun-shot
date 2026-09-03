@@ -38,7 +38,7 @@ test('compact overlay toolbar preserves every tool and action exactly once', () 
   assert.deepEqual(directActions.slice(0, 2), ['translate', 'ocr']);
   assert.deepEqual(
     [...tools].sort(),
-    ['arrow', 'ellipse', 'highlight', 'line', 'mosaic', 'number', 'pen', 'polyline', 'rect', 'select', 'text']
+    ['arrow', 'blur', 'ellipse', 'highlight', 'line', 'magnifier', 'mosaic', 'number', 'pen', 'polyline', 'rect', 'select', 'spotlight', 'text', 'watermark']
   );
   assert.equal(new Set(tools).size, tools.length);
 });
@@ -66,11 +66,23 @@ test('secondary tools remain inside the delegated toolbar and expose accessible 
   assert.match(toolbar, /id="actionMenu" role="group" aria-label="更多截图与处理选项"/);
   assert.match(annotationMenu, />椭圆</);
   assert.match(annotationMenu, />荧光笔</);
+  assert.match(annotationMenu, /data-tool="blur"[\s\S]*?>模糊</);
+  assert.match(annotationMenu, /data-tool="spotlight"[\s\S]*?>聚光灯</);
+  assert.match(annotationMenu, /data-tool="watermark"[\s\S]*?>水印</);
+  assert.match(annotationMenu, /data-tool="magnifier"[\s\S]*?>放大镜</);
+  assert.match(toolbar, /id="magnifierZoomGroup"[^>]*\shidden(?:\s|>)[\s\S]*?id="magnifierZoom"/);
+  assert.match(js, /function updateMagnifierZoomControl\(\)/);
   assert.match(actionMenu, /data-action="table"[\s\S]*?>AI 表格</);
   assert.match(actionMenu, /data-action="formula"[\s\S]*?>AI 公式</);
   assert.doesNotMatch(actionMenu, /data-action="translate"/);
   assert.match(actionMenu, /data-action="ask"[\s\S]*?>问 AI</);
   assert.match(actionMenu, /id="trLang"/);
+  assert.match(actionMenu, /id="selectionWidth"[^>]*type="number"/);
+  assert.match(actionMenu, /id="selectionHeight"[^>]*type="number"/);
+  assert.match(actionMenu, /id="selectionSizePreset"/);
+  assert.match(actionMenu, /id="selectionRatio"[\s\S]*?value="free"[\s\S]*?value="1:1"[\s\S]*?value="4:3"[\s\S]*?value="16:9"/);
+  assert.match(js, /function syncSelectionGeometryControls\(force\)/);
+  assert.match(js, /applySelectionSourceSize\([\s\S]*?syncSelectionGeometryControls\(true\)/);
   for (const id of ['btnRatioLock', 'btnRounded', 'btnAx', 'btnFrame']) {
     assert.match(actionMenu, new RegExp(`id="${id}"[\\s\\S]*?aria-pressed="false"`));
     assert.equal((toolbar.match(new RegExp(`id="${id}"`, 'g')) || []).length, 1);
@@ -82,6 +94,20 @@ test('secondary tools remain inside the delegated toolbar and expose accessible 
   assert.match(js, /setSelectionOptionActive\([\s\S]*?aria-pressed/);
   assert.match(js, /toolbarControl[\s\S]*?isEditableControl[\s\S]*?isControlKey/);
   assert.doesNotMatch(toolbar, /role="menu(?:item)?"/);
+});
+
+test('barcode action is always reachable and exposes progress plus manual retry', () => {
+  assert.match(html, /id="btnQR"[^>]*data-action="qr"/);
+  assert.doesNotMatch(html, /id="btnQR"[^>]*\shidden(?:\s|>)/);
+  assert.match(html, /id="qrStatus"[^>]*role="status"/);
+  assert.match(html, /id="btnQrRetry"/);
+  assert.match(js, /btnQrRetry\.addEventListener\('click'/);
+});
+
+test('browser overlay loads the shared geometry helper before its controller', () => {
+  const geometryIndex = html.indexOf('<script src="./overlay-geometry.js"></script>');
+  const overlayIndex = html.indexOf('<script src="./overlay.js"></script>');
+  assert.ok(geometryIndex >= 0 && geometryIndex < overlayIndex);
 });
 
 test('toolbar labels cannot shrink into clipped vertical text', () => {

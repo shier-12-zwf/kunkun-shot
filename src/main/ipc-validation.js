@@ -2,6 +2,7 @@
 // 保持纯 Node 模块，便于不启动 Electron 就做回归测试。
 const path = require('node:path');
 const { DEFAULT_CONFIG, SUPPORTED_OCR_LANGUAGES } = require('../shared/config-schema');
+const { normalizeFilenameTemplate } = require('./filename-template');
 
 const MAX_IMAGE_DATA_URL_CHARS = 128 * 1024 * 1024;
 const MAX_TEXT_CHARS = 1024 * 1024;
@@ -198,6 +199,61 @@ function normalizePinStateFlags(value) {
   return out;
 }
 
+function normalizeImageDimension(value, label) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 32768) {
+    throw new Error(`${label}尺寸无效。`);
+  }
+  return value;
+}
+
+function normalizePinImageReplacement(value) {
+  if (!isPlainObject(value)) throw new Error('贴图图片替换格式无效。');
+  const expected = ['baseRevision', 'dataURL', 'height', 'revision', 'sourceHeight', 'sourceWidth', 'width'];
+  const keys = Object.keys(value).sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new Error('贴图图片替换字段无效。');
+  }
+  if (!Number.isSafeInteger(value.baseRevision) || value.baseRevision < 0 || value.baseRevision >= 2147483647) {
+    throw new Error('贴图图片替换 baseRevision 无效。');
+  }
+  if (!Number.isSafeInteger(value.revision) || value.revision !== value.baseRevision + 1 || value.revision > 2147483647) {
+    throw new Error('贴图图片替换 revision 必须严格递增。');
+  }
+  const sourceWidth = normalizeImageDimension(value.sourceWidth, '原图片');
+  const sourceHeight = normalizeImageDimension(value.sourceHeight, '原图片');
+  const width = normalizeImageDimension(value.width, '新图片');
+  const height = normalizeImageDimension(value.height, '新图片');
+  if (sourceWidth * sourceHeight > 150 * 1024 * 1024 || width * height > 150 * 1024 * 1024) {
+    throw new Error('贴图图片替换尺寸过大。');
+  }
+  return {
+    baseRevision: value.baseRevision,
+    revision: value.revision,
+    dataURL: requireImageDataURL(value.dataURL),
+    sourceWidth,
+    sourceHeight,
+    width,
+    height,
+  };
+}
+
+function normalizePinGroupAction(value) {
+  if (!isPlainObject(value)) throw new Error('贴图分组操作格式无效。');
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== 'action') throw new Error('贴图分组操作字段无效。');
+  if (!['create', 'toggle-visibility', 'ungroup'].includes(value.action)) {
+    throw new Error('贴图分组操作无效。');
+  }
+  return { action: value.action };
+}
+
+function normalizeFormulaPinPayload(value) {
+  if (!isPlainObject(value)) throw new Error('公式贴图格式无效。');
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== 'dataURL') throw new Error('公式贴图字段无效。');
+  return { dataURL: requireImageDataURL(value.dataURL) };
+}
+
 function normalizeProviderTestTarget(value) {
   if (value === undefined) return undefined;
   if (typeof value !== 'string' || !['deepseek', 'minimax', 'openai'].includes(value)) {
@@ -208,7 +264,7 @@ function normalizeProviderTestTarget(value) {
 
 function normalizeRecordingPayload(value) {
   if (!isPlainObject(value)) throw new Error('录制数据格式无效。');
-  const allowed = new Set(['buffer', 'mime', 'toGif', 'fps', 'trimStart', 'trimEnd']);
+  const allowed = new Set(['buffer', 'mime', 'toGif', 'fps', 'trimStart', 'trimEnd', 'width', 'height']);
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) throw new Error(`未知录制参数：${key}`);
   }
@@ -240,6 +296,8 @@ function normalizeRecordingPayload(value) {
     fps: boundedNumber(value.fps, '录制帧率', null, 1, 60, true),
     trimStart: boundedNumber(value.trimStart, '裁剪起点', 0, 0, 24 * 60 * 60),
     trimEnd: boundedNumber(value.trimEnd, '裁剪终点', 0, 0, 24 * 60 * 60),
+    width: boundedNumber(value.width, '录屏宽度', 0, 0, 32768, true),
+    height: boundedNumber(value.height, '录屏高度', 0, 0, 32768, true),
   };
 }
 
@@ -294,6 +352,9 @@ function normalizeConfigValue(value, defaultValue, keyPath) {
     if (typeof value !== 'string') throw new Error(`${keyPath} 必须是文本。`);
     if (value.length > configStringLimit(keyPath) || value.includes('\0')) throw new Error(`${keyPath} 文本无效或过长。`);
     if (keyPath === 'ocr.lang') return normalizeOCRLanguage(value);
+    if (keyPath === 'capture.fileNameTemplate' || keyPath === 'recording.fileNameTemplate') {
+      return normalizeFilenameTemplate(value);
+    }
     const enums = CONFIG_ENUMS[keyPath];
     if (enums && !enums.includes(value)) throw new Error(`${keyPath} 取值无效。`);
     if (keyPath.endsWith('.baseUrl')) return normalizeProviderBaseUrl(value);
@@ -355,6 +416,9 @@ module.exports = {
   normalizeOCRLanguage,
   normalizeConfigPatch,
   normalizePinStateFlags,
+  normalizePinImageReplacement,
+  normalizePinGroupAction,
+  normalizeFormulaPinPayload,
   normalizeProviderTestTarget,
   normalizeRecordingPayload,
 };

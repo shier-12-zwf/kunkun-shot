@@ -55,6 +55,26 @@ test('recording history failure is contained after the user export has succeeded
   assert.deepEqual(failures, ['history disk unavailable']);
 });
 
+test('recording history forwards dimensions for filename-template exports', async () => {
+  let received = null;
+  const expected = { id: 'recording-1' };
+  const item = await persistRecordingHistory('/tmp/export.webm', {
+    addMedia: async (filePath, type, metadata) => {
+      received = { filePath, type, metadata };
+      return expected;
+    },
+    width: 1920,
+    height: 1080,
+  });
+
+  assert.equal(item, expected);
+  assert.deepEqual(received, {
+    filePath: '/tmp/export.webm',
+    type: 'recording',
+    metadata: { width: 1920, height: 1080 },
+  });
+});
+
 test('recording history uses a managed private copy without blocking the main process', async (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kk-shot-recording-history-'));
   t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
@@ -62,13 +82,15 @@ test('recording history uses a managed private copy without blocking the main pr
   fs.writeFileSync(original, Buffer.from('recording-bytes'), { mode: 0o600 });
   const history = loadHistory(tempDir);
 
-  const pending = history.addMedia(original, 'recording');
+  const pending = history.addMedia(original, 'recording', { width: 1280, height: 720 });
   assert.equal(typeof pending.then, 'function', 'copying a large recording must be asynchronous');
   const item = await pending;
 
   assert.ok(item);
   assert.equal(item.type, 'recording');
   assert.equal(item.kind, 'media');
+  assert.equal(item.width, 1280);
+  assert.equal(item.height, 720);
   assert.equal(history.list().length, 0, 'image-only consumers must not receive video records');
   assert.deepEqual(history.list({ includeMedia: true }).map((entry) => entry.type), ['recording']);
   const managed = history.filePathOf(item.id);

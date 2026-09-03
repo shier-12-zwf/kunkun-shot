@@ -12,10 +12,14 @@ const {
   createSwiftBinaryProvider
 } = require('../src/main/swift-binary-cache');
 const {
+  compileThinSwiftHelper,
   packageSwiftHelpers,
   resolveBuilderArch
 } = require('../scripts/package-swift-helpers');
-const { AX_PROBE_SOURCE } = require('../src/main/swift-helper-sources');
+const {
+  AX_PROBE_SOURCE,
+  RECORD_ACTIONS_SOURCE
+} = require('../src/main/swift-helper-sources');
 
 const CPU_TYPES = {
   x64: 0x01000007,
@@ -249,6 +253,40 @@ test('afterPack can reuse source-bound verified helpers when the local Swift too
   }
 });
 
+test('afterPack can combine verified prebuilt Swift helpers with a newly compiled C helper', async (t) => {
+  const appContentsDir = tempDir(t, 'kunkun-hybrid-helper-app-');
+  const prebuiltHelperDir = tempDir(t, 'kunkun-hybrid-helper-source-');
+  const swiftHelper = { name: 'axprobe', source: 'print("reuse-swift")' };
+  const cHelper = {
+    name: 'record-actions',
+    source: 'int main(void) { return 0; }',
+    language: 'c'
+  };
+  writeExecutable(
+    path.join(prebuiltHelperDir, helperFilename(swiftHelper.name, swiftHelper.source)),
+    thinMachO('arm64')
+  );
+  const calls = [];
+
+  const paths = await packageSwiftHelpers(
+    { arch: 3 },
+    appContentsDir,
+    {
+      helpers: [swiftHelper, cHelper],
+      prebuiltHelperDir,
+      compileThin: async (request) => {
+        calls.push(request);
+        writeExecutable(request.outputPath, thinMachO(request.arch));
+      }
+    }
+  );
+
+  assert.equal(paths.length, 2);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, 'record-actions');
+  assert.equal(calls[0].language, 'c');
+});
+
 test('afterPack refuses a symlink masquerading as a verified prebuilt helper', async (t) => {
   const appContentsDir = tempDir(t, 'kunkun-prebuilt-symlink-app-');
   const prebuiltHelperDir = tempDir(t, 'kunkun-prebuilt-symlink-source-');
@@ -324,4 +362,44 @@ test('afterPack compiler fails when swiftc output is missing or has the wrong ar
     ),
     /架构.*arm64/
   );
+});
+
+test('afterPack passes a native helper language through to the compiler', async (t) => {
+  const appContentsDir = tempDir(t, 'kunkun-native-language-app-');
+  const helper = {
+    name: 'record-actions',
+    source: 'int main(void) { return 0; }',
+    language: 'c'
+  };
+  let seen;
+
+  await packageSwiftHelpers(
+    { arch: 3 },
+    appContentsDir,
+    {
+      helpers: [helper],
+      compileThin: async (request) => {
+        seen = request;
+        writeExecutable(request.outputPath, thinMachO(request.arch));
+      }
+    }
+  );
+
+  assert.equal(seen.language, 'c');
+});
+
+test('record action C helper compiles with clang even when swiftc is unavailable', {
+  skip: process.platform !== 'darwin'
+}, async (t) => {
+  const dir = tempDir(t, 'kunkun-record-actions-clang-');
+  const outputPath = path.join(dir, 'record-actions');
+  await compileThinSwiftHelper({
+    name: 'record-actions',
+    source: RECORD_ACTIONS_SOURCE,
+    language: 'c',
+    arch: process.arch,
+    outputPath
+  });
+  assert.deepEqual(inspectMachOArchitectures(outputPath), [process.arch]);
+  assert.notEqual(fs.statSync(outputPath).mode & 0o111, 0);
 });

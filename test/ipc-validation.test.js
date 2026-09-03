@@ -15,6 +15,9 @@ const {
   normalizeOCRLanguage,
   normalizeConfigPatch,
   normalizePinStateFlags,
+  normalizePinImageReplacement,
+  normalizePinGroupAction,
+  normalizeFormulaPinPayload,
   normalizeProviderTestTarget,
   normalizeRecordingPayload,
 } = require('../src/main/ipc-validation');
@@ -113,12 +116,15 @@ test('configuration patches are schema-bound and role-scoped', () => {
 });
 
 test('OCR language input is a fixed fail-closed selection, not an arbitrary language-code string', () => {
-  for (const lang of ['chi_sim+eng', 'chi_sim', 'eng']) {
+  for (const lang of [
+    'chi_sim+eng', 'chi_tra+eng', 'jpn+eng', 'kor+eng', 'fra+eng', 'deu+eng', 'spa+eng', 'por+eng',
+    'chi_sim', 'chi_tra', 'eng', 'jpn', 'kor', 'fra', 'deu', 'spa', 'por',
+  ]) {
     assert.equal(normalizeOCRLanguage(lang), lang);
     assert.deepEqual(normalizeConfigPatch({ ocr: { lang } }, 'main'), { ocr: { lang } });
   }
 
-  for (const lang of ['jpn', 'chi_sim+jpn', 'eng+chi_sim', 'chi_sim+eng+chi_sim', '', ' chi_sim ']) {
+  for (const lang of ['rus', 'chi_sim+jpn', 'eng+chi_sim', 'chi_sim+eng+chi_sim', '', ' chi_sim ']) {
     assert.throws(() => normalizeOCRLanguage(lang), /OCR.*语言/);
     assert.throws(() => normalizeConfigPatch({ ocr: { lang } }, 'main'), /ocr\.lang|OCR.*语言/i);
   }
@@ -141,12 +147,49 @@ test('pin state and provider test selectors reject unexpected renderer input', (
   assert.throws(() => normalizeProviderTestTarget('attacker-controlled'), /提供方/);
 });
 
+test('advanced pin operations use exact, bounded IPC payloads', () => {
+  assert.deepEqual(normalizePinImageReplacement({
+    baseRevision: 2,
+    revision: 3,
+    dataURL: tinyPng,
+    sourceWidth: 1,
+    sourceHeight: 1,
+    width: 1,
+    height: 1,
+  }), {
+    baseRevision: 2,
+    revision: 3,
+    dataURL: tinyPng,
+    sourceWidth: 1,
+    sourceHeight: 1,
+    width: 1,
+    height: 1,
+  });
+  assert.throws(() => normalizePinImageReplacement({
+    baseRevision: 2, revision: 4, dataURL: tinyPng,
+    sourceWidth: 1, sourceHeight: 1, width: 1, height: 1,
+  }), /递增/);
+  assert.throws(() => normalizePinImageReplacement({
+    baseRevision: 2, revision: 3, dataURL: tinyPng,
+    sourceWidth: 1, sourceHeight: 1, width: 50000, height: 1,
+  }), /尺寸/);
+  assert.deepEqual(normalizePinGroupAction({ action: 'create' }), { action: 'create' });
+  assert.deepEqual(normalizePinGroupAction({ action: 'toggle-visibility' }), { action: 'toggle-visibility' });
+  assert.deepEqual(normalizePinGroupAction({ action: 'ungroup' }), { action: 'ungroup' });
+  assert.throws(() => normalizePinGroupAction({ action: 'delete-all' }), /分组/);
+  assert.throws(() => normalizePinGroupAction({ action: 'create', extra: true }), /字段/);
+  assert.deepEqual(normalizeFormulaPinPayload({ dataURL: tinyPng }), { dataURL: tinyPng });
+  assert.throws(() => normalizeFormulaPinPayload({ dataURL: tinyPng, html: '<script>' }), /字段/);
+});
+
 test('recording payloads require a WebM header and strictly typed options', () => {
   const webm = Uint8Array.from([0x1a, 0x45, 0xdf, 0xa3, 0x00]);
   const normalized = normalizeRecordingPayload({
     buffer: webm,
     toGif: false,
     fps: 120,
+    width: 1440.4,
+    height: 99999,
     trimStart: -5,
     trimEnd: 9.5,
   });
@@ -155,8 +198,11 @@ test('recording payloads require a WebM header and strictly typed options', () =
   assert.equal(normalized.fps, 60);
   assert.equal(normalized.trimStart, 0);
   assert.equal(normalized.trimEnd, 9.5);
+  assert.equal(normalized.width, 1440);
+  assert.equal(normalized.height, 32768);
   assert.throws(() => normalizeRecordingPayload({ buffer: Uint8Array.from([1, 2, 3, 4]) }), /WebM/);
   assert.throws(() => normalizeRecordingPayload({ buffer: webm, toGif: 'yes' }), /布尔/);
   assert.throws(() => normalizeRecordingPayload({ buffer: webm, fps: '30' }), /有限数字/);
+  assert.throws(() => normalizeRecordingPayload({ buffer: webm, width: '1440' }), /有限数字/);
   assert.throws(() => normalizeRecordingPayload({ buffer: webm, extra: true }), /未知/);
 });

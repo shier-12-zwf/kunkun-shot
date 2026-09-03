@@ -8,6 +8,8 @@ const { app } = require('electron');
 const { createSwiftBinaryCache, createSwiftBinaryProvider } = require('./swift-binary-cache');
 
 const SWIFTC = '/usr/bin/swiftc';
+const CLANG = '/usr/bin/clang';
+const XCRUN = '/usr/bin/xcrun';
 
 function binDir() {
   const dir = path.join(app.getPath('userData'), 'swift-bin');
@@ -17,31 +19,61 @@ function binDir() {
   return dir;
 }
 
-function compileSwift(sourcePath, outputPath) {
+function execFilePromise(command, args, options) {
   return new Promise((resolve, reject) => {
-    execFile(SWIFTC, ['-O', sourcePath, '-o', outputPath], { timeout: 120000 }, (err) => {
+    execFile(command, args, options, (err, stdout) => {
       if (err) {
-        const raw = String((err && err.message) || err || '');
-        // 已知系统问题：CLT 与 SDK 的 SwiftBridging modulemap 冲突（macOS 更新后常见）
-        if (raw.indexOf('SwiftBridging') >= 0) {
-          reject(
-            new Error(
-              'Swift 工具链异常（SwiftBridging 模块冲突）。请重装命令行工具后重试：' +
-                '终端执行 `sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install`，' +
-                '完成后重启本应用。'
-            )
-          );
-        } else {
-          reject(new Error('swiftc 编译失败：' + raw));
-        }
+        reject(err);
         return;
       }
-      resolve();
+      resolve(String(stdout || ''));
     });
   });
 }
 
-const binaryCache = createSwiftBinaryCache({ cacheDir: binDir, compile: compileSwift });
+async function compileNativeHelper(sourcePath, outputPath, request) {
+  const language = request && request.language === 'c' ? 'c' : 'swift';
+  if (language === 'c') {
+    try {
+      const sdkPath = (await execFilePromise(
+        XCRUN,
+        ['--sdk', 'macosx', '--show-sdk-path'],
+        { encoding: 'utf8', timeout: 30000 }
+      )).trim();
+      if (!sdkPath) throw new Error('xcrun 未返回 macOS SDK 路径。');
+      await execFilePromise(
+        CLANG,
+        [
+          '-O2', '-isysroot', sdkPath,
+          '-framework', 'ApplicationServices',
+          '-framework', 'CoreFoundation',
+          sourcePath, '-o', outputPath
+        ],
+        { timeout: 120000 }
+      );
+      return;
+    } catch (error) {
+      throw new Error('clang 编译 native helper 失败：' + String((error && error.message) || error || ''));
+    }
+  }
+
+  try {
+    await execFilePromise(SWIFTC, ['-O', sourcePath, '-o', outputPath], { timeout: 120000 });
+  } catch (err) {
+    const raw = String((err && err.message) || err || '');
+    // 已知系统问题：CLT 与 SDK 的 SwiftBridging modulemap 冲突（macOS 更新后常见）
+    if (raw.indexOf('SwiftBridging') >= 0) {
+      throw new Error(
+        'Swift 工具链异常（SwiftBridging 模块冲突）。请重装命令行工具后重试：' +
+          '终端执行 `sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install`，' +
+          '完成后重启本应用。'
+      );
+    }
+    throw new Error('swiftc 编译失败：' + raw);
+  }
+}
+
+const binaryCache = createSwiftBinaryCache({ cacheDir: binDir, compile: compileNativeHelper });
 const binaryProvider = createSwiftBinaryProvider({
   isPackaged: () => app.isPackaged,
   resourcesPath: () => process.resourcesPath,
@@ -51,8 +83,8 @@ const binaryProvider = createSwiftBinaryProvider({
 
 // 已打包模式返回包内 helper；开发模式首次调用才编译并缓存。
 // 同一进程的并发请求共享编译 Promise；临时文件名包含随机后缀，避免多进程互相覆盖。
-function ensureBinary({ name, source }) {
-  return binaryProvider.ensureBinary({ name, source });
+function ensureBinary({ name, source, language }) {
+  return binaryProvider.ensureBinary({ name, source, language });
 }
 
 // 跑二进制并收集 stdout（带超时，超时 kill 进程）
