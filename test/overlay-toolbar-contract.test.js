@@ -22,12 +22,20 @@ test('compact overlay toolbar preserves every tool and action exactly once', () 
   );
   const actions = Array.from(toolbar.matchAll(/data-action="([^"]+)"/g), (match) => match[1]);
   const tools = Array.from(toolbar.matchAll(/data-tool="([^"]+)"/g), (match) => match[1]);
+  const directActions = Array.from(
+    toolbar.matchAll(/<button\b([^>]*class="[^"]*\baction-btn\b[^"]*"[^>]*)>/g),
+    (match) => match[1]
+  )
+    .filter((attributes) => !/\btoolbar-menu-item\b/.test(attributes))
+    .map((attributes) => attributes.match(/\bdata-action="([^"]+)"/)?.[1])
+    .filter(Boolean);
 
   assert.deepEqual(
     [...actions].sort(),
     ['ask', 'cancel', 'copy', 'formula', 'ocr', 'pin', 'polish', 'qr', 'quickSave', 'save', 'table', 'translate']
   );
   assert.equal(new Set(actions).size, actions.length);
+  assert.deepEqual(directActions.slice(0, 2), ['translate', 'ocr']);
   assert.deepEqual(
     [...tools].sort(),
     ['arrow', 'ellipse', 'highlight', 'line', 'mosaic', 'number', 'pen', 'polyline', 'rect', 'select', 'text']
@@ -60,7 +68,8 @@ test('secondary tools remain inside the delegated toolbar and expose accessible 
   assert.match(annotationMenu, />荧光笔</);
   assert.match(actionMenu, /data-action="table"[\s\S]*?>AI 表格</);
   assert.match(actionMenu, /data-action="formula"[\s\S]*?>AI 公式</);
-  assert.match(actionMenu, /data-action="translate"[\s\S]*?>原位翻译</);
+  assert.doesNotMatch(actionMenu, /data-action="translate"/);
+  assert.match(actionMenu, /data-action="ask"[\s\S]*?>问 AI</);
   assert.match(actionMenu, /id="trLang"/);
   for (const id of ['btnRatioLock', 'btnRounded', 'btnAx', 'btnFrame']) {
     assert.match(actionMenu, new RegExp(`id="${id}"[\\s\\S]*?aria-pressed="false"`));

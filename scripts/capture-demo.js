@@ -525,7 +525,10 @@ async function probeOverlayToolbar() {
         menuScrollHeight: menu && visible(menu) ? menu.scrollHeight : null,
         menuOverflowY: menu && visible(menu) ? getComputedStyle(menu).overflowY : null,
         labels,
-        actions: Array.from(toolbar.querySelectorAll('[data-action]'), (node) => node.dataset.action).sort()
+        actions: Array.from(toolbar.querySelectorAll('[data-action]'), (node) => node.dataset.action).sort(),
+        directVisibleActions: Array.from(toolbar.querySelectorAll('#actionGroup > .action-btn[data-action]'))
+          .filter((node) => visible(node))
+          .map((node) => node.dataset.action)
       };
     })()`, true);
 
@@ -628,6 +631,10 @@ async function probeOverlayToolbar() {
     const failures = [];
     const expectedActions = ['ask', 'cancel', 'copy', 'formula', 'ocr', 'pin', 'polish', 'qr', 'quickSave', 'save', 'table', 'translate'];
     if (JSON.stringify(base.actions) !== JSON.stringify(expectedActions)) failures.push(`action contract changed: ${base.actions.join(',')}`);
+    const expectedLeadingDirectActions = ['translate', 'ocr'];
+    if (JSON.stringify(base.directVisibleActions.slice(0, 2)) !== JSON.stringify(expectedLeadingDirectActions)) {
+      failures.push(`visible primary action order changed: ${base.directVisibleActions.join(',')}`);
+    }
     if (base.toolbar.left < 1 || base.toolbar.right > base.viewport.width - 1) failures.push(`toolbar leaves viewport: ${JSON.stringify(base.toolbar)}`);
     if (base.toolbar.height > 46) failures.push(`toolbar is no longer a compact single row: ${base.toolbar.height}px`);
     if (base.toolbar.width > Math.min(1000, base.viewport.width - 4)) failures.push(`toolbar is too wide: ${base.toolbar.width}px`);
@@ -663,7 +670,7 @@ async function probeOverlayToolbar() {
     }
     if (axSelection.axPressed !== 'false' || !axSelection.toolbarVisible) failures.push(`smart selection did not return to the toolbar: ${JSON.stringify(axSelection)}`);
     if (failures.length) throw new Error(failures.join(' | '));
-    return { viewport: base.viewport, toolbar: base.toolbar, actionMenu: action.menu, annotationMenu: annotation.menu, middleActionMenu: middleAction.menu, options, axSelection };
+    return { viewport: base.viewport, toolbar: base.toolbar, directVisibleActions: base.directVisibleActions, actionMenu: action.menu, annotationMenu: annotation.menu, middleActionMenu: middleAction.menu, options, axSelection };
   } finally {
     win.destroy();
   }

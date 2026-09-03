@@ -11,6 +11,7 @@
     region: '<path d="M7 3v4H3 M17 3v4h4 M7 21v-4H3 M17 21v-4h4"/>',
     window: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18"/>',
     fullscreen: '<path d="M4 9V4h5 M20 9V4h-5 M4 15v5h5 M20 15v5h-5"/>',
+    long: '<rect x="6" y="3" width="12" height="18" rx="2"/><path d="M9 8h6 M9 12h6 M12 15v4 M9.5 17l2.5 2 2.5-2"/>',
     timer: '<circle cx="12" cy="13" r="8"/><path d="M12 13V9 M9 2h6"/>',
     record: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/>',
     history: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
@@ -191,7 +192,15 @@
         },
       });
 
-      // 4) 延时截图（无快捷键；3s/5s 选择 + 可见倒计时）
+      // 4) 长截图（带快捷键）
+      const aLong = makeAction({
+        key: 'long',
+        icon: 'long',
+        label: '长截图',
+        onClick: () => api.triggerCapture('long'),
+      });
+
+      // 5) 延时截图（无快捷键；3s/5s 选择 + 可见倒计时）
       const aTimed = makeAction({
         key: 'timed',
         icon: 'timer',
@@ -335,7 +344,7 @@
         }
       }
 
-      // 5) 录屏（带快捷键）
+      // 6) 录屏（带快捷键）
       const aRecord = makeAction({
         key: 'record',
         icon: 'record',
@@ -432,8 +441,9 @@
         const sc = (config && config.shortcuts) || {};
         const cap = (config && config.capture) || {};
 
-        // 仅区域截图与录屏显示快捷键（窗口/全屏/延时无快捷键）
+        // 显示已经注册的捕捉快捷键（窗口/全屏/延时没有独立快捷键）
         setHint(aRegion, sc.capture);
+        setHint(aLong, sc.longShot);
         setHint(aRecord, sc.record);
 
         autoCopy.checked = !!cap.copyAfterCapture;

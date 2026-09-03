@@ -40,6 +40,15 @@
     return true;
   }
 
+  // 静态截图动作必须等待底图完成解码，否则 canvas 会导出一张尺寸正确但全透明的 PNG。
+  // 长截图与录屏只提交选区坐标，不依赖当前静态底图。
+  function getOverlayActionReadiness(state, action) {
+    if (action === 'record' || action === 'long') return { ok: true };
+    if (!state || !state.bgReady) return { ok: false, reason: 'loading' };
+    if (!state.bgImage) return { ok: false, reason: 'failed' };
+    return { ok: true };
+  }
+
   function resolveInitialOverlayRect(mode, width, height) {
     if (mode !== 'fullscreen' && mode !== 'image') return null;
     var w = Number(width);
@@ -578,6 +587,7 @@
   // Node 回归测试只加载上面的纯异步契约，不初始化 renderer DOM。
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
+      getOverlayActionReadiness,
       submitOverlayResult,
       resolveInitialOverlayRect,
       mapOverlayRectToSource,
@@ -776,11 +786,15 @@
       bgCtx.drawImage(img, 0, 0);
       S.bgReady = true;
       // 用户可能在大图完成解码前已经框选；底图就绪后补扫一次。
-      if (S.rect) scanQr();
+      if (S.rect) {
+        hint.hidden = true;
+        scanQr();
+        showToolbar();
+      }
     };
     img.onerror = function () {
-      // 背景加载失败也允许框选，只是没有底图
       S.bgReady = true;
+      if (S.rect) showToolbar();
     };
     img.src = payload.dataURL;
 
@@ -1146,10 +1160,8 @@
       S.dragMode = null;
       S.resizeHandle = null;
       hideMagnifier();
-      // 拖动/缩放期间 startMove/startResize 把 toolbar.hidden 置 true；positionToolbar 开头有
-      // `if (toolbar.hidden) return` 守卫，故必须先复位 hidden 再定位，否则工具栏拖动后永久消失。
-      if (S.rect) toolbar.hidden = false;
-      positionToolbar();
+      // 统一经由 showToolbar 恢复，避免大图未解码时拖动/缩放绕过就绪门禁。
+      showToolbar();
       scanQr();
       return;
     }
@@ -1258,6 +1270,22 @@
     updateActionOptionsIndicator();
   }
 
+  function showBackgroundLoadFailure() {
+    toolbar.hidden = true;
+    hint.textContent = '截图加载失败 · 请按 Esc 取消后重试';
+    hint.hidden = false;
+    showTip('截图加载失败，请按 Esc 取消后重试');
+  }
+
+  function ensureOverlayActionReady(action) {
+    var readiness = getOverlayActionReadiness(S, action);
+    if (readiness.ok) return true;
+    toolbar.hidden = true;
+    if (readiness.reason === 'failed') showBackgroundLoadFailure();
+    else showTip('截图仍在加载，请稍候再试');
+    return false;
+  }
+
   function showToolbar() {
     // record / long 模式不需要标注与工具栏，选完直接提交
     if (S.mode === 'record') {
@@ -1268,6 +1296,7 @@
       finishAction('long');
       return;
     }
+    if (!ensureOverlayActionReady(S.defaultAction || 'copy')) return;
     closeToolbarMenus();
     toolbar.hidden = false;
     positionToolbar();
@@ -1377,6 +1406,8 @@
       closeToolbarMenus();
       if (action === 'cancel') {
         doCancel();
+      } else if (!ensureOverlayActionReady(action)) {
+        return;
       } else if (action === 'qr') {
         showQrPanel();
       } else if (action === 'ocr') {
@@ -2603,6 +2634,7 @@
       doCancel();
       return;
     }
+    if (!ensureOverlayActionReady(action)) return;
     commitText();
     // 只记录用户实际确认时的最终选区；初次框选后可能还会移动/缩放。
     // 提交失败重试时 appendRecentRect 会去重，避免一条选区被重复写入。
@@ -3090,8 +3122,7 @@
     S.aiBusy = false;
     closeAIPanelDom();
     if (S.rect && !S.finished) {
-      toolbar.hidden = false;
-      positionToolbar();
+      showToolbar();
     }
   }
 
@@ -3495,8 +3526,7 @@
     S.selected = null;
     if (typeof clearInlineTranslate === 'function') clearInlineTranslate();
     updateSelectionView();
-    toolbar.hidden = false;
-    positionToolbar();
+    showToolbar();
     scanQr();
     showTip('载入选区 ' + (idx + 1) + '/' + S.recentRects.length);
   }

@@ -157,3 +157,12 @@ test('active pin workspace is restored on ready and flushed before pin windows c
   const closeAt = quit.indexOf('windows.closeAll()');
   assert.ok(saveAt >= 0 && closeAt > saveAt, 'workspace must be saved before closing live pin windows');
 });
+
+test('smoke mode exits deterministically after the normal quit cleanup for both status codes', () => {
+  const quit = between("app.on('will-quit'", '\n  });\n}');
+  assert.match(
+    quit,
+    /process\.env\.KK_SMOKE\s*&&\s*smokeExitCode\s*!==\s*null[\s\S]*?app\.exit\(smokeExitCode\)/
+  );
+  assert.doesNotMatch(quit, /if\s*\(\s*smokeExitCode\s*&&/);
+});

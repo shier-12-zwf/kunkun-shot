@@ -3,7 +3,55 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { submitOverlayResult } = require('../src/renderer/overlay/overlay.js');
+const {
+  getOverlayActionReadiness,
+  submitOverlayResult,
+} = require('../src/renderer/overlay/overlay.js');
+
+test('static overlay actions wait for a decoded source image instead of creating a blank result', () => {
+  assert.deepEqual(getOverlayActionReadiness({ bgReady: false, bgImage: null }, 'pin'), {
+    ok: false,
+    reason: 'loading',
+  });
+  assert.deepEqual(getOverlayActionReadiness({ bgReady: true, bgImage: null }, 'pin'), {
+    ok: false,
+    reason: 'failed',
+  });
+  assert.deepEqual(getOverlayActionReadiness({ bgReady: true, bgImage: {} }, 'pin'), { ok: true });
+});
+
+test('live capture actions do not require a decoded static screenshot', () => {
+  assert.deepEqual(getOverlayActionReadiness({ bgReady: false, bgImage: null }, 'long'), { ok: true });
+  assert.deepEqual(getOverlayActionReadiness({ bgReady: false, bgImage: null }, 'record'), { ok: true });
+});
+
+test('every toolbar restore path keeps the decoded-image gate and load failures stay actionable', () => {
+  const overlaySource = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'renderer', 'overlay', 'overlay.js'),
+    'utf8'
+  );
+  const mouseupStart = overlaySource.indexOf("if (S.dragMode === 'move' || S.dragMode === 'resize')");
+  const mouseupEnd = overlaySource.indexOf('if (S.shapeDrag)', mouseupStart);
+  const closeAiStart = overlaySource.indexOf('function closeAIPanel()');
+  const closeAiEnd = overlaySource.indexOf('// ================= 键盘', closeAiStart);
+  const recentStart = overlaySource.indexOf('function applyRecentRect(step)');
+  const recentEnd = overlaySource.indexOf('bindQrPanel()', recentStart);
+
+  for (const [name, source] of [
+    ['drag/resize', overlaySource.slice(mouseupStart, mouseupEnd)],
+    ['AI panel close', overlaySource.slice(closeAiStart, closeAiEnd)],
+    ['recent selection', overlaySource.slice(recentStart, recentEnd)],
+  ]) {
+    assert.match(source, /showToolbar\(\)/, `${name} must restore through the readiness gate`);
+    assert.doesNotMatch(source, /toolbar\.hidden\s*=\s*false/, `${name} must not bypass the readiness gate`);
+  }
+
+  assert.match(
+    overlaySource,
+    /function showBackgroundLoadFailure\(\)[\s\S]*?hint\.textContent\s*=\s*['"]截图加载失败[^'"]*Esc[^'"]*['"][\s\S]*?hint\.hidden\s*=\s*false/,
+    '解码失败后应保留持久且可操作的退出提示'
+  );
+});
 
 test('overlay stays retryable when the main process reports a canceled or failed action', async () => {
   for (const outcome of [undefined, null, { ok: false, canceled: true }, { ok: false, error: 'disk full' }]) {

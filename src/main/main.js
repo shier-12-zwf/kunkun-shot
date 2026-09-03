@@ -2297,9 +2297,11 @@ if (!gotLock) {
               const recentName = document.getElementById('recentName');
               const recentThumb = document.getElementById('recentThumb');
               const chipOcr = document.getElementById('chipOcr');
+              const btnLong = document.getElementById('btnLong');
               const ready = location.pathname.endsWith('/popover/popover.html')
                 && document.readyState === 'complete'
                 && !!document.getElementById('pop')
+                && !!btnLong && btnLong.textContent.trim() === '长截图'
                 && !!recentName && recentName.textContent.startsWith('区域截图')
                 && !!recentThumb && recentThumb.style.backgroundImage.includes('kkthumb://img/')
                 && !!chipOcr && chipOcr.disabled === false;
@@ -2323,7 +2325,8 @@ if (!gotLock) {
               && !!title && title.textContent.trim() === '快捷截图'
               && !!version && version.textContent.trim() === `版本 ${expectedVersion}`
               && !!document.querySelector('#page .cap-stage')
-              && !!document.querySelector('#page .cap-actions');
+              && !!document.querySelector('#page .cap-actions')
+              && !!document.querySelector('#page .cap-action[data-key="long"]');
             return {
               ready,
               page: location.pathname,
@@ -2380,11 +2383,17 @@ if (!gotLock) {
           });
           return waitForRenderer(overlayWin, 'overlay', function smokeOverlayProbe() {
             const canvas = document.getElementById('bgCanvas');
+            const primaryActions = Array.from(
+              document.querySelectorAll('#actionGroup > .action-btn[data-action]'),
+              (node) => node.dataset.action
+            );
             const ready = location.pathname.endsWith('/overlay/overlay.html')
               && !!canvas && canvas.width === 1 && canvas.height === 1
               && !!document.getElementById('selection')
-              && !!document.getElementById('toolbar');
-            return { ready, canvas: canvas && `${canvas.width}x${canvas.height}` };
+              && !!document.getElementById('toolbar')
+              && primaryActions[0] === 'translate'
+              && primaryActions[1] === 'ocr';
+            return { ready, canvas: canvas && `${canvas.width}x${canvas.height}`, primaryActions };
           });
         });
 
@@ -2553,8 +2562,9 @@ if (!gotLock) {
       ownedSmokeUserData = null;
     }
     // Electron 的 app.quit() 固定以 0 退出，不采纳 Node 的 process.exitCode。
-    // 所有同步清理已完成后，仅失败冒烟测试需用 app.exit(1) 传递正确状态。
-    if (smokeExitCode && process.env.KK_SMOKE) app.exit(smokeExitCode);
+    // 正常/故障注入冒烟都在完成上述正式退出清理后显式结束，避免成功码 0
+    // 因为 falsy 跳过 app.exit 而偶发挂住，同时保留失败码 1。
+    if (process.env.KK_SMOKE && smokeExitCode !== null) app.exit(smokeExitCode);
   });
 }
 

@@ -14,6 +14,7 @@
     btnRegion: document.getElementById('btnRegion'),
     hintRegion: document.getElementById('hintRegion'),
     btnWindow: document.getElementById('btnWindow'),
+    btnLong: document.getElementById('btnLong'),
     btnRecord: document.getElementById('btnRecord'),
     btnFull: document.getElementById('btnFull'),
 
@@ -184,7 +185,7 @@
   }
 
   function setBusy(busy) {
-    [el.btnRegion, el.btnWindow, el.btnRecord, el.btnFull].forEach((b) => { b.disabled = busy; });
+    [el.btnRegion, el.btnWindow, el.btnLong, el.btnRecord, el.btnFull].forEach((b) => { b.disabled = busy; });
     setHeadStatus(busy ? '处理中…' : '就绪');
   }
 
@@ -222,6 +223,7 @@
 
     // 主操作
     bindTrigger(el.btnRegion, 'region', '区域截图');
+    bindTrigger(el.btnLong, 'long', '长截图');
     bindTrigger(el.btnRecord, 'record', '录屏');
     bindCapture(el.btnWindow, () => api.captureWindow(), '正在选择窗口…');
     bindCapture(el.btnFull, () => api.captureFullscreenNow(), '正在全屏截图…');
