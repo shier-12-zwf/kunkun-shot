@@ -4,7 +4,7 @@
 
 一款以 macOS 为首要平台的开源 Electron 截图工具：区域截图与标注、贴图钉屏、多语种离线 OCR、二维码/条码识别、可编辑长截图、带摄像头与操作提示的区域录屏，以及可选的 AI 问图、翻译、表格和公式识别。
 
-> 当前源码版本：`v0.3.0`，仍为早期预览版。源码和自动测试可用不等于所有真机流程已经验收。项目不声称支持 Windows/Linux，也不声称公开构建已经完成 Apple 签名或公证。发布前的真实状态以 [发布检查清单](docs/RELEASE_CHECKLIST.md) 为准。
+> 当前源码版本：`v0.3.1`，仍为早期预览版。源码和自动测试可用不等于所有真机流程已经验收。项目不声称支持 Windows/Linux，也不声称公开构建已经完成 Apple 签名或公证。发布前的真实状态以 [发布检查清单](docs/RELEASE_CHECKLIST.md) 为准。
 
 第一次使用请阅读 [完整使用指南](docs/使用指南.md)；想了解与 PixPin 的逐项差距、证据和后续优先级，请看 [竞品对比与改进报告](docs/PixPin-竞品对比与改进报告.md)。版本变化见 [更新日志](CHANGELOG.md)。
 
@@ -40,7 +40,7 @@
 - 首次安装依赖时可访问 npm 与 `ffmpeg-static` 的二进制下载来源
 
 ```bash
-git clone https://github.com/duangjaiignacy-blip/kunkun-shot.git
+git clone https://github.com/shier-12-zwf/kunkun-shot.git
 cd kunkun-shot
 npm ci
 npm run test:all

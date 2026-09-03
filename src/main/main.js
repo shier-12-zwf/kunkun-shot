@@ -2484,7 +2484,12 @@ if (!gotLock) {
       const stateSummary = (state) => {
         try { return JSON.stringify(state); } catch (_) { return String(state); }
       };
-      const waitForCondition = async (name, inspect, timeoutMs = 3_000) => {
+      const DEFAULT_SMOKE_CHECK_TIMEOUT_MS = 3_000;
+      // AI 窗口的 OCR 探针会真实冷启动 chi_sim+eng 离线 worker。GitHub 的
+      // 全新 macOS runner 没有语言缓存，不能沿用普通 DOM 的 3 秒预算；这里
+      // 略长于产品层 60 秒 OCR 超时，既容纳正常冷启动，也仍能让挂起明确失败。
+      const OCR_SMOKE_CHECK_TIMEOUT_MS = 65_000;
+      const waitForCondition = async (name, inspect, timeoutMs = DEFAULT_SMOKE_CHECK_TIMEOUT_MS) => {
         const deadline = Date.now() + timeoutMs;
         let lastState = '尚未执行';
         while (Date.now() < deadline) {
@@ -2499,7 +2504,7 @@ if (!gotLock) {
         }
         throw new Error(`等待就绪超时；最后状态：${lastState}`);
       };
-      const waitForRenderer = (win, name, probe, ...args) => waitForCondition(name, async () => {
+      const waitForRendererWithTimeout = (win, name, timeoutMs, probe, ...args) => waitForCondition(name, async () => {
         if (!win || win.isDestroyed()) return { ready: false, destroyed: true };
         try {
           const serializedArgs = args.map((arg) => JSON.stringify(arg)).join(',');
@@ -2508,7 +2513,14 @@ if (!gotLock) {
           // 页面导航切换 execution context 时 executeJavaScript 会短暂失败；条件轮询会重试。
           return { ready: false, executionError: error && error.message };
         }
-      });
+      }, timeoutMs);
+      const waitForRenderer = (win, name, probe, ...args) => waitForRendererWithTimeout(
+        win,
+        name,
+        DEFAULT_SMOKE_CHECK_TIMEOUT_MS,
+        probe,
+        ...args,
+      );
       const recordCheck = async (name, task) => {
         try {
           const state = await task();
@@ -2619,18 +2631,34 @@ if (!gotLock) {
           // OCR 全程只走本地引擎；等待 OCR 明确结束，避免外网/API Key 依赖，也避免
           // AI 页刚画出静态 HTML 就被误判为加载成功。
           const aiWin = windows.openAIPanel({ mode: 'ocr', dataURL: tinyPng });
-          return waitForRenderer(aiWin, 'ai', function smokeAiProbe() {
-            const title = document.getElementById('modeTitle');
-            const thumb = document.getElementById('thumbImg');
-            const block = document.getElementById('ocrBlock');
-            const text = document.getElementById('ocrText');
-            const ready = location.pathname.endsWith('/ai/ai.html')
-              && !!title && title.textContent.trim() === '文字识别 OCR'
-              && !!thumb && thumb.complete && thumb.naturalWidth === 1 && thumb.naturalHeight === 1
-              && !!block && block.hidden === false
-              && !!text && text.placeholder === '（未识别到文字，可手动输入）';
-            return { ready, title: title && title.textContent.trim(), ocr: text && text.placeholder };
-          });
+          const state = await waitForRendererWithTimeout(
+            aiWin,
+            'ai',
+            OCR_SMOKE_CHECK_TIMEOUT_MS,
+            function smokeAiProbe() {
+              const title = document.getElementById('modeTitle');
+              const thumb = document.getElementById('thumbImg');
+              const block = document.getElementById('ocrBlock');
+              const text = document.getElementById('ocrText');
+              const shellReady = location.pathname.endsWith('/ai/ai.html')
+                && !!title && title.textContent.trim() === '文字识别 OCR'
+                && !!thumb && thumb.complete && thumb.naturalWidth === 1 && thumb.naturalHeight === 1
+                && !!block && block.hidden === false
+                && !!text;
+              const placeholder = text && text.placeholder;
+              const settled = placeholder === '（未识别到文字，可手动输入）'
+                || placeholder === '识别失败';
+              return {
+                ready: shellReady && settled,
+                title: title && title.textContent.trim(),
+                ocr: placeholder,
+              };
+            },
+          );
+          if (state.ocr !== '（未识别到文字，可手动输入）') {
+            throw new Error(`离线 OCR 未成功结束；状态：${state.ocr || '未知'}`);
+          }
+          return state;
         });
 
         await recordCheck('overlay', async () => {

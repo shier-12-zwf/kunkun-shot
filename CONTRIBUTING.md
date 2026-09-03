@@ -16,7 +16,7 @@
 需要 Node.js 22.12 或更高版本，以及 npm：
 
 ```bash
-git clone https://github.com/duangjaiignacy-blip/kunkun-shot.git
+git clone https://github.com/shier-12-zwf/kunkun-shot.git
 cd kunkun-shot
 npm ci
 npm test
@@ -61,7 +61,7 @@ Thanks for helping improve Kunkun Shot. The project is currently macOS-first and
 Node.js 22.12 or later and npm are required:
 
 ```bash
-git clone https://github.com/duangjaiignacy-blip/kunkun-shot.git
+git clone https://github.com/shier-12-zwf/kunkun-shot.git
 cd kunkun-shot
 npm ci
 npm test

@@ -6,7 +6,7 @@ An open-source, macOS-first Electron screenshot utility with precision capture a
 
 > Status: early preview. Available source code and automated tests do not imply that every hands-on flow has passed acceptance. The project does not claim Windows/Linux support, nor does it claim that public builds are Apple-signed or notarized. See the [release checklist](docs/RELEASE_CHECKLIST.md) for the evidence required before a release.
 
-> Current source version: `v0.3.0`.
+> Current source version: `v0.3.1`.
 
 Start with the [complete Chinese user guide](docs/使用指南.md). The [PixPin comparison and improvement report](docs/PixPin-竞品对比与改进报告.md) documents the evidence, current gaps, and priorities. See the [changelog](CHANGELOG.md) for version history.
 
@@ -42,7 +42,7 @@ Requirements:
 - Network access to npm and the `ffmpeg-static` binary source during the initial dependency installation
 
 ```bash
-git clone https://github.com/duangjaiignacy-blip/kunkun-shot.git
+git clone https://github.com/shier-12-zwf/kunkun-shot.git
 cd kunkun-shot
 npm ci
 npm run test:all

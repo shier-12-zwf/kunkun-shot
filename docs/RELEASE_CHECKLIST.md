@@ -14,6 +14,12 @@ This checklist intentionally separates automated evidence from hands-on validati
 >
 > The repository provides stable local-signing, temporary ad-hoc, and formal-release pipelines. A local-certificate signature only preserves development-install identity on the same Mac; it is not Developer ID, Apple notarization, or a formal release. There are currently no Apple credentials, notarization records, or verified formal artifacts, and pipeline availability is not evidence that a formal release is signed, notarized, or published.
 
+## v0.3.1 补丁发布口径 / Patch release scope
+
+`v0.3.1` 只修正全新环境中真实离线 OCR 冒烟的等待预算，不改变 `v0.3.0` 的用户功能、权限或数据格式。候选源码在本机重新通过 461 项 Node 回归、Electron 正常/故障注入冒烟、截图工具栏交互、JavaScript 语法、直接依赖树及完整/生产依赖审计。
+
+该版本只能在以下条件同时满足后发布：最终提交的 `main` GitHub Actions 整条流水线成功（包括 CI 打包、原生助手产物和打包态冒烟）；随后以同一源码重建固定本机签名应用并完成安装态冒烟与实际启动；公开 Release 仍只提供源码且不附本机 DMG/ZIP。精确提交、Actions 链接、安装版本和产物校验和记录在对应 GitHub Release 中，不能借用下方 `v0.3.0` 的历史证据。
+
 ## v0.3.0 本机发布证据 / Local release evidence
 
 2026-09-03 在 macOS arm64 与 Node.js 22.23.2 上完成以下验证；发布标签指向的提交需保持相同代码与依赖锁定，并在推送前再次执行源码门禁：

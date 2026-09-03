@@ -1,7 +1,7 @@
 {
   "name": "kunkun-shot",
   "productName": "困困截图工具",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "一款 macOS 优先的截图工具：支持区域截图与标注、贴图钉屏、长截图、OCR、录屏，以及可选的 AI 图片问答与文字处理。",
   "main": "src/main/main.js",
   "author": "困困",

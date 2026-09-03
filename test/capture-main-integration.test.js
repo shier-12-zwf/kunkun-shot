@@ -8,6 +8,8 @@ const mainSource = fs.readFileSync(path.join(root, 'src/main/main.js'), 'utf8');
 const channelsSource = fs.readFileSync(path.join(root, 'src/shared/channels.js'), 'utf8');
 const preloadSource = fs.readFileSync(path.join(root, 'src/preload/preload.js'), 'utf8');
 const capturePageSource = fs.readFileSync(path.join(root, 'src/renderer/main/pages/capture.js'), 'utf8');
+const smokeRunnerSource = fs.readFileSync(path.join(root, 'scripts/test-electron-smoke.js'), 'utf8');
+const ocrSource = fs.readFileSync(path.join(root, 'src/main/ocr.js'), 'utf8');
 const { normalizeOverlayResultEnvelope } = require('../src/main/overlay-result-contract');
 
 function between(start, end) {
@@ -181,9 +183,61 @@ test('smoke mode exits deterministically after the normal quit cleanup for both 
 
 test('smoke checks use independent bounded deadlines and quit without interactive dialogs', () => {
   const smoke = between("if (process.env.KK_SMOKE) {", "\n  }).catch((error) => {");
+  const numericLiteral = (source, pattern, label) => {
+    const match = source.match(pattern);
+    assert.ok(match, `${label} must remain an explicit bounded numeric literal`);
+    return Number(match[1].replaceAll('_', ''));
+  };
+  const defaultProbeTimeoutMs = numericLiteral(
+    smoke,
+    /DEFAULT_SMOKE_CHECK_TIMEOUT_MS\s*=\s*([\d_]+)/,
+    'ordinary smoke timeout'
+  );
+  const ocrProbeTimeoutMs = numericLiteral(
+    smoke,
+    /OCR_SMOKE_CHECK_TIMEOUT_MS\s*=\s*([\d_]+)/,
+    'OCR smoke timeout'
+  );
+  const productOcrTimeoutMs = numericLiteral(
+    ocrSource,
+    /timeoutMs:\s*([\d_]+)/,
+    'product OCR timeout'
+  );
+  const outerTimeoutMs = numericLiteral(
+    smokeRunnerSource,
+    /const\s+TIMEOUT_MS\s*=\s*([\d_]+)/,
+    'Electron smoke parent timeout'
+  );
+  const ordinaryProbeCount = (smoke.match(/\bwaitForRenderer\(/g) || []).length
+    + (smoke.match(/\bwaitForCondition\(\s*['"]/g) || []).length;
+
   assert.doesNotMatch(smoke, /const\s+smokeDeadline\s*=/);
   assert.match(smoke, /waitForCondition\s*=\s*async\s*\(name,\s*inspect,\s*timeoutMs\s*=/);
   assert.match(smoke, /const\s+deadline\s*=\s*Date\.now\(\)\s*\+\s*timeoutMs/);
+  assert.ok(
+    ocrProbeTimeoutMs >= productOcrTimeoutMs + 5_000,
+    'the cold-start smoke deadline must outlive the product OCR timeout'
+  );
+  assert.ok(ordinaryProbeCount > 0, 'the parent-budget contract must count ordinary smoke probes');
+  assert.ok(
+    outerTimeoutMs >= ocrProbeTimeoutMs + ordinaryProbeCount * defaultProbeTimeoutMs + 10_000,
+    'the parent must cover OCR, every bounded ordinary probe, and startup/cleanup headroom'
+  );
+  assert.match(
+    smoke,
+    /waitForRendererWithTimeout\(\s*aiWin,\s*['"]ai['"],\s*OCR_SMOKE_CHECK_TIMEOUT_MS/,
+    'cold offline OCR must have its own bounded budget instead of the ordinary DOM deadline'
+  );
+  assert.match(
+    smoke,
+    /placeholder\s*===\s*['"]识别失败['"]/,
+    'an explicit OCR failure may settle polling early so the smoke can report it precisely'
+  );
+  assert.match(
+    smoke,
+    /state\.ocr\s*!==\s*['"]（未识别到文字，可手动输入）['"]/,
+    'the longer OCR deadline must still require a successful settled result'
+  );
 
   const beforeQuit = between("app.on('before-quit'", "app.on('will-quit'");
   assert.match(beforeQuit, /prepareApplicationQuit\(\{\s*interactive:\s*!process\.env\.KK_SMOKE\s*\}\)/);

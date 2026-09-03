@@ -8,7 +8,12 @@ const { spawn } = require('node:child_process');
 
 const ROOT = path.join(__dirname, '..');
 const SMOKE_PREFIX = 'kkshot-smoke-';
-const TIMEOUT_MS = 45_000;
+// 单次冒烟会真实冷启动一次离线 OCR。产品层允许 OCR worker 最多启动/识别
+// 60 秒，因此父进程必须留出更长的退出预算，才能观察到产品自己的明确
+// 成功或失败状态，而不是由测试框架提前 SIGKILL。
+// 还要覆盖其余独立窗口探针与正式退出清理的最坏预算，避免某个前置
+// 检查失败时，父进程在自检收集完整诊断之前先退出。
+const TIMEOUT_MS = 120_000;
 const EXPECTED_CHECKS = [
   'kkthumb',
   'popover',
