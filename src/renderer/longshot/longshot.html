@@ -1,66 +1,52 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' blob: data:; font-src 'self' data:; object-src 'none'; base-uri 'none'" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>长截图 · 困困截图工具</title>
-    <link rel="stylesheet" href="./longshot.css" />
-  </head>
-  <body>
-    <!-- 整个控制条：浅色胶囊，悬浮在选区外面 -->
-    <div class="bar" id="bar">
-      <div class="primary-row">
-        <!-- 左侧状态区：说明 + 帧数 -->
-        <div class="status">
-          <div class="title" id="hint">滚动页面会自动拼接</div>
-          <div class="meta">
-            已保留 <span class="count" id="count">0</span> 帧
-            <span class="dot" id="liveDot" aria-hidden="true"></span>
-          </div>
-        </div>
-
-        <!-- 右侧按钮区 -->
-        <div class="actions">
-          <button class="btn" id="btnDir" title="切换滚动方向（当前：纵向）"><span class="label">纵向</span></button>
-          <button class="btn btn-primary" id="btnStart" title="开始捕获">
-            <span class="ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 3.5v9a.5.5 0 0 0 .77.42l7-4.5a.5.5 0 0 0 0-.84l-7-4.5A.5.5 0 0 0 4 3.5z" fill="currentColor"/></svg></span>
-            <span class="label">开始</span>
-          </button>
-          <button class="btn btn-ok" id="btnDone" title="完成并保存" disabled>
-            <span class="ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M13.5 4.5l-7 7-4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-            <span class="label">完成</span>
-          </button>
-          <button class="btn btn-ghost" id="btnCancel" title="取消">
-            <span class="ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span>
-            <span class="label">取消</span>
-          </button>
-        </div>
-      </div>
-
-      <!-- 帧/片段编辑：任意删除后从原始帧重新拼接，可撤销/重做。 -->
-      <div class="edit-row" id="editBox" hidden>
-        <label class="compact-field">片段
-          <select id="segmentSelect" aria-label="选择要删除的原始帧"></select>
-        </label>
-        <button class="mini-btn danger" id="btnDeleteSegment" title="删除选中帧并重新拼接">删除</button>
-        <button class="mini-btn" id="btnUndo" title="撤销片段或固定区域修改" disabled>撤销</button>
-        <button class="mini-btn" id="btnRedo" title="重做片段或固定区域修改" disabled>重做</button>
-        <span class="separator" aria-hidden="true"></span>
-        <label class="compact-field">固定顶部 <input type="number" id="fixedTop" min="0" step="1" value="0" /> px</label>
-        <label class="compact-field">固定底部 <input type="number" id="fixedBottom" min="0" step="1" value="0" /> px</label>
-        <button class="mini-btn" id="btnSuggestFixed" title="检测相邻帧中重复的固定顶部/底部">自动建议</button>
-        <button class="mini-btn" id="btnApplyFixed" title="应用固定区域参数并重新拼接">应用</button>
-      </div>
-
-      <!-- 导出裁剪（不改动原始帧） -->
-      <div class="crop-box" id="cropBox" hidden>
-        <label class="crop-label">上裁 <input type="range" id="cropTop" min="0" max="0" step="10" value="0" /> <span class="crop-val" id="cropTopVal">0</span></label>
-        <label class="crop-label">下裁 <input type="range" id="cropBottom" min="0" max="0" step="10" value="0" /> <span class="crop-val" id="cropBottomVal">0</span></label>
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>长截图 · 困困截图工具</title>
+  <link rel="stylesheet" href="./longshot.css" />
+</head>
+<body>
+  <main class="bar" id="bar">
+    <div class="primary-row">
+      <span class="dimensions" id="size" title="已拼接图片的像素尺寸">— × —</span>
+      <div class="actions">
+        <button class="btn direction" id="btnDir" title="切换滚动方向（拼接新内容前可切换）"><span aria-hidden="true">↕</span><span class="label">纵向</span></button>
+        <button class="btn" id="btnStart" title="暂停或继续捕获"><span class="label">暂停</span></button>
+        <button class="btn" id="btnAdjust" aria-expanded="false" aria-controls="adjustPanel" title="暂停并调整片段、固定区域或裁剪">调整</button>
+        <button class="btn btn-ok" id="btnDone" title="完成并保存到文件，同时复制图片" disabled><span aria-hidden="true">✓</span> 完成</button>
+        <button class="btn btn-close" id="btnCancel" aria-label="取消长截图" title="取消长截图">×</button>
       </div>
     </div>
-
-    <script src="./longshot-stitch.js"></script>
-    <script src="./longshot.js"></script>
-  </body>
+    <div class="status" role="status" aria-live="polite">
+      <span class="dot" id="liveDot" aria-hidden="true"></span>
+      <span class="hint" id="hint">正在准备选区…</span>
+      <span class="frame-count">已拼接 <span id="count">0</span> 帧</span>
+    </div>
+    <section id="adjustPanel" class="adjust-panel" aria-label="长截图调整" hidden>
+      <p class="adjust-note">已暂停捕获。调整后点「继续」，仍会保留当前长图。</p>
+      <div class="edit-row" id="editBox" hidden>
+        <div class="field-row">
+          <label class="compact-field">片段 <select id="segmentSelect" aria-label="选择要删除的原始帧"></select></label>
+          <button class="mini-btn danger" id="btnDeleteSegment">删除</button>
+          <button class="mini-btn" id="btnUndo" title="撤销片段或固定区域修改" disabled>撤销</button>
+          <button class="mini-btn" id="btnRedo" title="重做片段或固定区域修改" disabled>重做</button>
+        </div>
+        <div class="field-row">
+          <label class="compact-field">固定顶部 <input type="number" id="fixedTop" min="0" step="1" value="0" /> px</label>
+          <label class="compact-field">固定底部 <input type="number" id="fixedBottom" min="0" step="1" value="0" /> px</label>
+          <button class="mini-btn" id="btnSuggestFixed">自动建议</button>
+          <button class="mini-btn" id="btnApplyFixed">应用</button>
+        </div>
+      </div>
+      <div class="crop-box" id="cropBox" hidden>
+        <label class="crop-label">起始裁剪 <input type="range" id="cropTop" min="0" max="0" step="1" value="0" /> <span class="crop-val" id="cropTopVal">0 px</span></label>
+        <label class="crop-label">末尾裁剪 <input type="range" id="cropBottom" min="0" max="0" step="1" value="0" /> <span class="crop-val" id="cropBottomVal">0 px</span></label>
+      </div>
+    </section>
+  </main>
+  <script src="./longshot-stitch.js"></script>
+  <script src="./longshot.js"></script>
+</body>
 </html>

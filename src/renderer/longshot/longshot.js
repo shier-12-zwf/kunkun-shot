@@ -332,6 +332,22 @@
     return !!match && match.overlap === 0 && match.hadContent === true;
   }
 
+  function getLongshotPreviewGeometry(width, height, horizontal, top, bottom) {
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+    const maxCrop = Math.max(0, height - 8);
+    const cropTop = Math.max(0, Math.min(Math.floor(Number(top)) || 0, maxCrop));
+    const cropBottom = Math.max(0, Math.min(Math.floor(Number(bottom)) || 0, maxCrop - cropTop));
+    const finalHeight = height - cropTop - cropBottom;
+    const outputWidth = horizontal ? finalHeight : width;
+    const outputHeight = horizontal ? width : finalHeight;
+    const scale = Math.min(1, 240 / outputWidth, 480 / outputHeight);
+    return {
+      cropTop, cropBottom, finalHeight, outputWidth, outputHeight,
+      previewWidth: Math.max(1, Math.floor(outputWidth * scale)),
+      previewHeight: Math.max(1, Math.floor(outputHeight * scale)),
+    };
+  }
+
   async function saveLongshotAndClose(api, dataURL, shouldContinue, workflowState) {
     const isCurrent = typeof shouldContinue === 'function' ? shouldContinue : () => true;
     const workflow = workflowState && typeof workflowState === 'object' ? workflowState : null;
@@ -376,6 +392,7 @@
       runCaptureStep,
       createDisplacementGate,
       getNextCaptureDelay,
+      getLongshotPreviewGeometry,
     };
     return;
   }
@@ -445,6 +462,66 @@
   const $fixedBottom = document.getElementById('fixedBottom');
   const $btnSuggestFixed = document.getElementById('btnSuggestFixed');
   const $btnApplyFixed = document.getElementById('btnApplyFixed');
+  const $btnAdjust = document.getElementById('btnAdjust');
+  const $adjustPanel = document.getElementById('adjustPanel');
+  const $size = document.getElementById('size');
+  let previewAvailable = true;
+  let initialized = false;
+
+  function scrollHint() {
+    const instruction = captureHorizontal ? '在选区内向右滚动，自动拼接' : '在选区内向下滚动，自动拼接';
+    return previewAvailable ? instruction : instruction + ' · 选区外空间不足，暂不显示预览';
+  }
+
+  function setAdjustmentExpanded(expanded) {
+    $adjustPanel.hidden = !expanded;
+    $btnAdjust.setAttribute('aria-expanded', String(expanded));
+  }
+
+  // 仅在画布改变时生成缩略图，尺寸上限 240×480；不跨进程发送整幅长图。
+  // 保存仍使用原始像素画布，不受预览分辨率影响。
+  function publishPresentation(includePreview) {
+    if (typeof kkapi.updateLongshot !== 'function') return Promise.resolve();
+    const geometry = stitchCanvas && getLongshotPreviewGeometry(
+      stitchCanvas.width, stitchedHeight, captureHorizontal, $cropTop.value, $cropBottom.value
+    );
+    const state = {
+      frameCount: stitchTimeline ? stitchTimeline.getState().frames.length : 0,
+      capturing,
+      expanded: !$adjustPanel.hidden,
+    };
+    if (geometry) {
+      state.outputWidth = geometry.outputWidth;
+      state.outputHeight = geometry.outputHeight;
+      $size.textContent = geometry.outputWidth + ' × ' + geometry.outputHeight;
+    }
+    if (includePreview) {
+      state.previewDataURL = null;
+      if (geometry) {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = geometry.previewWidth;
+          canvas.height = geometry.previewHeight;
+          const context = canvas.getContext('2d');
+          if (captureHorizontal) {
+            context.translate(canvas.width / 2, canvas.height / 2);
+            context.rotate(-Math.PI / 2);
+            context.drawImage(stitchCanvas, 0, geometry.cropTop, stitchCanvas.width, geometry.finalHeight,
+              -canvas.height / 2, -canvas.width / 2, canvas.height, canvas.width);
+          } else {
+            context.drawImage(stitchCanvas, 0, geometry.cropTop, stitchCanvas.width, geometry.finalHeight,
+              0, 0, canvas.width, canvas.height);
+          }
+          state.previewDataURL = canvas.toDataURL('image/png');
+        } catch (error) {
+          console.warn('[longshot] 预览更新失败，原始长图仍保留', error);
+        }
+      }
+    }
+    return Promise.resolve(kkapi.updateLongshot(state)).then((result) => {
+      if (result && typeof result.previewAvailable === 'boolean') previewAvailable = result.previewAvailable;
+    }).catch((error) => console.warn('[longshot] 预览状态同步失败', error));
+  }
 
   // ====== 工具：把 dataURL 画到一个临时 canvas，拿到 ctx + 尺寸 ======
   function loadDataURL(dataURL) {
@@ -555,6 +632,8 @@
   function refreshEditControls() {
     const state = stitchTimeline && stitchTimeline.getState();
     const frames = state ? state.frames : [];
+    $btnAdjust.disabled = frames.length === 0 || captureBusy || finishing;
+    $btnDir.disabled = frames.length > 1 || captureBusy || finishing;
     $editBox.hidden = frames.length === 0;
     const selected = $segmentSelect.value;
     $segmentSelect.replaceChildren();
@@ -596,7 +675,7 @@
     $fixedTop.value = String(suggestion.top);
     $fixedBottom.value = String(suggestion.bottom);
     $hint.style.color = '#2563eb';
-    $hint.textContent = '检测到固定区域建议，确认后点「应用」';
+    $hint.textContent = '检测到固定区域，可点「调整」查看建议';
     return true;
   }
 
@@ -688,7 +767,7 @@
     const offeredSuggestion = maybeOfferFixedSuggestion();
     if (!offeredSuggestion) {
       $hint.style.color = '';
-      $hint.textContent = captureHorizontal ? '水平滚动页面会自动拼接' : '滚动页面会自动拼接';
+      $hint.textContent = scrollHint();
     }
     return { status: 'movement', changed: true, direction: added.direction };
   }
@@ -730,6 +809,8 @@
     $btnStart.querySelector('.label').textContent = stitchCanvas ? '继续' : '开始';
     $btnDir.disabled = !!stitchCanvas;
     refreshEditControls();
+    if (reason === 'fixed-bands-suggested') setAdjustmentExpanded(true);
+    publishPresentation(false);
   }
 
   // ====== 单次自适应 tick ======
@@ -783,7 +864,7 @@
 
       captureSession.recordSuccess(token);
       failureStreak = 0;
-      updateCount(stitchTimeline ? stitchTimeline.getState().frames.length : 0);
+      updateCount(stitchTimeline ? stitchTimeline.getState().frames.length : 0, outcome.changed === true);
       cadenceStatus = outcome.status;
       if (outcome.status === 'idle') {
         idleStreak += 1;
@@ -794,11 +875,12 @@
       }
     } finally {
       captureBusy = false;
+      refreshEditControls();
       scheduleNextTick(cadenceStatus, cadenceStreak);
     }
   }
 
-  function updateCount(n) {
+  function updateCount(n, includePreview = true) {
     frameCount = n;
     $count.textContent = String(n);
     // 有内容后显示裁剪控件，并把范围上限对齐当前拼接高度
@@ -812,11 +894,18 @@
       $cropTopVal.textContent = $cropTop.value + 'px';
       $cropBottomVal.textContent = $cropBottom.value + 'px';
     }
+    const geometry = stitchCanvas && getLongshotPreviewGeometry(
+      stitchCanvas.width, stitchedHeight, captureHorizontal, $cropTop.value, $cropBottom.value
+    );
+    if (geometry) $size.textContent = geometry.outputWidth + ' × ' + geometry.outputHeight;
+    publishPresentation(includePreview);
   }
 
   // ====== 开始捕获 ======
   async function startCapture() {
     if (capturing || captureBusy || finishing) return;
+    clearCaptureTimer();
+    setAdjustmentExpanded(false);
     const hadExistingTimeline = !!stitchTimeline;
     operationGeneration += 1;
     captureSession = createLongshotSession(sessionOptions);
@@ -831,6 +920,9 @@
     $hint.textContent = hadExistingTimeline ? '正在恢复捕获…' : '正在抓取首帧…';
     try {
       const token = captureToken;
+      // 先收起调整面板，再抓帧。若取消发生在 resize 期间，不再采集屏幕。
+      await publishPresentation(false);
+      if (!captureSession.isCurrent(token)) return;
       const result = await runCaptureStep({
         session: captureSession,
         token,
@@ -861,9 +953,10 @@
       $btnStart.disabled = false;
       $btnStart.querySelector('.label').textContent = '暂停';
       if (outcome.status !== 'unmatched') {
-        $hint.textContent = captureHorizontal ? '水平滚动页面会自动拼接' : '滚动页面会自动拼接';
+        $hint.textContent = scrollHint();
       }
       refreshEditControls();
+      publishPresentation(false);
       scheduleNextTick('idle', 0);
     } catch (e) {
       // 失败时只丢弃本轮在途捕获；既有时间线与上次可导出画布不动。
@@ -886,6 +979,7 @@
       refreshEditControls();
     } finally {
       captureBusy = false;
+      refreshEditControls();
     }
   }
 
@@ -897,6 +991,7 @@
     if (captureSession && captureSession.isCurrent(captureToken)) {
       captureSession.stop(reason || 'stopped');
     }
+    publishPresentation(false);
   }
 
   function pauseCaptureForUser() {
@@ -906,7 +1001,7 @@
     $btnStart.querySelector('.label').textContent = '继续';
     $btnDir.disabled = !!stitchTimeline;
     $hint.style.color = '';
-    $hint.textContent = '已暂停：可删除片段、调整固定区域，或继续捕获';
+    $hint.textContent = '已暂停 · 点「继续」接着滚动，或点「调整」修改长图';
     refreshEditControls();
   }
 
@@ -1020,9 +1115,11 @@
 
     try {
       // P2-3：手动裁剪（上/下裁掉多余区域）
-      const cropT = Math.max(0, Math.min(parseInt($cropTop.value, 10) || 0, stitchedHeight - 8));
-      const cropB = Math.max(0, Math.min(parseInt($cropBottom.value, 10) || 0, stitchedHeight - 8 - cropT));
-      const finalH = stitchedHeight - cropT - cropB;
+      const geometry = getLongshotPreviewGeometry(stitchCanvas.width, stitchedHeight, captureHorizontal,
+        $cropTop.value, $cropBottom.value);
+      const cropT = geometry.cropTop;
+      const cropB = geometry.cropBottom;
+      const finalH = geometry.finalHeight;
       const reusableWorkflow = savedExportWorkflow &&
         savedExportWorkflow.sourceCanvas === stitchCanvas &&
         savedExportWorkflow.cropTop === cropT &&
@@ -1112,11 +1209,30 @@
 
   // ====== 绑定 UI ======
   $btnDir.addEventListener('click', () => {
-    if (capturing || captureBusy || finishing || stitchCanvas) return;
+    if (captureBusy || finishing || (stitchTimeline && stitchTimeline.getState().frames.length > 1)) return;
+    stopCapture('direction-change');
+    stitchTimeline = null;
+    stitchCanvas = null;
+    stitchCtx = null;
+    stitchedHeight = 0;
+    rawFrameSequence = 0;
+    fixedSuggestionShown = false;
+    suggestedFixedBands = null;
+    savedExportWorkflow = null;
+    $cropTop.value = '0';
+    $cropBottom.value = '0';
+    $cropBox.hidden = true;
     horizontal = !horizontal;
     $btnDir.querySelector('.label').textContent = horizontal ? '横向' : '纵向';
     $btnDir.title = '切换滚动方向（当前：' + (horizontal ? '横向' : '纵向') + '）';
-    $hint.textContent = horizontal ? '水平滚动页面会自动拼接' : '滚动页面会自动拼接';
+    updateCount(0);
+    startCapture();
+  });
+  $btnAdjust.addEventListener('click', () => {
+    if (captureBusy || finishing || !stitchTimeline) return;
+    if (capturing) pauseCaptureForUser();
+    setAdjustmentExpanded($adjustPanel.hidden);
+    publishPresentation(false);
   });
   $btnStart.addEventListener('click', () => {
     if (capturing) pauseCaptureForUser();
@@ -1130,18 +1246,21 @@
   $cropTop.addEventListener('input', () => {
     savedExportWorkflow = null;
     $cropTopVal.textContent = $cropTop.value + 'px';
+    publishPresentation(true);
   });
   $cropBottom.addEventListener('input', () => {
     savedExportWorkflow = null;
     $cropBottomVal.textContent = $cropBottom.value + 'px';
+    publishPresentation(true);
   });
   $btnDone.addEventListener('click', finish);
   $btnCancel.addEventListener('click', cancel);
 
   // Esc 取消 / Enter 完成（已捕获时）
   window.addEventListener('keydown', (e) => {
+    const editingField = e.target && ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName);
     const modifier = e.metaKey || e.ctrlKey;
-    if (modifier && e.key.toLowerCase() === 'z' && stitchTimeline && !capturing && !finishing) {
+    if (!editingField && modifier && e.key.toLowerCase() === 'z' && stitchTimeline && !capturing && !finishing) {
       e.preventDefault();
       if (e.shiftKey) redoTimelineEdit();
       else undoTimelineEdit();
@@ -1150,7 +1269,7 @@
     if (e.key === 'Escape') {
       e.preventDefault();
       cancel();
-    } else if (e.key === 'Enter') {
+    } else if (e.key === 'Enter' && !editingField) {
       if (!$btnDone.disabled) {
         e.preventDefault();
         finish();
@@ -1160,7 +1279,8 @@
 
   // ====== 接收初始化 payload ======
   kkapi.onInit((payload) => {
-    if (!payload) return;
+    if (!payload || initialized) return;
+    initialized = true;
     if (!stitchApi || typeof stitchApi.createStitchTimeline !== 'function') {
       $hint.textContent = '长截图拼接模块加载失败，请重启应用';
       $hint.style.color = '#ff5a5a';
@@ -1170,6 +1290,8 @@
     RECT = payload.rect;
     DISPLAY_ID = payload.displayId;
     SCALE = payload.scaleFactor || 1;
+    previewAvailable = payload.previewAvailable !== false;
+    setAdjustmentExpanded(false);
     const limits = payload.longshotLimits || {};
     sessionOptions = {
       maxFrames: limits.maxFrames,
@@ -1180,6 +1302,16 @@
     if (!RECT || !RECT.width || !RECT.height) {
       $hint.textContent = '选区无效，请取消重来';
       $btnStart.disabled = true;
+      $btnDir.disabled = true;
+      $btnAdjust.disabled = true;
+      return;
     }
+    $size.textContent = Math.round(RECT.width * SCALE) + ' × ' + Math.round(RECT.height * SCALE);
+    $btnDone.disabled = true;
+    $btnAdjust.disabled = true;
+    $hint.textContent = '在选区内向下滚动，自动拼接';
+    // 首帧自动捕获；显式关闭仅用于不会读取桌面像素的窗口协议冒烟测试。
+    if (payload.autoStart !== false) timer = setTimeout(() => { timer = null; startCapture(); }, 0);
+    else $btnStart.querySelector('.label').textContent = '开始';
   });
 })();

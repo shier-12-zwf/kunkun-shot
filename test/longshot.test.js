@@ -13,7 +13,42 @@ const {
   runCaptureStep,
   createDisplacementGate,
   getNextCaptureDelay,
+  getLongshotPreviewGeometry,
 } = require('../src/renderer/longshot/longshot');
+
+test('live preview bounds small thumbnails without reducing exported pixel dimensions', () => {
+  assert.deepEqual(getLongshotPreviewGeometry(1920, 10000, false, 100, 300), {
+    cropTop: 100, cropBottom: 300, finalHeight: 9600,
+    outputWidth: 1920, outputHeight: 9600, previewWidth: 96, previewHeight: 480,
+  });
+  assert.equal(getLongshotPreviewGeometry(100, 40, false, 0, 0).previewWidth, 100);
+});
+
+test('horizontal preview rotates dimensions back before fitting the thumbnail', () => {
+  assert.deepEqual(getLongshotPreviewGeometry(1920, 10000, true, 100, 300), {
+    cropTop: 100, cropBottom: 300, finalHeight: 9600,
+    outputWidth: 9600, outputHeight: 1920, previewWidth: 240, previewHeight: 48,
+  });
+});
+
+test('preview and export share safe crop bounds even for tiny selections', () => {
+  assert.deepEqual(getLongshotPreviewGeometry(5, 4, false, 999, 999), {
+    cropTop: 0, cropBottom: 0, finalHeight: 4,
+    outputWidth: 5, outputHeight: 4, previewWidth: 5, previewHeight: 4,
+  });
+  const cropped = getLongshotPreviewGeometry(10, 100, false, 80, 80);
+  assert.equal(cropped.finalHeight, 8);
+  assert.equal(cropped.cropBottom, 12);
+  const negative = getLongshotPreviewGeometry(10, 100, false, -40, 'invalid');
+  assert.equal(negative.finalHeight, 100);
+});
+
+test('live preview rejects empty or non-finite canvas dimensions', () => {
+  for (const value of [0, -1, NaN, Infinity, undefined]) {
+    assert.equal(getLongshotPreviewGeometry(value, 100, false, 0, 0), null);
+    assert.equal(getLongshotPreviewGeometry(100, value, false, 0, 0), null);
+  }
+});
 
 test('horizontal longshot waits for frame decoding before rotating it', async () => {
   const sourceCanvas = { id: 'decoded-frame' };

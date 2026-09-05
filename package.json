@@ -1,7 +1,7 @@
 {
   "name": "kunkun-shot",
   "productName": "困困截图工具",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "一款 macOS 优先的截图工具：支持区域截图与标注、贴图钉屏、长截图、OCR、录屏，以及可选的 AI 图片问答与文字处理。",
   "main": "src/main/main.js",
   "author": "困困",
@@ -15,7 +15,8 @@
     "test": "node --test test/*.test.js",
     "test:smoke": "node scripts/test-electron-smoke.js",
     "test:overlay": "env -u ELECTRON_RUN_AS_NODE electron scripts/capture-demo.js --check-overlay-toolbar",
-    "test:all": "npm test && npm run test:smoke && npm run test:overlay",
+    "test:longshot": "env -u ELECTRON_RUN_AS_NODE electron scripts/test-longshot-visual.js",
+    "test:all": "npm test && npm run test:smoke && npm run test:overlay && npm run test:longshot",
     "test:packaged": "node scripts/test-packaged-electron-smoke.js",
     "dist": "npm run dist:mac:local",
     "dist:mac": "npm run dist:mac:local",

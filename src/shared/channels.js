@@ -21,6 +21,8 @@ module.exports = {
   CAPTURE_TRIGGER: 'capture:trigger', // (mode) 主动发起一次捕获：'region' | 'long' | 'record' | 'ocr'
   CAPTURE_REGION: 'capture:region', // ({ rect, displayId, scaleFactor }) => dataURL  长截图逐帧用
   CAPTURE_GET_SOURCES: 'capture:get-sources', // () => [{ id, name, display_id, thumbnail }]
+  LONGSHOT_UPDATE: 'longshot:update', // controls -> main，受限缩略图、尺寸、帧数与展开状态
+  LONGSHOT_STATE: 'longshot:state', // main -> guide，显示器局部布局与最新预览
 
   // ---- 截图层结果 ----
   OVERLAY_RESULT: 'overlay:result', // ({ action, rect, imageDataURL, displayId }) action: copy|save|pin|ocr|ask|record|long

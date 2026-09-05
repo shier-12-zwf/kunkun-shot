@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'" />
+  <title>长截图选区与预览</title>
+  <link rel="stylesheet" href="./longshot-guide.css" />
+</head>
+<body>
+  <div class="shade" id="shadeTop"></div>
+  <div class="shade" id="shadeBottom"></div>
+  <div class="shade" id="shadeLeft"></div>
+  <div class="shade" id="shadeRight"></div>
+  <div id="selectionOutline" hidden></div>
+  <aside id="previewPanel" aria-label="长截图实时预览" hidden>
+    <header><span id="previewTitle">实时拼接</span><span id="previewCount">0 帧</span></header>
+    <div class="preview-stage">
+      <span id="previewEmpty">向下滚动原页面<br />这里会显示拼接结果</span>
+      <img id="previewImage" alt="已拼接的长截图预览" hidden />
+    </div>
+    <footer id="previewSize">准备捕获…</footer>
+  </aside>
+  <script src="./longshot-guide.js"></script>
+</body>
+</html>

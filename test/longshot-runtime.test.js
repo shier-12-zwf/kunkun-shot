@@ -41,6 +41,8 @@ class FakeElement {
     this.listeners.get(type).push(listener);
   }
 
+  setAttribute(name, value) { this[name] = value; }
+
   dispatch(type, event = {}) {
     const safeEvent = {
       preventDefault() {},
@@ -287,6 +289,8 @@ test('renderer can pause, edit, survive a bad frame, and continue from retained 
   runtime.queueCapture('frame:b');
   await runtime.runNextTimer();
   assert.equal(runtime.elements.get('count').textContent, '2');
+  assert.equal(runtime.elements.get('btnAdjust').disabled, false,
+    'after the second frame finishes, adjustment must remain directly available');
 
   runtime.click('btnStart');
   assert.equal(runtime.elements.get('btnStart').label.textContent, '继续');

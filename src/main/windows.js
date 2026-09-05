@@ -6,6 +6,7 @@ const { version: APP_VERSION } = require('../../package.json');
 const C = require('../shared/channels');
 const { requireImageDataURL, normalizePinBounds } = require('./ipc-validation');
 const { normalizePinWorkspaceState } = require('./pin-workspace-store');
+const { calculateLongshotLayout, rectanglesOverlap, normalizeLongshotPresentation } = require('./longshot-presentation');
 const {
   RECORDER_STATES,
   decideRecorderWindowOpen,
@@ -1072,46 +1073,162 @@ function focusRecorder() {
   return true;
 }
 
-// ---- 长截图控制条 ----
-let longShotWin = null;
+// ---- 可视长截图：穿透辅助层与交互控制条属于同一个原子会话 ----
+let longShotSession = null;
 function createLongShot(initData) {
-  if (longShotWin && !longShotWin.isDestroyed()) longShotWin.close();
-  const r = initData.rect;
-  const db = initData.displayBounds;
-  // 两行帧/固定区域编辑器需要可见空间；宽度仍限制在当前屏幕内。
-  const barW = Math.min(860, Math.max(460, Math.floor(db.width)));
-  const barH = 126;
-  const controlBounds = calculateCaptureControlBounds({
-    rect: r,
-    displayBounds: db,
-    width: barW,
-    height: barH,
-  });
-  const win = newTrackedWindow({
-    ...controlBounds,
+  const layout = calculateLongshotLayout(initData);
+  closeLongShot();
+  const sharedOptions = {
     frame: false,
     transparent: true,
     alwaysOnTop: true,
     skipTaskbar: true,
     resizable: false,
-    hasShadow: true,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    hasShadow: false,
+    show: false,
     backgroundColor: '#00000000',
     webPreferences: baseWebPrefs(),
+  };
+  const guide = newTrackedWindow({
+    ...sharedOptions,
+    ...initData.displayBounds,
+    focusable: false,
+  }, 'longshot-guide');
+  // 原生窗口级穿透，而不是 CSS pointer-events。真实滚轮/触控板必须进入下方应用。
+  guide.setIgnoreMouseEvents(true);
+  const win = newTrackedWindow({
+    ...sharedOptions,
+    ...layout.toolbarBounds,
   }, 'longshot');
-  win.setAlwaysOnTop(true, 'screen-saver');
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  win.loadFile(rfile('longshot', 'longshot.html'));
-  whenLoaded(win, initData);
-  win.on('closed', () => {
-    if (longShotWin === win) longShotWin = null;
-  });
-  longShotWin = win;
+  const group = {
+    controls: win,
+    guide,
+    initData: { ...initData, rect: { ...layout.rect }, displayBounds: { ...initData.displayBounds } },
+    layout,
+    presentation: { previewDataURL: null, outputWidth: 0, outputHeight: 0, frameCount: 0, capturing: false, expanded: false },
+    closing: false,
+    captureInFlight: false,
+    captureSettled: false,
+  };
+  longShotSession = group;
+  const closeGroup = () => {
+    if (group.closing) return;
+    group.closing = true;
+    if (longShotSession === group) longShotSession = null;
+    for (const member of [group.controls, group.guide]) {
+      if (!member.isDestroyed()) member.destroy();
+    }
+  };
+  group.close = closeGroup;
+  for (const [member, surface, filename] of [
+    [guide, 'guide', 'longshot-guide.html'],
+    [win, 'controls', 'longshot.html'],
+  ]) {
+    member.setAlwaysOnTop(true, 'screen-saver');
+    member.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    member.on('closed', closeGroup);
+    member.webContents.on('render-process-gone', closeGroup);
+    member.webContents.on('did-fail-load', (_event, code, _description, _url, isMainFrame) => {
+      if (isMainFrame !== false && code !== -3) closeGroup();
+    });
+    member.webContents.on('did-finish-load', () => {
+      if (group.closing || member.isDestroyed()) return;
+      member.webContents.send(C.WINDOW_INIT, {
+        ...group.initData,
+        surface,
+        autoStart: group.initData.autoStart !== false,
+        previewAvailable: !!group.layout.preview,
+        layout: group.layout,
+        presentation: group.presentation,
+      });
+      member.showInactive();
+      // guide 可能比 controls 晚完成加载；只调整层级，不把焦点从原页面抢回来。
+      if (!win.isDestroyed() && win.isVisible()) win.moveTop();
+    });
+    member.loadFile(rfile('longshot', filename));
+  }
   return win;
 }
 
 function closeLongShot() {
-  if (longShotWin && !longShotWin.isDestroyed()) longShotWin.close();
-  longShotWin = null;
+  if (longShotSession) longShotSession.close();
+}
+
+function requireLongshotSession(webContentsId) {
+  const group = longShotSession;
+  if (!group || group.closing || group.controls.isDestroyed()
+    || group.controls.webContents.id !== webContentsId) throw new Error('长截图会话不存在或已失效。');
+  return group;
+}
+
+function syncLongshotPresentation(group) {
+  if (group.closing) return;
+  group.layout = calculateLongshotLayout({ ...group.initData, expanded: group.presentation.expanded });
+  const bounds = group.controls.getBounds();
+  if (['x', 'y', 'width', 'height'].some((key) => bounds[key] !== group.layout.toolbarBounds[key])) {
+    group.controls.setBounds(group.layout.toolbarBounds);
+  }
+  const state = { ...group.presentation, layout: group.layout };
+  // 暂停/静止帧只同步状态，避免重复传输和解码同一缩略图。
+  // guide 首次加载或 reload 仍从 WINDOW_INIT 接收完整 presentation。
+  if (group.lastSentPreview === state.previewDataURL) delete state.previewDataURL;
+  group.guide.webContents.send(C.LONGSHOT_STATE, state);
+  group.lastSentPreview = group.presentation.previewDataURL;
+}
+
+function updateLongshotPresentation(webContentsId, payload) {
+  const group = requireLongshotSession(webContentsId);
+  const patch = normalizeLongshotPresentation(payload);
+  group.presentation = { ...group.presentation, ...patch };
+  // 采集期间不能把原本位于选区外的工具条突然展开进选区。
+  if (!group.captureInFlight) syncLongshotPresentation(group);
+  return { ok: true, previewAvailable: !!group.layout.preview };
+}
+
+async function withLongShotCapture(webContentsId, capture) {
+  const group = requireLongshotSession(webContentsId);
+  if (group.captureInFlight) throw new Error('上一帧长截图采集仍在进行中。');
+  group.captureInFlight = true;
+  let hiddenControls = false;
+  try {
+    // overlay:result 的 invoke 成功后，旧静态选区层才由 renderer 关闭。
+    // 自动首帧必须等待这一生命周期，不可把旧截图再次拼入结果。
+    const startedAt = Date.now();
+    while (overlayWin && !overlayWin.isDestroyed()) {
+      if (group.closing) throw new Error('长截图会话已经结束。');
+      if (Date.now() - startedAt >= 2000) throw new Error('截图选区层尚未关闭，请重试长截图。');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    if (group.closing) throw new Error('长截图会话已经结束。');
+    if (rectanglesOverlap(group.controls.getBounds(), group.layout.captureBounds) && group.controls.isVisible()) {
+      group.controls.hide();
+      hiddenControls = true;
+    }
+    if (hiddenControls || !group.captureSettled) {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      group.captureSettled = true;
+    }
+    if (group.closing) throw new Error('长截图会话已经结束。');
+    const result = await capture({ ...group.initData, rect: { ...group.initData.rect } });
+    if (group.closing) throw new Error('长截图会话已经结束。');
+    return result;
+  } finally {
+    group.captureInFlight = false;
+    if (!group.closing && !group.controls.isDestroyed()) {
+      syncLongshotPresentation(group);
+      if (hiddenControls) group.controls.showInactive();
+    }
+  }
+}
+
+function getLongShotSnapshot() {
+  const group = longShotSession;
+  if (!group || group.closing) return null;
+  return { controls: group.controls, guide: group.guide, layout: group.layout, presentation: { ...group.presentation } };
 }
 
 // ---- 桌面主窗口（快捷截图 / 历史记录 / AI 工作台 / 设置 四页） ----
@@ -1359,6 +1476,9 @@ module.exports = {
   getRecorderState: () => (recorderLifecycleState ? { ...recorderLifecycleState } : null),
   createLongShot,
   closeLongShot,
+  updateLongshotPresentation,
+  withLongShotCapture,
+  getLongShotSnapshot,
   createMain,
   togglePopover,
   hidePopover,

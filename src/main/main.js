@@ -575,6 +575,7 @@ const IPC_ROLE_ALLOWLIST = {
 
   [C.CAPTURE_TRIGGER]: ['main', 'popover'],
   [C.CAPTURE_REGION]: ['longshot'],
+  [C.LONGSHOT_UPDATE]: ['longshot'],
   [C.CAPTURE_GET_SOURCES]: ['recorder'],
   [C.OVERLAY_RESULT]: ['overlay'],
   [C.OVERLAY_CANCEL]: ['overlay', 'recorder'],
@@ -1188,11 +1189,17 @@ function registerIpc() {
     if (!['region', 'long', 'record', 'ocr', 'fullscreen'].includes(safeMode)) throw new Error('截图模式无效。');
     return startCapture(safeMode);
   });
-  ipcMain.handle(C.CAPTURE_REGION, async (_e, payload) => {
-    const { rect, displayId } = payload && typeof payload === 'object' ? payload : {};
+  ipcMain.handle(C.LONGSHOT_UPDATE, (e, payload) => windows.updateLongshotPresentation(e.sender.id, payload));
+  ipcMain.handle(C.CAPTURE_REGION, async (e) => windows.withLongShotCapture(e.sender.id, async (context) => {
+    // 截取范围由创建会话时的主进程登记决定，不接受 renderer 逐帧扩大范围或换屏。
+    const { rect, displayId, displayBounds, scaleFactor } = context;
     const displays = screen.getAllDisplays();
     const display = displays.find((d) => String(d.id) === String(displayId));
     if (!display) throw new Error('目标显示器已断开，请重新开始长截图。');
+    if (['x', 'y', 'width', 'height'].some((key) => display.bounds[key] !== displayBounds[key])
+      || (display.scaleFactor || 1) !== (scaleFactor || 1)) {
+      throw new Error('显示器布局或缩放已改变，请重新选择长截图范围。');
+    }
     const safeRect = normalizeCaptureRect(rect, display.size);
     const sf = display.scaleFactor || 1;
     const sources = await getScreenCaptureSources({
@@ -1215,7 +1222,7 @@ function registerIpc() {
       height: Math.round(safeRect.height * sf),
     });
     return requireUsableCaptureImage(crop, '截取区域为空，请重新选择截图范围。').toDataURL();
-  });
+  }));
   ipcMain.handle(C.CAPTURE_GET_SOURCES, async () => {
     const sources = await getScreenCaptureSources({
       types: ['screen'],
@@ -2898,22 +2905,33 @@ if (!gotLock) {
         });
 
         await recordCheck('longshot', async () => {
-          // 使用无效尺寸作为只在测试环境出现的初始化哨兵：renderer 只有收到
-          // WINDOW_INIT 后才会禁用开始按钮并显示这段错误提示。
+          // 协议冒烟不采集用户桌面：正常自动捕获与像素拼接由隔离的 visual 测试覆盖。
           const longshotWin = windows.createLongShot({
-            rect: { ...syntheticRect, width: 0, height: 0 },
+            rect: syntheticRect,
             displayBounds: d.bounds,
             scaleFactor: d.scaleFactor || 1,
             displayId: d.id,
+            autoStart: false,
           });
-          return waitForRenderer(longshotWin, 'longshot', function smokeLongshotProbe() {
+          await waitForRenderer(longshotWin, 'longshot', function smokeLongshotProbe() {
             const hint = document.getElementById('hint');
             const start = document.getElementById('btnStart');
+            const adjust = document.getElementById('adjustPanel');
             const ready = location.pathname.endsWith('/longshot/longshot.html')
-              && !!hint && hint.textContent.trim() === '选区无效，请取消重来'
-              && !!start && start.disabled === true;
+              && !!hint && hint.textContent.includes('向下滚动')
+              && !!start && start.disabled === false
+              && !!adjust && adjust.hidden && getComputedStyle(adjust).display === 'none';
             return { ready, hint: hint && hint.textContent.trim(), disabled: start && start.disabled };
           });
+          const snapshot = windows.getLongShotSnapshot();
+          if (!snapshot || snapshot.guide.isFocusable()) throw new Error('长截图穿透辅助层不应获取焦点');
+          await waitForRenderer(snapshot.guide, 'longshot-guide', function smokeLongshotGuideProbe() {
+            const outline = document.getElementById('selectionOutline');
+            return { ready: !!outline && !outline.hidden && outline.getBoundingClientRect().width > 0 };
+          });
+          windows.closeLongShot();
+          if (!snapshot.guide.isDestroyed() || !longshotWin.isDestroyed()) throw new Error('长截图窗口组未清理');
+          return { controls: true, guide: true, closedTogether: true };
         });
 
         await recordCheck('translate-popup', async () => {
