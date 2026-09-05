@@ -157,6 +157,9 @@ async function runCase({ name, injectProblem, expectedOk }) {
       assert.deepEqual(result.problems, [], `${name}不应有自检问题。\n${child.output}`);
     }
 
+    for (const line of child.output.split(/\r?\n/).filter((value) => value.startsWith('KK_SMOKE_CHECK pin '))) {
+      console.log(line);
+    }
     console.log(`SMOKE_CASE ${name} ok=${result.ok} exit=${child.code}`);
   } finally {
     // smokeUserData 来自本函数的 mkdtemp，目标明确且始终位于系统临时目录。

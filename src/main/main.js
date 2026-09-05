@@ -2747,18 +2747,105 @@ if (!gotLock) {
         });
 
         await recordCheck('pin', async () => {
-          const pinWin = windows.createPin({
-            dataURL: tinyPng,
-            bounds: { x: d.bounds.x + 120, y: d.bounds.y + 120, width: 80, height: 80 },
+          // naturalWidth > 0 只能证明解码成功，不能证明图片未被隐藏卡片遮挡。
+          // 在真实窗口中同时检查四种内容的计算样式与图片合成后的像素。
+          // 黑白两块均不受 macOS 显示器色彩配置转换影响，同时能识别空白或纯黑误显示。
+          const fixtureBitmap = Buffer.alloc(320 * 200 * 4);
+          for (let offset = 0; offset < fixtureBitmap.length; offset += 4) {
+            const value = (offset / 4) % 320 < 160 ? 0 : 255;
+            fixtureBitmap.fill(value, offset, offset + 3);
+            fixtureBitmap[offset + 3] = 255;
+          }
+          const fixtureImage = nativeImage.createFromBitmap(fixtureBitmap, { width: 320, height: 200 });
+          const fixtureURL = fixtureImage.toDataURL();
+          const sampleFractions = [0.2, 0.35, 0.65, 0.8];
+          const expectedPixels = sampleFractions.map((fraction) => {
+            const offset = Math.floor(320 * fraction) * 4;
+            return Array.from(fixtureBitmap.subarray(offset, offset + 4));
           });
-          return waitForRenderer(pinWin, 'pin', function smokePinProbe() {
+          const fixtureFile = path.join(app.getPath('userData'), 'pin-smoke-fixture.txt');
+          fs.writeFileSync(fixtureFile, 'Pin file visibility fixture', 'utf8');
+          const cases = [
+            { kind: 'image', activeId: 'pinImg', payload: { dataURL: fixtureURL }, content: fixtureURL },
+            { kind: 'text', activeId: 'pinText', payload: { text: '贴图文字回归\nPin visibility' }, content: '贴图文字回归\nPin visibility' },
+            { kind: 'color', activeId: 'pinColor', payload: { color: '#239ac7' }, content: '#239ac7' },
+            { kind: 'file', activeId: 'pinFile', payload: { file: fixtureFile }, content: path.basename(fixtureFile) },
+          ];
+          const smokePinProbe = function (activeId, content, previousEpoch) {
             const image = document.getElementById('pinImg');
+            const layers = ['pinImg', 'pinText', 'pinColor', 'pinFile'].map((id) => {
+              const element = document.getElementById(id);
+              const rect = element && element.getBoundingClientRect();
+              return {
+                id, hidden: element && element.hidden,
+                display: element && getComputedStyle(element).display,
+                hasArea: !!rect && rect.width > 0 && rect.height > 0,
+              };
+            });
+            const active = document.getElementById(activeId);
+            const hiddenLeaks = Array.from(document.querySelectorAll('[hidden]'))
+              .filter((element) => getComputedStyle(element).display !== 'none')
+              .map((element) => element.id || element.className);
+            const contentReady = activeId === 'pinImg'
+              ? !!image && image.complete && image.naturalWidth === 320 && image.naturalHeight === 200 && image.src === content
+              : activeId === 'pinColor'
+                ? !!active && active.getAttribute('data-hex') === content && getComputedStyle(active).backgroundColor === 'rgb(35, 154, 199)'
+                : activeId === 'pinFile'
+                  ? document.getElementById('pinFileName')?.textContent === content
+                  : !!active && active.textContent === content;
             const ready = location.pathname.endsWith('/pin/pin.html')
-              && !!image && image.complete && image.naturalWidth === 1 && image.naturalHeight === 1
-              && image.src.startsWith('data:image/png;base64,')
+              && document.readyState === 'complete'
+              && performance.timeOrigin !== previousEpoch
+              && contentReady && hiddenLeaks.length === 0
+              && layers.every((layer) => layer.id === activeId
+                ? layer.hidden === false && layer.display !== 'none' && layer.hasArea
+                : layer.hidden === true && layer.display === 'none' && !layer.hasArea)
               && !!document.getElementById('pinToolbar');
-            return { ready, image: image && `${image.naturalWidth}x${image.naturalHeight}` };
-          });
+            return { ready, activeId, contentReady, layers, hiddenLeaks, epoch: performance.timeOrigin };
+          };
+          const results = [];
+          for (const fixture of cases) {
+            const pinWin = windows.createPin({
+              ...fixture.payload,
+              bounds: { x: d.bounds.x + 120, y: d.bounds.y + 120, width: 320, height: 200 },
+            });
+            let keepForQuit = false;
+            try {
+              let previousEpoch = null;
+              for (const phase of ['initial', 'reload']) {
+                if (phase === 'reload') pinWin.webContents.reload();
+                const state = await waitForRenderer(pinWin, `pin-${fixture.kind}-${phase}`, smokePinProbe,
+                  fixture.activeId, fixture.content, previousEpoch);
+                previousEpoch = state.epoch;
+                let pixels;
+                if (fixture.kind === 'image') {
+                  const capture = await waitForCondition(`pin-image-pixels-${phase}`, async () => {
+                    const size = pinWin.getContentBounds();
+                    // 取下半部黑白区域各两点，避开工具栏、圆角、分界线与阴影。
+                    const samples = [];
+                    for (const fraction of sampleFractions) {
+                      const shot = await pinWin.webContents.capturePage({
+                        x: Math.floor(size.width * fraction), y: Math.floor(size.height * 0.7), width: 1, height: 1,
+                      });
+                      samples.push(Array.from(shot.toBitmap().subarray(0, 4)));
+                    }
+                    return {
+                      ready: samples.every((sample, sampleIndex) => sample.length === 4
+                        && sample.every((value, index) => Math.abs(value - expectedPixels[sampleIndex][index]) <= 2)),
+                      samples, expectedPixels,
+                    };
+                  });
+                  pixels = capture.samples;
+                }
+                results.push({ kind: fixture.kind, phase, visible: fixture.activeId, hiddenLeaks: state.hiddenLeaks, pixels });
+              }
+              // 保留图片窗口，继续覆盖应用退出时的贴图内容同步/安全关闭握手。
+              keepForQuit = fixture.kind === 'image';
+            } finally {
+              if (!keepForQuit && !pinWin.isDestroyed()) pinWin.destroy();
+            }
+          }
+          return { ready: true, cases: results };
         });
 
         await recordCheck('formula', async () => {

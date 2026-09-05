@@ -20,6 +20,11 @@
   user-select: none;
 }
 
+/* 内容层使用 hidden 切换；组件的 flex/block 不能覆盖浏览器的隐藏语义。 */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   width: 100%;
