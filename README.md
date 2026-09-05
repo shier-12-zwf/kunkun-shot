@@ -4,9 +4,9 @@
 
 一款以 macOS 为首要平台的开源 Electron 截图工具：区域截图与标注、贴图钉屏、多语种离线 OCR、二维码/条码识别、可编辑长截图、带摄像头与操作提示的区域录屏，以及可选的 AI 问图、翻译、表格和公式识别。
 
-> 当前源码版本：`v0.3.2`，仍为早期预览版。源码和自动测试可用不等于所有真机流程已经验收。v0.3.2 应用二进制必须从当前发布提交全新构建并完成负向扫描后才可上传；通过门禁后，GitHub Release 除平台自动生成的源码归档外，只计划附一个供知情测试的 DMG，不附应用 ZIP。该 DMG 外层不单独 codesign，内含的 `.app` 使用固定本机开发证书签名，但不是 Apple Developer ID 签名，且不经过 Apple 公证、没有 stapled ticket。项目不声称支持 Windows/Linux。发布证据与风险边界以 [发布检查清单](docs/RELEASE_CHECKLIST.md) 为准。
+> 当前源码版本：`v0.3.3`，仍为早期预览版。源码和自动测试可用不等于所有真机流程已经验收。应用二进制须从发布源码全新构建并完成负向扫描后才可上传；通过门禁后，GitHub Release 除平台自动生成的源码归档外，只附一个供知情测试的 DMG，不附应用 ZIP。该 DMG 外层不单独 codesign，内含的 `.app` 使用固定本机开发证书签名，但不是 Apple Developer ID 签名，且不经过 Apple 公证、没有 stapled ticket。项目不声称支持 Windows/Linux。发布证据与风险边界以 [发布检查清单](docs/RELEASE_CHECKLIST.md) 为准。
 
-第一次使用请阅读 [完整使用指南](docs/使用指南.md)；想了解与 PixPin 的逐项差距、证据和后续优先级，请看 [竞品对比与改进报告](docs/PixPin-竞品对比与改进报告.md)。本次变化见 [v0.3.2 发布说明](docs/release-notes-v0.3.2.md)，完整版本历史见 [更新日志](CHANGELOG.md)。
+第一次使用请阅读 [完整使用指南](docs/使用指南.md)；想了解与 PixPin 的逐项差距、证据和后续优先级，请看 [竞品对比与改进报告](docs/PixPin-竞品对比与改进报告.md)。本次贴图显示热修复与验证记录见 [v0.3.3 发布说明](docs/release-notes-v0.3.3.md)，完整版本历史见 [更新日志](CHANGELOG.md)。
 
 ![困困截图工具操作演示](docs/assets/demo.gif)
 
@@ -137,7 +137,7 @@ env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron scripts/capture-demo.js
 
 自动测试无法替代屏幕权限、多显示器、全局快捷键、OCR、录屏、贴图拖拽和 Apple 分发链路的真机验证。准备发布时请逐项执行 [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md)，并把实际证据写入发布说明。
 
-`npm run dist:mac:local`（`dist`、`dist:mac` 为兼容别名）默认使用本机配置的固定代码签名证书生成稳定本地包，并在构建后验证签名。该路径不公证、没有 stapled ticket，也不启用 Hardened Runtime，目的是让同一台 Mac 上的开发安装在更新后继续匹配屏幕录制等 TCC 权限；它不是 Developer ID 分发签名，也不能作为 Gatekeeper 或正式发布证据。v0.3.2 计划上传的唯一应用二进制附件是该流程从最终提交全新生成并通过负向扫描的 DMG：DMG 外层不单独 codesign，内含的 `.app` 使用固定本机开发证书签名；它明确定位为知情测试/预览包，不上传应用 ZIP，也不得把附件可下载误述为已通过 Gatekeeper 或异机验证。旧构建不得复用；新产物必须确认 `app.asar`、`app.asar.unpacked` 和 DMG 中均无 `ffmpeg-static` 或独立 FFmpeg CLI。一次性隔离测试可用 `npm run dist:mac:adhoc`，但其 ad-hoc 身份不稳定，不能覆盖日常安装版本、不能用于安装更新，也不能保留 TCC 权限。只有 `npm run dist:mac:release` 是失败关闭的 Developer ID、Hardened Runtime 与 Apple 公证入口。首次配置、凭据和真机证据要求见 [本机构建签名指南](docs/MACOS_LOCAL_BUILD.md) 与 [macOS 发布指南](docs/MACOS_RELEASE.md)。仓库目前没有可用来证明已完成正式 Apple 分发的凭据、公证记录或产物证据。
+`npm run dist:mac:local`（`dist`、`dist:mac` 为兼容别名）默认使用本机配置的固定代码签名证书生成稳定本地包，并在构建后验证签名。该路径不公证、没有 stapled ticket，也不启用 Hardened Runtime，目的是让同一台 Mac 上的开发安装在更新后继续匹配屏幕录制等 TCC 权限；它不是 Developer ID 分发签名，也不能作为 Gatekeeper 或正式发布证据。v0.3.3 计划上传的唯一应用二进制附件是该流程从最终提交全新生成并通过负向扫描的 DMG：DMG 外层不单独 codesign，内含的 `.app` 使用固定本机开发证书签名；它明确定位为知情测试/预览包，不上传应用 ZIP，也不得把附件可下载误述为已通过 Gatekeeper 或异机验证。旧构建不得复用；新产物必须确认 `app.asar`、`app.asar.unpacked` 和 DMG 中均无 `ffmpeg-static` 或独立 FFmpeg CLI。一次性隔离测试可用 `npm run dist:mac:adhoc`，但其 ad-hoc 身份不稳定，不能覆盖日常安装版本、不能用于安装更新，也不能保留 TCC 权限。只有 `npm run dist:mac:release` 是失败关闭的 Developer ID、Hardened Runtime 与 Apple 公证入口。首次配置、凭据和真机证据要求见 [本机构建签名指南](docs/MACOS_LOCAL_BUILD.md) 与 [macOS 发布指南](docs/MACOS_RELEASE.md)。仓库目前没有可用来证明已完成正式 Apple 分发的凭据、公证记录或产物证据。
 
 ## 已知限制
 
@@ -148,7 +148,7 @@ env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron scripts/capture-demo.js
 - 录屏“成片画笔”会直接写入录制文件，不会另建一层透明窗在桌面上实时预览；摄像头在录制中断开时会继续屏幕录制，但不在同一次录制中热重连。
 - 全局快捷键可能与系统或其他应用冲突。
 - OCR 精度取决于图像质量、语言数据和版面；AI 结果也可能错误。
-- 当前没有应用内自动更新或已公证的公开安装包；v0.3.2 只有在全新 DMG 通过发布清单后才会附一个知情测试包，其外层不单独 codesign、内含 `.app` 使用固定本机开发证书签名，不附应用 ZIP，更新仍需人工安装。
+- 当前没有应用内自动更新或已公证的公开安装包；v0.3.3 只有在全新 DMG 通过发布清单后才会附一个知情测试包，其外层不单独 codesign、内含 `.app` 使用固定本机开发证书签名，不附应用 ZIP，更新仍需人工安装。
 - 尚未完成的自动或真机验证项目以发布检查清单中的未勾选项为准。
 
 ## 参与和安全
