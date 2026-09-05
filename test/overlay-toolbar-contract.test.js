@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { getOverlayActionReadiness } = require('../src/renderer/overlay/overlay.js');
 
 const root = path.join(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'src', 'renderer', 'overlay', 'overlay.html'), 'utf8');
@@ -32,15 +33,31 @@ test('compact overlay toolbar preserves every tool and action exactly once', () 
 
   assert.deepEqual(
     [...actions].sort(),
-    ['ask', 'cancel', 'copy', 'formula', 'ocr', 'pin', 'polish', 'qr', 'quickSave', 'save', 'table', 'translate']
+    ['ask', 'cancel', 'copy', 'formula', 'long', 'ocr', 'pin', 'polish', 'qr', 'quickSave', 'save', 'table', 'translate']
   );
   assert.equal(new Set(actions).size, actions.length);
-  assert.deepEqual(directActions.slice(0, 2), ['translate', 'ocr']);
+  assert.deepEqual(directActions.slice(0, 3), ['long', 'translate', 'ocr']);
   assert.deepEqual(
     [...tools].sort(),
     ['arrow', 'blur', 'ellipse', 'highlight', 'line', 'magnifier', 'mosaic', 'number', 'pen', 'polyline', 'rect', 'select', 'spotlight', 'text', 'watermark']
   );
   assert.equal(new Set(tools).size, tools.length);
+});
+
+test('long screenshot is a labeled first-level action immediately before translation', () => {
+  const actionGroup = extract(/<div class="tool-group" id="actionGroup">([\s\S]*?)<!-- 文字输入框/, html, 'primary action group');
+  assert.match(actionGroup, /^\s*<button\b[^>]*data-action="long"[^>]*>[\s\S]*?<svg\b[\s\S]*?<span>长截图<\/span>\s*<\/button>\s*<button\b[^>]*data-action="translate"/);
+  const longButton = extract(/(<button\b[^>]*data-action="long"[^>]*>)/, actionGroup, 'long screenshot button');
+  assert.match(longButton, /title="[^"]*长截图[^"]*"/);
+  assert.doesNotMatch(longButton, /\bicon-only\b|\btoolbar-menu-item\b/);
+});
+
+test('long screenshot accepts the live region but rejects image editing and browsed history', () => {
+  assert.deepEqual(getOverlayActionReadiness({ mode: 'region', histIdx: -1 }, 'long'), { ok: true });
+  assert.deepEqual(getOverlayActionReadiness({ mode: 'image', histIdx: -1 }, 'long'), { ok: false, reason: 'not-live' });
+  assert.deepEqual(getOverlayActionReadiness({ mode: 'region', histIdx: 0 }, 'long'), { ok: false, reason: 'not-live' });
+  assert.deepEqual(getOverlayActionReadiness({ mode: 'region', histIdx: 2 }, 'long'), { ok: false, reason: 'not-live' });
+  assert.deepEqual(getOverlayActionReadiness({ mode: 'image', bgReady: true, bgImage: {} }, 'copy'), { ok: true });
 });
 
 test('secondary tools remain inside the delegated toolbar and expose accessible menus', () => {
@@ -131,6 +148,13 @@ test('primary translation language selector uses a compact inline layout', () =>
   assert.match(targetStyle, /display:\s*inline-flex;/);
   assert.match(targetStyle, /gap:\s*4px;/);
   assert.doesNotMatch(targetStyle, /grid-column:/);
+});
+
+test('very narrow screens move the complete action group to a second row', () => {
+  assert.match(html, /<span class="divider action-divider"><\/span>\s*<!-- 动作按钮 -->\s*<div class="tool-group" id="actionGroup">/);
+  const baseToolbar = extract(/\.toolbar\s*\{([^}]*)\}/, css.split('@media')[0], 'base toolbar style');
+  assert.match(baseToolbar, /flex-wrap:\s*wrap;/);
+  assert.match(css, /@media\s*\(max-width:\s*880px\)\s*\{[\s\S]*?\.action-divider\s*\{\s*display:\s*none;[\s\S]*?#actionGroup\s*\{[^}]*flex-basis:\s*100%;/);
 });
 
 test('smart selection can replace an existing region and return to the toolbar', () => {

@@ -2747,8 +2747,9 @@ if (!gotLock) {
               && !!canvas && canvas.width === 1 && canvas.height === 1
               && !!document.getElementById('selection')
               && !!document.getElementById('toolbar')
-              && primaryActions[0] === 'translate'
-              && primaryActions[1] === 'ocr';
+              && primaryActions[0] === 'long'
+              && primaryActions[1] === 'translate'
+              && primaryActions[2] === 'ocr';
             return { ready, canvas: canvas && `${canvas.width}x${canvas.height}`, primaryActions };
           });
         });

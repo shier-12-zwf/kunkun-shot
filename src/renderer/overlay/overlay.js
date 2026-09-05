@@ -85,6 +85,10 @@
   // 静态截图动作必须等待底图完成解码，否则 canvas 会导出一张尺寸正确但全透明的 PNG。
   // 长截图与录屏只提交选区坐标，不依赖当前静态底图。
   function getOverlayActionReadiness(state, action) {
+    // 图片编辑与历史预览不是当前屏幕，不能将它们的选区误用来抓取桌面。
+    if (action === 'long' && state && (state.mode === 'image' || state.histIdx >= 0)) {
+      return { ok: false, reason: 'not-live' };
+    }
     if (action === 'record' || action === 'long') return { ok: true };
     if (!state || !state.bgReady) return { ok: false, reason: 'loading' };
     if (!state.bgImage) return { ok: false, reason: 'failed' };
@@ -896,6 +900,7 @@
   var btnUndo = document.getElementById('btnUndo');
   var btnRedo = document.getElementById('btnRedo');
   var btnDelete = document.getElementById('btnDelete');
+  var btnLongShot = document.getElementById('btnLongShot');
   var magnifierZoomGroup = document.getElementById('magnifierZoomGroup');
   var magnifierZoom = document.getElementById('magnifierZoom');
   var btnToolMore = document.getElementById('btnToolMore');
@@ -1483,6 +1488,10 @@
   function ensureOverlayActionReady(action) {
     var readiness = getOverlayActionReadiness(S, action);
     if (readiness.ok) return true;
+    if (readiness.reason === 'not-live') {
+      showTip('长截图需要滚动原页面，请先返回当前截图或重新截图');
+      return false;
+    }
     toolbar.hidden = true;
     if (readiness.reason === 'failed') showBackgroundLoadFailure();
     else showTip('截图仍在加载，请稍候再试');
@@ -1501,6 +1510,7 @@
     }
     if (!ensureOverlayActionReady(S.defaultAction || 'copy')) return;
     closeToolbarMenus();
+    if (btnLongShot) btnLongShot.hidden = !getOverlayActionReadiness(S, 'long').ok;
     toolbar.hidden = false;
     updateMagnifierZoomControl();
     positionToolbar();

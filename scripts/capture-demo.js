@@ -186,6 +186,8 @@ function createPreloadSource() {
 const { contextBridge } = require('electron');
 const kindArg = process.argv.find((arg) => arg.indexOf('--kk-demo-kind=') === 0) || '--kk-demo-kind=main';
 const kind = kindArg.slice('--kk-demo-kind='.length);
+const modeArg = process.argv.find((arg) => arg.indexOf('--kk-demo-overlay-mode=') === 0) || '--kk-demo-overlay-mode=region';
+const overlayMode = modeArg.slice('--kk-demo-overlay-mode='.length);
 const images = ${images};
 const viewport = ${viewport};
 const appVersion = ${appVersion};
@@ -241,7 +243,7 @@ const api = {
   setConfig: async () => clone(config),
   onInit: (cb) => {
     const payload = kind === 'overlay'
-      ? { dataURL: images[0], width: viewport.width, height: viewport.height, scaleFactor: 1, displayId: 'public-demo', displayBounds: { x: 0, y: 0, width: viewport.width, height: viewport.height }, mode: 'region' }
+      ? { dataURL: images[0], width: viewport.width, height: viewport.height, scaleFactor: 1, displayId: 'public-demo', displayBounds: { x: 0, y: 0, width: viewport.width, height: viewport.height }, mode: overlayMode }
       : { page: kind === 'ai' ? 'ai' : 'capture', appVersion };
     const timer = setTimeout(() => cb(clone(payload)), 0);
     return () => clearTimeout(timer);
@@ -320,7 +322,7 @@ async function waitFor(win, expression, timeoutMs = 10000) {
   while (Date.now() - started < timeoutMs) {
     let ready = false;
     try {
-      ready = await win.webContents.executeJavaScript(`Boolean(${expression})`, true);
+      ready = await win.webContents.executeJavaScript(`(async () => Boolean(await (${expression})))()`, true);
     } catch (_) {
       ready = false;
     }
@@ -351,7 +353,7 @@ async function createDemoWindow(kind, relativeHtml, options = {}) {
       sandbox: true,
       backgroundThrottling: false,
       partition,
-      additionalArguments: [`--kk-demo-kind=${kind}`],
+      additionalArguments: [`--kk-demo-kind=${kind}`, `--kk-demo-overlay-mode=${options.overlayMode || 'region'}`],
     },
   });
   const errors = [];
@@ -643,18 +645,22 @@ async function probeOverlayToolbar() {
       const toolbar = document.getElementById('toolbar');
       const menu = ${JSON.stringify(menuId)} ? document.getElementById(${JSON.stringify(menuId)}) : null;
       const translateButton = toolbar.querySelector('#actionGroup > [data-action="translate"]');
+      const longButton = toolbar.querySelector('#actionGroup > [data-action="long"]');
+      const longLabel = longButton && longButton.querySelector('span');
       const translateTarget = toolbar.querySelector('#actionGroup > .translate-target');
       const translateSelect = translateTarget && translateTarget.querySelector('#trLang');
       return {
         viewport: { width: innerWidth, height: innerHeight },
         toolbar: roundRect(toolbar.getBoundingClientRect()),
+        actionGroup: roundRect(document.getElementById('actionGroup').getBoundingClientRect()),
         toolbarScrollWidth: toolbar.scrollWidth,
         toolbarItems: Array.from(toolbar.children)
           .filter(visible)
           .map((node) => ({
             id: node.id || null,
             className: node.className,
-            width: roundRect(node.getBoundingClientRect()).width
+            width: roundRect(node.getBoundingClientRect()).width,
+            rect: roundRect(node.getBoundingClientRect())
           })),
         actionItems: Array.from(toolbar.querySelectorAll('#actionGroup > button, #actionGroup > label'))
           .filter(visible)
@@ -673,6 +679,17 @@ async function probeOverlayToolbar() {
             && translateTarget.parentElement.id === 'actionGroup',
           adjacent: translateButton.nextElementSibling === translateTarget
         } : null,
+        primaryLongScreenshot: longButton && longLabel && translateButton ? {
+          button: roundRect(longButton.getBoundingClientRect()),
+          label: longLabel.textContent.trim(),
+          labelVisible: visible(longLabel),
+          accessibleLabel: longButton.getAttribute('aria-label'),
+          title: longButton.title,
+          visible: visible(longButton),
+          disabled: longButton.disabled,
+          adjacent: longButton.nextElementSibling === translateButton,
+          gap: translateButton.getBoundingClientRect().left - longButton.getBoundingClientRect().right
+        } : null,
         menu: menu && visible(menu) ? roundRect(menu.getBoundingClientRect()) : null,
         menuClientHeight: menu && visible(menu) ? menu.clientHeight : null,
         menuScrollHeight: menu && visible(menu) ? menu.scrollHeight : null,
@@ -686,6 +703,15 @@ async function probeOverlayToolbar() {
     })()`, true);
 
     const base = await measure('');
+    if (process.env.KK_DEMO_TOOLBAR_CAPTURE) {
+      await capture(win, path.resolve(process.env.KK_DEMO_TOOLBAR_CAPTURE));
+    }
+    await win.webContents.executeJavaScript(`(() => {
+      document.getElementById('btnToolMore').click();
+      document.querySelector('[data-tool="magnifier"]').click();
+    })()`, true);
+    const magnifierToolbar = await measure('');
+    await win.webContents.executeJavaScript(`document.querySelector('[data-tool="select"]').click()`, true);
     await win.webContents.executeJavaScript(`document.getElementById('btnActionMore').click()`, true);
     const action = await measure('actionMenu');
     await win.webContents.executeJavaScript(`document.getElementById('btnToolMore').click()`, true);
@@ -782,18 +808,38 @@ async function probeOverlayToolbar() {
     const middleAction = await measure('actionMenu');
 
     const failures = [];
-    const expectedActions = ['ask', 'cancel', 'copy', 'formula', 'ocr', 'pin', 'polish', 'qr', 'quickSave', 'save', 'table', 'translate'];
+    const expectedActions = ['ask', 'cancel', 'copy', 'formula', 'long', 'ocr', 'pin', 'polish', 'qr', 'quickSave', 'save', 'table', 'translate'];
     if (JSON.stringify(base.actions) !== JSON.stringify(expectedActions)) failures.push(`action contract changed: ${base.actions.join(',')}`);
-    const expectedLeadingDirectActions = ['translate', 'ocr'];
-    if (JSON.stringify(base.directVisibleActions.slice(0, 2)) !== JSON.stringify(expectedLeadingDirectActions)) {
+    const expectedLeadingDirectActions = ['long', 'translate', 'ocr'];
+    if (JSON.stringify(base.directVisibleActions.slice(0, 3)) !== JSON.stringify(expectedLeadingDirectActions)) {
       failures.push(`visible primary action order changed: ${base.directVisibleActions.join(',')}`);
     }
     if (base.toolbar.left < 1 || base.toolbar.right > base.viewport.width - 1) failures.push(`toolbar leaves viewport: ${JSON.stringify(base.toolbar)}`);
-    if (base.toolbar.height > 46) failures.push(`toolbar is no longer a compact single row: ${base.toolbar.height}px`);
-    if (base.toolbar.width > Math.min(1000, base.viewport.width - 4)) {
+    if (base.viewport.width > 880 && base.toolbar.height > 46) failures.push(`toolbar is no longer a compact single row: ${base.toolbar.height}px`);
+    if (base.viewport.width <= 880) {
+      const firstRow = base.toolbarItems.filter((item) => item.id !== 'actionGroup');
+      const lastToolBottom = Math.max(...firstRow.map((item) => item.rect.bottom));
+      const actionGap = base.actionGroup.top - lastToolBottom;
+      if (base.toolbar.height <= 46 || base.toolbar.height > 80 || actionGap < 0 || actionGap > 6
+        || base.actionGroup.bottom > base.toolbar.bottom || firstRow.some((item) => Math.abs(item.rect.top - firstRow[0].rect.top) > 6)) {
+        failures.push(`narrow toolbar is not two compact rows with all actions below the tools: ${JSON.stringify({ height: base.toolbar.height, actionGroup: base.actionGroup, actionGap, firstRow })}`);
+      }
+    }
+    if (base.toolbar.width > Math.min(1080, base.viewport.width - 4)) {
       failures.push(`toolbar is too wide: ${base.toolbar.width}px (${JSON.stringify({ toolbarItems: base.toolbarItems, actionItems: base.actionItems })})`);
     }
     if (base.toolbarScrollWidth > Math.ceil(base.toolbar.width) + 1) failures.push(`toolbar content overflows: ${base.toolbarScrollWidth}/${base.toolbar.width}`);
+    if (magnifierToolbar.toolbar.left < 1 || magnifierToolbar.toolbar.right > magnifierToolbar.viewport.width - 1
+      || magnifierToolbar.toolbarScrollWidth > Math.ceil(magnifierToolbar.toolbar.width) + 1) {
+      failures.push(`magnifier zoom controls push the toolbar outside the viewport: ${JSON.stringify({ toolbar: magnifierToolbar.toolbar, scrollWidth: magnifierToolbar.toolbarScrollWidth, viewport: magnifierToolbar.viewport, items: magnifierToolbar.toolbarItems })}`);
+    }
+    if (!base.primaryLongScreenshot || !base.primaryLongScreenshot.visible
+      || (base.viewport.width > 1080 && !base.primaryLongScreenshot.labelVisible)
+      || base.primaryLongScreenshot.label !== '长截图' || base.primaryLongScreenshot.disabled
+      || base.primaryLongScreenshot.accessibleLabel !== '长截图' || !base.primaryLongScreenshot.title.includes('长截图')
+      || !base.primaryLongScreenshot.adjacent || base.primaryLongScreenshot.gap < -0.5 || base.primaryLongScreenshot.gap > 4.5) {
+      failures.push(`long screenshot is not a labeled primary action immediately before translation: ${JSON.stringify(base.primaryLongScreenshot)}`);
+    }
     if (!base.primaryTranslation || !base.primaryTranslation.visible || !base.primaryTranslation.directChild || !base.primaryTranslation.adjacent) {
       failures.push(`translation target is not an adjacent primary control: ${JSON.stringify(base.primaryTranslation)}`);
     } else {
@@ -834,7 +880,110 @@ async function probeOverlayToolbar() {
     }
     if (axSelection.axPressed !== 'false' || !axSelection.toolbarVisible) failures.push(`smart selection did not return to the toolbar: ${JSON.stringify(axSelection)}`);
     if (failures.length) throw new Error(failures.join(' | '));
-    return { viewport: base.viewport, toolbar: base.toolbar, directVisibleActions: base.directVisibleActions, actionMenu: action.menu, annotationMenu: annotation.menu, middleActionMenu: middleAction.menu, options, axSelection };
+
+    // Click the actual delegated first-level action after editing the region.
+    // The live handoff must preserve this selection, not request another one
+    // and not accidentally submit a composed static screenshot.
+    const longSelection = await win.webContents.executeJavaScript(`(() => {
+      const rect = document.getElementById('selection').getBoundingClientRect();
+      document.querySelector('#actionGroup > [data-action="long"]').click();
+      return { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) };
+    })()`, true);
+    await waitFor(win, `window.kkapi.getDemoTelemetry().then((value) => value.finishCapture === 1 && value.cancelCapture === 1)`);
+    const longTelemetry = await win.webContents.executeJavaScript(`window.kkapi.getDemoTelemetry()`, true);
+    const expectedLongCapture = { action: 'long', rect: longSelection, displayId: 'public-demo' };
+    if (longTelemetry.finishCapture !== 1 || longTelemetry.cancelCapture !== 1
+      || JSON.stringify(longTelemetry.lastCapture) !== JSON.stringify(expectedLongCapture)) {
+      throw new Error(`long screenshot did not preserve the current live selection: ${JSON.stringify({ expectedLongCapture, longTelemetry })}`);
+    }
+    return { viewport: base.viewport, toolbar: base.toolbar, actionGroup: base.actionGroup, magnifierToolbar: { toolbar: magnifierToolbar.toolbar, scrollWidth: magnifierToolbar.toolbarScrollWidth }, directVisibleActions: base.directVisibleActions, primaryLongScreenshot: base.primaryLongScreenshot, longCapture: longTelemetry.lastCapture, actionMenu: action.menu, annotationMenu: annotation.menu, middleActionMenu: middleAction.menu, options, axSelection };
+  } finally {
+    win.destroy();
+  }
+}
+
+async function probeImageEditorLongScreenshotGuard() {
+  const win = await createDemoWindow('overlay', path.join('overlay', 'overlay.html'), {
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    overlayMode: 'image',
+  });
+  try {
+    await waitFor(win, `document.getElementById('bgCanvas').width === 1600 && !document.getElementById('toolbar').hidden`);
+    const controls = await win.webContents.executeJavaScript(`(() => {
+      const button = document.querySelector('#actionGroup > [data-action="long"]');
+      if (!button) return { exists: false };
+      const style = getComputedStyle(button);
+      const visible = style.display !== 'none' && style.visibility !== 'hidden' && button.getClientRects().length > 0;
+      const disabled = button.disabled;
+      button.click();
+      // Even a synthetic event that bypasses the disabled-button click guard
+      // must not turn a historical image into an unrelated desktop capture.
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      return { exists: true, visible, disabled };
+    })()`, true);
+    await delay(40);
+    const telemetry = await win.webContents.executeJavaScript(`window.kkapi.getDemoTelemetry()`, true);
+    const toolbarVisible = await win.webContents.executeJavaScript(`!document.getElementById('toolbar').hidden`, true);
+    if (!controls.exists || (controls.visible && !controls.disabled) || telemetry.finishCapture || telemetry.cancelCapture || !toolbarVisible) {
+      throw new Error(`image editor exposes a live long screenshot action: ${JSON.stringify({ controls, telemetry, toolbarVisible })}`);
+    }
+    // Rejecting the unsupported live action must leave static editing usable.
+    await win.webContents.executeJavaScript(`document.querySelector('#actionGroup > [data-action="copy"]').click()`, true);
+    const copied = await win.webContents.executeJavaScript(`window.kkapi.getDemoTelemetry()`, true);
+    if (copied.finishCapture !== 1 || copied.lastCapture?.action !== 'copy' || !copied.lastCapture.imageDataURL) {
+      throw new Error(`image editor could not copy after rejecting long screenshot: ${JSON.stringify({ finishCapture: copied.finishCapture, action: copied.lastCapture?.action })}`);
+    }
+    return { controls, preventedLiveCapture: true, copiedImageAfterRejection: true };
+  } finally {
+    win.destroy();
+  }
+}
+
+async function probeHistoryLongScreenshotGuard() {
+  const win = await createDemoWindow('overlay', path.join('overlay', 'overlay.html'), {
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+  });
+  try {
+    await waitFor(win, `document.getElementById('bgCanvas').width === 1600`);
+    const selectRegion = async () => {
+      await dispatchMouse(win, null, 'mousedown', 120, 120, 1);
+      await dispatchMouse(win, null, 'mousemove', 520, 360, 1);
+      await dispatchMouse(win, null, 'mouseup', 520, 360, 0);
+      await waitFor(win, `!document.getElementById('toolbar').hidden`);
+    };
+    await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: '>', bubbles: true }))`, true);
+    await waitFor(win, `document.getElementById('hint').textContent.includes('历史截图 1/3')`);
+    await selectRegion();
+    const hiddenOnHistory = await win.webContents.executeJavaScript(`(() => {
+      const button = document.getElementById('btnLongShot');
+      const hidden = getComputedStyle(button).display === 'none';
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      return hidden;
+    })()`, true);
+    const rejected = await win.webContents.executeJavaScript(`window.kkapi.getDemoTelemetry()`, true);
+    if (!hiddenOnHistory || rejected.finishCapture || rejected.cancelCapture) {
+      throw new Error(`browsed history admitted a live long screenshot: ${JSON.stringify({ hiddenOnHistory, rejected })}`);
+    }
+    await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: '<', bubbles: true }))`, true);
+    await waitFor(win, `document.getElementById('hint').textContent.includes('已回到当前截图')`);
+    await selectRegion();
+    const restoredOnLive = await win.webContents.executeJavaScript(`(() => {
+      const button = document.getElementById('btnLongShot');
+      const available = getComputedStyle(button).display !== 'none' && !button.disabled;
+      button.click();
+      return available;
+    })()`, true);
+    await waitFor(win, `window.kkapi.getDemoTelemetry().then((value) => value.finishCapture === 1 && value.cancelCapture === 1)`);
+    const restored = await win.webContents.executeJavaScript(`window.kkapi.getDemoTelemetry()`, true);
+    const expected = { action: 'long', rect: { x: 120, y: 120, width: 400, height: 240 }, displayId: 'public-demo' };
+    if (!restoredOnLive || JSON.stringify(restored.lastCapture) !== JSON.stringify(expected)) {
+      throw new Error(`returning from history failed to restore the current long screenshot action: ${JSON.stringify({ restoredOnLive, restored })}`);
+    }
+    return { hiddenOnHistory, rejectedHistoricalCapture: true, restoredOnLive, restoredCapture: restored.lastCapture };
   } finally {
     win.destroy();
   }
@@ -1250,9 +1399,11 @@ async function main() {
   await app.whenReady();
   if (process.argv.includes('--check-overlay-toolbar')) {
     const toolbar = await probeOverlayToolbar();
+    const imageEditorLongScreenshot = await probeImageEditorLongScreenshotGuard();
+    const historyLongScreenshot = await probeHistoryLongScreenshotGuard();
     const effects = await probeEffectAnnotations();
     const magnifier = await probeMagnifierAnnotation();
-    process.stdout.write(`OVERLAY_TOOLBAR_CHECK ${JSON.stringify({ toolbar, effects, magnifier })}\n`);
+    process.stdout.write(`OVERLAY_TOOLBAR_CHECK ${JSON.stringify({ toolbar, imageEditorLongScreenshot, historyLongScreenshot, effects, magnifier })}\n`);
     return;
   }
   const frames = [];

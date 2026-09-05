@@ -227,6 +227,8 @@ body {
   position: fixed;
   z-index: 40;
   display: flex;
+  /* 放大镜倍率等附加控件展开后，整组换行，不压缩或裁掉动作。 */
+  flex-wrap: wrap;
   align-items: center;
   flex: 0 0 auto;
   gap: 4px;
@@ -405,6 +407,9 @@ body {
   flex: 0 0 auto;
   white-space: nowrap;
   word-break: keep-all;
+}
+.action-btn[hidden] {
+  display: none;
 }
 .action-btn:hover {
   background: var(--panel-2);
@@ -640,6 +645,21 @@ body {
   }
   .translate-target > span {
     display: none;
+  }
+}
+
+/* 极窄屏将动作组换到第二行，避免固定宽度工具组挤出可视区域。 */
+@media (max-width: 880px) {
+  .toolbar {
+    justify-content: center;
+    row-gap: 4px;
+  }
+  .action-divider {
+    display: none;
+  }
+  #actionGroup {
+    flex-basis: 100%;
+    justify-content: center;
   }
 }
 
