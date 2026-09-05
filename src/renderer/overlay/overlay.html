@@ -168,12 +168,25 @@
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18 M12 3c3 3 3 15 0 18 M12 3c-3 3-3 15 0 18"/></svg>
         <span>翻译</span>
       </button>
-      <button class="action-btn" data-action="ocr" title="OCR 识别文字" aria-label="OCR 识别文字">
+      <label class="translate-target" title="翻译目标语言">
+        <span>译为</span>
+        <select id="trLang" class="tr-lang" aria-label="翻译目标语言">
+          <option value="中文">中文</option>
+          <option value="英语">英语</option>
+          <option value="日语">日语</option>
+          <option value="韩语">韩语</option>
+          <option value="法语">法语</option>
+          <option value="德语">德语</option>
+          <option value="西班牙语">西语</option>
+          <option value="俄语">俄语</option>
+        </select>
+      </label>
+      <button class="action-btn icon-only" data-action="ocr" title="OCR 识别文字" aria-label="OCR 识别文字">
         <svg viewBox="0 0 24 24"><path d="M4 8V5h3 M20 8V5h-3 M4 16v3h3 M20 16v3h-3 M8 12h8"/></svg>
         <span>OCR</span>
       </button>
       <button
-        class="action-btn toolbar-menu-trigger"
+        class="action-btn icon-only toolbar-menu-trigger"
         id="btnActionMore"
         type="button"
         title="更多截图、识别、处理与保存功能"
@@ -244,19 +257,6 @@
           <svg viewBox="0 0 24 24"><path d="M13 2L4.5 13.5H11L9.5 22 19 10h-6.5z"/></svg>
           <span>快速保存</span>
         </button>
-        <label class="translate-target" title="翻译目标语言">
-          <span>翻译为</span>
-          <select id="trLang" class="tr-lang" aria-label="翻译目标语言">
-            <option value="中文">中文</option>
-            <option value="英语">英语</option>
-            <option value="日语">日语</option>
-            <option value="韩语">韩语</option>
-            <option value="法语">法语</option>
-            <option value="德语">德语</option>
-            <option value="西班牙语">西语</option>
-            <option value="俄语">俄语</option>
-          </select>
-        </label>
       </div>
       <button class="action-btn" data-action="pin" title="贴图钉屏" aria-label="贴图钉屏">
         <svg viewBox="0 0 24 24"><path d="M14 3l7 7-3 1-3 3-1 5-4-4-5 5 5-5-4-4 5-1 3-3z"/></svg>

@@ -451,6 +451,62 @@
     let future = [];
     const rawFrames = new Map();
 
+    function cloneSnapshot(value) {
+      return {
+        frameIds: value.frameIds.slice(),
+        fixedBands: { ...value.fixedBands },
+        direction: value.direction,
+      };
+    }
+
+    function captureInternalState() {
+      return {
+        frames: frames.slice(),
+        fixedBands: { ...fixedBands },
+        direction,
+        plan,
+        nextId,
+        history: history.map(cloneSnapshot),
+        future: future.map(cloneSnapshot),
+        rawFrames: new Map(rawFrames),
+      };
+    }
+
+    function restoreInternalState(state) {
+      frames = state.frames.slice();
+      fixedBands = { ...state.fixedBands };
+      direction = state.direction;
+      plan = state.plan;
+      nextId = state.nextId;
+      history = state.history.map(cloneSnapshot);
+      future = state.future.map(cloneSnapshot);
+      rawFrames.clear();
+      for (const [id, frame] of state.rawFrames) rawFrames.set(id, frame);
+    }
+
+    // Renderer recomposition uses a fresh canvas and only swaps it on success.
+    // Keep the model equally transactional so a canvas allocation/render failure
+    // cannot leave the timeline ahead of the still-exportable old canvas.
+    function beginTransaction() {
+      let checkpoint = captureInternalState();
+      let active = true;
+      return {
+        commit() {
+          if (!active) return { ok: false, reason: 'transaction-closed' };
+          active = false;
+          checkpoint = null;
+          return { ok: true };
+        },
+        rollback() {
+          if (!active) return { ok: false, reason: 'transaction-closed' };
+          restoreInternalState(checkpoint);
+          active = false;
+          checkpoint = null;
+          return { ok: true, plan };
+        },
+      };
+    }
+
     function snapshot() {
       return {
         frameIds: frames.map((frame) => frame.id),
@@ -467,6 +523,57 @@
 
     function sourcePixels(candidateFrames) {
       return candidateFrames.reduce((total, frame) => total + frame.width * frame.height, 0);
+    }
+
+    function reachableFrameIds(candidateFrames, candidateHistory, candidateFuture) {
+      const ids = new Set(candidateFrames.map((frame) => frame.id));
+      for (const state of candidateHistory) {
+        for (const id of state.frameIds) ids.add(id);
+      }
+      for (const state of candidateFuture) {
+        for (const id of state.frameIds) ids.add(id);
+      }
+      return ids;
+    }
+
+    function reachableSourcePixels(candidateFrames, candidateHistory, candidateFuture) {
+      const candidatesById = new Map(candidateFrames.map((frame) => [frame.id, frame]));
+      let total = 0;
+      for (const id of reachableFrameIds(candidateFrames, candidateHistory, candidateFuture)) {
+        const frame = candidatesById.get(id) || rawFrames.get(id);
+        if (!frame) return Number.POSITIVE_INFINITY;
+        total += frame.width * frame.height;
+        if (!Number.isSafeInteger(total)) return Number.POSITIVE_INFINITY;
+      }
+      return total;
+    }
+
+    function pruneRawFrames() {
+      const reachable = reachableFrameIds(frames, history, future);
+      for (const id of rawFrames.keys()) {
+        if (!reachable.has(id)) rawFrames.delete(id);
+      }
+    }
+
+    // Capturing a new frame invalidates redo. If retained undo snapshots alone
+    // would push RGBA memory above the source budget, discard the oldest undo
+    // snapshots until the new current timeline fits. Current frames are never
+    // evicted, so the capture either stays usable or fails the ordinary budget.
+    function prepareAcceptedFrame(candidateFrames) {
+      const candidateHistory = history.slice();
+      const candidateFuture = [];
+      while (
+        candidateHistory.length > 0 &&
+        reachableSourcePixels(candidateFrames, candidateHistory, candidateFuture) > maxSourcePixels
+      ) {
+        candidateHistory.shift();
+      }
+      if (reachableSourcePixels(candidateFrames, candidateHistory, candidateFuture) > maxSourcePixels) {
+        return { ok: false, reason: 'source-pixel-limit' };
+      }
+      history = candidateHistory;
+      future = candidateFuture;
+      return { ok: true };
     }
 
     function validateCandidateFrames(candidateFrames, candidatePlan) {
@@ -490,11 +597,13 @@
         const candidatePlan = buildPlan([frame], fixedBands, matchOptions);
         const validation = validateCandidateFrames([frame], candidatePlan);
         if (!validation.ok) return validation;
+        const retained = prepareAcceptedFrame([frame]);
+        if (!retained.ok) return retained;
         frames = [frame];
         rawFrames.set(frame.id, frame);
         plan = candidatePlan;
         nextId += 1;
-        future = [];
+        pruneRawFrames();
         return { ok: true, status: 'initial', frameId: frame.id, direction: null, plan };
       }
 
@@ -532,12 +641,14 @@
       const candidatePlan = buildPlan(candidateFrames, fixedBands, matchOptions);
       const validation = validateCandidateFrames(candidateFrames, candidatePlan);
       if (!validation.ok) return validation;
+      const retained = prepareAcceptedFrame(candidateFrames);
+      if (!retained.ok) return retained;
       frames = candidateFrames;
       rawFrames.set(frame.id, frame);
       plan = candidatePlan;
       direction = direction || motion.direction;
       nextId += 1;
-      future = [];
+      pruneRawFrames();
       return { ok: true, status: 'accepted', frameId: frame.id, direction, motion, plan };
     }
 
@@ -553,6 +664,7 @@
       remember();
       frames = candidateFrames;
       plan = candidatePlan;
+      pruneRawFrames();
       return { ok: true, deletedId: id, plan };
     }
 
@@ -570,6 +682,7 @@
       remember();
       fixedBands = candidateBands;
       plan = candidatePlan;
+      pruneRawFrames();
       return { ok: true, fixedBands: { ...fixedBands }, plan };
     }
 
@@ -600,6 +713,7 @@
       if (!restored.ok) return restored;
       history.pop();
       future.push(current);
+      pruneRawFrames();
       return { ok: true, plan };
     }
 
@@ -612,6 +726,7 @@
       future.pop();
       history.push(current);
       if (history.length > historyLimit) history.shift();
+      pruneRawFrames();
       return { ok: true, plan };
     }
 
@@ -647,11 +762,13 @@
         canUndo: history.length > 0,
         canRedo: future.length > 0,
         sourcePixels: sourcePixels(frames),
+        retainedSourcePixels: sourcePixels(Array.from(rawFrames.values())),
       };
     }
 
     return {
       addFrame,
+      beginTransaction,
       deleteFrame,
       setFixedBands,
       suggestFixedBands: suggestBands,

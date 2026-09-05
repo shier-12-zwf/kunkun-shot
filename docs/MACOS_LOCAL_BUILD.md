@@ -26,7 +26,7 @@
 npm run dist:mac:local
 ```
 
-产物写入 `dist/local-signed-mac`。同一命令会检查未解包应用、DMG 和 ZIP 内应用的深度签名，并确认指定要求锚定到配置的证书。
+产物写入 `dist/local-signed-mac`。同一命令会检查未解包应用、DMG 内应用和 ZIP 内应用的深度签名，并确认指定要求锚定到配置的证书；这不表示 DMG 外层容器已经单独 codesign。
 
 本地自签证书没有 Apple Team ID，因此本地配置明确关闭 Hardened Runtime 和时间戳；正式发布仍使用独立的 Developer ID、公证及 Hardened Runtime 流程。
 

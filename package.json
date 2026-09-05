@@ -1,7 +1,7 @@
 {
   "name": "kunkun-shot",
   "productName": "困困截图工具",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "一款 macOS 优先的截图工具：支持区域截图与标注、贴图钉屏、长截图、OCR、录屏，以及可选的 AI 图片问答与文字处理。",
   "main": "src/main/main.js",
   "author": "困困",
@@ -27,12 +27,12 @@
     "verify:mac:release": "node scripts/verify-macos-release.js"
   },
   "dependencies": {
-    "ffmpeg-static": "^5.2.0",
     "jsqr": "^1.4.0",
     "katex": "0.18.5",
     "tesseract.js": "^5.1.1"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "electron": "42.9.0",
     "electron-builder": "^26.15.3"
   },
@@ -66,8 +66,7 @@
     "asarUnpack": [
       "src/main/pasteboard-preserver.jxa",
       "**/node_modules/tesseract.js/**",
-      "**/node_modules/tesseract.js-core/**",
-      "**/node_modules/ffmpeg-static/**"
+      "**/node_modules/tesseract.js-core/**"
     ],
     "afterPack": "scripts/after-pack.js",
     "electronFuses": {

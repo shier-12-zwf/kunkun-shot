@@ -141,6 +141,8 @@
       let lastSingleId = null; // 单选时记住的 id（用于多选取消后回退）
       let offHistory = null; // onHistoryChanged 取消订阅
       let detailToken = 0; // 详情异步加载竞态令牌
+      let historyLoadError = ''; // 加载失败必须与“历史为空”区分
+      let feedbackTimer = null;
 
       // —— 顶层骨架 ——
       const page = el('div', 'kk-history');
@@ -187,8 +189,12 @@
           danger: true,
           onOk: async () => {
             try {
-              await kkapi.historyClear();
-            } catch (_) {}
+              const cleared = await kkapi.historyClear();
+              if (cleared !== true) throw new Error('历史记录未能清空。');
+            } catch (error) {
+              showFeedback('err', errorMessage(error, '清空失败，请重试。'));
+              return;
+            }
             selected.clear();
             lastSingleId = null;
             await reload();
@@ -201,6 +207,13 @@
       toolbar.appendChild(filterBar);
       toolbar.appendChild(spacer);
       toolbar.appendChild(clearBtn);
+
+      // 所有失败走同一个可访问反馈区，避免 IPC 失败后界面毫无反应。
+      const feedback = el('div', 'status kk-hist-feedback');
+      feedback.hidden = true;
+      feedback.setAttribute('role', 'status');
+      feedback.setAttribute('aria-live', 'polite');
+      toolbar.appendChild(feedback);
 
       // 主体：左侧网格 + 右侧详情
       const body = el('div', 'kk-hist-body');
@@ -242,7 +255,13 @@
       // —— 渲染网格（按天分组）——
       function renderGrid() {
         gridScroll.innerHTML = '';
-        clearBtn.disabled = !allItems.length;
+        clearBtn.disabled = !!historyLoadError || !allItems.length;
+
+        if (historyLoadError) {
+          gridScroll.appendChild(buildLoadErrorState());
+          renderDetail();
+          return;
+        }
 
         // 完全没有历史 → 空状态引导
         if (!allItems.length) {
@@ -534,32 +553,49 @@
           btnCopy.addEventListener('click', async () => {
             if (!dataURL) return;
             try {
-              await kkapi.copyImage(dataURL);
+              const copied = await kkapi.copyImage(dataURL);
+              if (copied !== true) throw new Error('剪贴板未确认写入。');
               flashBtn(btnCopy, '已复制');
-            } catch (_) {}
+            } catch (error) {
+              showFeedback('err', errorMessage(error, '复制失败，请重试。'));
+            }
           });
         }
 
         btnExport.addEventListener('click', async () => {
           try {
             const res = await kkapi.historyExport(id);
-            if (res && res.saved) flashBtn(btnExport, '已导出');
-          } catch (_) {}
+            if (res && res.saved) {
+              flashBtn(btnExport, '已导出');
+            } else if (res && res.error) {
+              showFeedback('err', errorMessage(res.error, '导出失败，请重试。'));
+            } else {
+              flashBtn(btnExport, '已取消', 'warn');
+            }
+          } catch (error) {
+            showFeedback('err', errorMessage(error, '导出失败，请重试。'));
+          }
         });
 
         if (!isMedia) {
-          btnOCR.addEventListener('click', () => {
+          btnOCR.addEventListener('click', async () => {
             if (!dataURL) return;
             try {
-              kkapi.openAIPanel({ mode: 'ocr', dataURL });
-            } catch (_) {}
+              const opened = await kkapi.openAIPanel({ mode: 'ocr', dataURL });
+              confirmAIPanelOpened(opened);
+            } catch (error) {
+              showFeedback('err', errorMessage(error, 'OCR 面板打开失败，请重试。'));
+            }
           });
 
-          btnTrans.addEventListener('click', () => {
+          btnTrans.addEventListener('click', async () => {
             if (!dataURL) return;
             try {
-              kkapi.openAIPanel({ mode: 'translateImage', dataURL });
-            } catch (_) {}
+              const opened = await kkapi.openAIPanel({ mode: 'translateImage', dataURL });
+              confirmAIPanelOpened(opened);
+            } catch (error) {
+              showFeedback('err', errorMessage(error, '翻译面板打开失败，请重试。'));
+            }
           });
 
           btnAI.addEventListener('click', () => {
@@ -579,8 +615,12 @@
             danger: true,
             onOk: async () => {
               try {
-                await kkapi.historyDelete(id);
-              } catch (_) {}
+                const deleted = await kkapi.historyDelete(id);
+                if (deleted !== true) throw new Error('历史记录未能删除。');
+              } catch (error) {
+                showFeedback('err', errorMessage(error, '删除失败，请重试。'));
+                return;
+              }
               if (lastSingleId === id) lastSingleId = null;
               selected.delete(id);
               await reload();
@@ -672,15 +712,38 @@
           try {
             if (kkapi.historyExportMany) {
               const res = await kkapi.historyExportMany(ids);
-              if (res && res.saved) flashBtn(btnExport, '已导出 ' + res.count + ' 项');
-              else flashBtn(btnExport, '已取消');
+              const count = Number(res && res.count) || 0;
+              if (res && res.saved && count === ids.length) {
+                flashBtn(btnExport, '已导出 ' + count + ' 项');
+              } else if (res && res.saved && count > 0) {
+                showFeedback('warn', '仅导出 ' + count + '/' + ids.length + ' 项，请检查剩余记录。');
+              } else if (res && res.error) {
+                showFeedback('err', errorMessage(res.error, '批量导出失败，请重试。'));
+              } else if (res && res.dir) {
+                showFeedback('err', '批量导出失败，没有记录成功写入。');
+              } else {
+                flashBtn(btnExport, '已取消', 'warn');
+              }
             } else {
               let ok = 0;
+              let failed = 0;
               for (const id of ids) {
-                try { const res = await kkapi.historyExport(id); if (res && res.saved) ok++; } catch (_) {}
+                try {
+                  const res = await kkapi.historyExport(id);
+                  if (res && res.saved) ok++;
+                  else if (res && res.error) failed++;
+                } catch (_) {
+                  failed++;
+                }
               }
-              flashBtn(btnExport, '已导出 ' + ok + ' 项');
+              if (failed > 0) {
+                showFeedback(ok > 0 ? 'warn' : 'err', '已导出 ' + ok + ' 项，' + failed + ' 项失败。');
+              } else {
+                flashBtn(btnExport, ok > 0 ? '已导出 ' + ok + ' 项' : '已取消', ok > 0 ? 'ok' : 'warn');
+              }
             }
+          } catch (error) {
+            showFeedback('err', errorMessage(error, '批量导出失败，请重试。'));
           } finally {
             btnExport.disabled = false;
           }
@@ -692,9 +755,10 @@
           try {
             const res = await kkapi.historyExportPdf(ids);
             if (res && res.saved) flashBtn(btnPdf, '已合并 ' + res.pageCount + ' 页');
-            else flashBtn(btnPdf, res && res.error ? '合并失败' : '已取消');
-          } catch (_) {
-            flashBtn(btnPdf, '合并失败');
+            else if (res && res.error) showFeedback('err', errorMessage(res.error, '合并失败，请重试。'));
+            else flashBtn(btnPdf, '已取消', 'warn');
+          } catch (error) {
+            showFeedback('err', errorMessage(error, '合并失败，请重试。'));
           } finally {
             btnPdf.disabled = !canMergePdf;
           }
@@ -709,9 +773,24 @@
             danger: true,
             onOk: async () => {
               try {
-                if (kkapi.historyDeleteMany) await kkapi.historyDeleteMany(ids);
-                else for (const id of ids) { try { await kkapi.historyDelete(id); } catch (_) {} }
-              } catch (_) {}
+                let deletedCount = 0;
+                if (kkapi.historyDeleteMany) {
+                  const result = await kkapi.historyDeleteMany(ids);
+                  deletedCount = Number(result && result.deleted) || 0;
+                } else {
+                  for (const id of ids) {
+                    const deleted = await kkapi.historyDelete(id);
+                    if (deleted === true) deletedCount++;
+                  }
+                }
+                if (deletedCount !== ids.length) {
+                  throw new Error('仅删除 ' + deletedCount + '/' + ids.length + ' 条记录。');
+                }
+              } catch (error) {
+                showFeedback('err', errorMessage(error, '批量删除失败，请重试。'));
+                await reload();
+                return;
+              }
               selected.clear();
               lastSingleId = null;
               await reload();
@@ -741,16 +820,55 @@
       }
 
       // 按钮短暂反馈文案，随后还原
-      function flashBtn(btn, text) {
+      function flashBtn(btn, text, kind) {
         const span = btn.querySelector('span');
         if (!span) return;
         const old = span.textContent;
         span.textContent = text;
-        btn.classList.add('kk-hist-act-ok');
+        if (!kind || kind === 'ok') btn.classList.add('kk-hist-act-ok');
         setTimeout(() => {
           span.textContent = old;
           btn.classList.remove('kk-hist-act-ok');
         }, 1300);
+      }
+
+      function errorMessage(error, fallback) {
+        if (typeof error === 'string' && error.trim()) return error.trim();
+        if (error && typeof error.message === 'string' && error.message.trim()) {
+          return error.message.trim();
+        }
+        return fallback;
+      }
+
+      function confirmAIPanelOpened(outcome) {
+        if (!outcome || outcome.ok !== true) {
+          throw new Error(errorMessage(outcome && outcome.error, 'AI 面板未能打开。'));
+        }
+        return outcome;
+      }
+
+      function showFeedback(kind, text) {
+        clearTimeout(feedbackTimer);
+        feedback.className = 'status ' + (kind || 'err') + ' kk-hist-feedback';
+        feedback.textContent = text || '操作失败，请重试。';
+        feedback.hidden = false;
+        feedbackTimer = setTimeout(() => {
+          feedback.hidden = true;
+          feedback.textContent = '';
+        }, 4200);
+      }
+
+      function buildLoadErrorState() {
+        const box = el('div', 'kk-hist-noresult');
+        box.innerHTML =
+          svgIcon('关闭', 'ico-lg') +
+          '<div class="kk-hist-noresult-title">历史记录加载失败</div>' +
+          '<div class="kk-hist-noresult-desc">' + escapeHTML(historyLoadError) + '</div>';
+        const retry = el('button', 'btn btn-primary', '<span>重新加载</span>');
+        retry.type = 'button';
+        retry.addEventListener('click', () => reload());
+        box.appendChild(retry);
+        return box;
       }
 
       // —— 空状态（无任何历史）——
@@ -830,13 +948,18 @@
 
       // —— 数据加载（保留当前筛选与有效选中）——
       async function reload() {
-        let list = [];
+        let list;
         try {
           list = await kkapi.historyList({ includeMedia: true });
-        } catch (_) {
-          list = [];
+          if (!Array.isArray(list)) throw new Error('历史记录返回了无效数据。');
+        } catch (error) {
+          historyLoadError = errorMessage(error, '无法读取历史记录，请重试。');
+          renderGrid();
+          showFeedback('err', historyLoadError);
+          return false;
         }
-        allItems = Array.isArray(list) ? list : [];
+        historyLoadError = '';
+        allItems = list;
 
         // 清理已失效的选中 id
         const liveIds = new Set(allItems.map((it) => it.id));
@@ -846,6 +969,7 @@
         if (lastSingleId && !liveIds.has(lastSingleId)) lastSingleId = null;
 
         renderGrid();
+        return true;
       }
 
       // —— HTML 转义（防注入）——
@@ -877,6 +1001,8 @@
             } catch (_) {}
           }
           offHistory = null;
+          clearTimeout(feedbackTimer);
+          feedbackTimer = null;
           lifeObserver.disconnect();
         }
       });

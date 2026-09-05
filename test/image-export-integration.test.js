@@ -22,6 +22,7 @@ const FORMAT_CASES = [
 test('image export configuration is backward-compatible and strictly schema-bound', () => {
   assert.equal(DEFAULT_CONFIG.capture.exportFormat, 'png');
   assert.equal(DEFAULT_CONFIG.capture.quality, 90);
+  assert.equal(DEFAULT_CONFIG.recording.toGif, false, 'fresh installs must keep no-FFmpeg recording usable');
   assert.deepEqual(
     normalizeConfigPatch({ capture: { exportFormat: 'avif', quality: 72 } }, 'main'),
     { capture: { exportFormat: 'avif', quality: 72 } },

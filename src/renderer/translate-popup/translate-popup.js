@@ -56,16 +56,33 @@
 
   btnClose.addEventListener('click', close);
 
-  btnCopy.addEventListener('click', function () {
+  let copyResetTimer = null;
+  function resetCopyButton(delay) {
+    clearTimeout(copyResetTimer);
+    copyResetTimer = setTimeout(function () {
+      btnCopy.classList.remove('copied');
+      btnCopy.textContent = '复制译文';
+      btnCopy.disabled = !currentTranslation;
+    }, delay);
+  }
+
+  btnCopy.addEventListener('click', async function () {
     if (!currentTranslation) return;
-    if (api && api.copyText) {
-      api.copyText(currentTranslation);
+    const text = currentTranslation;
+    btnCopy.disabled = true;
+    try {
+      if (!api || typeof api.copyText !== 'function') throw new Error('剪贴板功能不可用。');
+      const copied = await api.copyText(text);
+      if (copied !== true) throw new Error('剪贴板未确认写入。');
       btnCopy.classList.add('copied');
       btnCopy.textContent = '已复制';
-      setTimeout(function () {
-        btnCopy.classList.remove('copied');
-        btnCopy.textContent = '复制译文';
-      }, 1200);
+      resetCopyButton(1200);
+    } catch (_) {
+      btnCopy.classList.remove('copied');
+      btnCopy.textContent = '复制失败';
+      // 如果等待期间已收到新译文，仍恢复成当前内容对应的可用状态。
+      if (currentTranslation !== text) btnCopy.disabled = !currentTranslation;
+      resetCopyButton(1800);
     }
   });
 

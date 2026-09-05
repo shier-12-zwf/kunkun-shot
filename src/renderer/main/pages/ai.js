@@ -82,6 +82,12 @@
       .replace(/'/g, '&#39;');
   }
 
+  async function copyTextWithConfirmation(text) {
+    const copied = await kkapi.copyText(text);
+    if (copied !== true) throw new Error('剪贴板未确认写入。');
+    return true;
+  }
+
   // 时间戳格式化（兼容毫秒数字或字符串）
   function fmtTime(t) {
     let d;
@@ -174,9 +180,11 @@
         const t = body.textContent || '';
         if (!t) return;
         try {
-          await kkapi.copyText(t);
+          await copyTextWithConfirmation(t);
           flashBtn(copyBtn, '已复制 ✓');
-        } catch (_) {}
+        } catch (error) {
+          showError('复制失败：' + ((error && error.message) || error));
+        }
       });
       tools.appendChild(copyBtn);
       tools.hidden = true; // 流式完成后再显示
@@ -761,9 +769,11 @@
       const t = R.dom.ocrArea.value;
       if (!t) return;
       try {
-        await kkapi.copyText(t);
+        await copyTextWithConfirmation(t);
         flashBtn(ocrCopy, '已复制 ✓');
-      } catch (_) {}
+      } catch (error) {
+        showError('复制失败：' + ((error && error.message) || error));
+      }
     });
     const ocrRedo = el('button', 'btn btn-ghost kk-ai-mini');
     ocrRedo.appendChild(svgIcon(ICONS.ocr, 'ico-sm'));

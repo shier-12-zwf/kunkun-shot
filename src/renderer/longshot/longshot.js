@@ -332,16 +332,30 @@
     return !!match && match.overlap === 0 && match.hadContent === true;
   }
 
-  async function saveLongshotAndClose(api, dataURL, shouldContinue) {
+  async function saveLongshotAndClose(api, dataURL, shouldContinue, workflowState) {
     const isCurrent = typeof shouldContinue === 'function' ? shouldContinue : () => true;
+    const workflow = workflowState && typeof workflowState === 'object' ? workflowState : null;
     if (!isCurrent()) return { stale: true };
-    const result = await api.saveImage(dataURL);
-    if (!isCurrent()) return { stale: true };
-    if (!result || result.saved !== true) {
-      throw new Error('保存已取消或失败');
+    if (!workflow || workflow.saveConfirmed !== true) {
+      const result = await api.saveImage(dataURL);
+      if (!isCurrent()) return { stale: true };
+      if (!result || result.saved !== true) {
+        throw new Error('保存已取消或失败');
+      }
+      if (workflow) workflow.saveConfirmed = true;
     }
-    await api.copyImage(dataURL);
+    let copied;
+    try {
+      copied = await api.copyImage(dataURL);
+    } catch (error) {
+      if (!isCurrent()) return { stale: true };
+      const detail = error && error.message ? '：' + error.message : '';
+      throw new Error('复制到剪贴板失败' + detail);
+    }
     if (!isCurrent()) return { stale: true };
+    if (copied !== true) {
+      throw new Error('复制到剪贴板失败');
+    }
     await api.closeSelf();
     return { saved: true };
   }
@@ -396,6 +410,7 @@
   let idleStreak = 0;
   let failureStreak = 0;
   let operationGeneration = 0; // 保存/取消也需要抵御迟到回调
+  let savedExportWorkflow = null; // 当前导出版本已通过保存确认时，复制失败只重试剪贴板阶段
 
   const stitchApi = window.LongshotStitch;
 
@@ -516,20 +531,25 @@
   // canvas therefore remains exportable if an edit/recomposition ever throws.
   function renderTimeline() {
     if (!stitchTimeline) return false;
-    const composed = stitchTimeline.compose();
-    if (!composed.ok) return false;
-    const nextCanvas = document.createElement('canvas');
-    nextCanvas.width = composed.width;
-    nextCanvas.height = composed.height;
-    const nextContext = nextCanvas.getContext('2d', { willReadFrequently: true });
-    if (!nextContext) return false;
-    const imageData = nextContext.createImageData(composed.width, composed.height);
-    imageData.data.set(composed.pixels);
-    nextContext.putImageData(imageData, 0, 0);
-    stitchCanvas = nextCanvas;
-    stitchCtx = nextContext;
-    stitchedHeight = composed.height;
-    return true;
+    try {
+      const composed = stitchTimeline.compose();
+      if (!composed.ok) return false;
+      const nextCanvas = document.createElement('canvas');
+      nextCanvas.width = composed.width;
+      nextCanvas.height = composed.height;
+      const nextContext = nextCanvas.getContext('2d', { willReadFrequently: true });
+      if (!nextContext) return false;
+      const imageData = nextContext.createImageData(composed.width, composed.height);
+      imageData.data.set(composed.pixels);
+      nextContext.putImageData(imageData, 0, 0);
+      stitchCanvas = nextCanvas;
+      stitchCtx = nextContext;
+      stitchedHeight = composed.height;
+      savedExportWorkflow = null;
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   function refreshEditControls() {
@@ -627,8 +647,10 @@
     if (!stitchTimeline) return { status: 'terminal', reason: 'stitch-helper-missing', changed: false };
     const raw = rawFrameFromCanvas(frame);
     if (!raw.ok) return { status: 'terminal', reason: raw.reason, changed: false };
+    const transaction = stitchTimeline.beginTransaction();
     const added = stitchTimeline.addFrame(raw.frame);
     if (!added.ok) {
+      transaction.commit();
       if (added.reason === 'blank-frame') return { status: 'empty-frame', changed: false };
       if (added.reason === 'fixed-bands-suggested') {
         suggestedFixedBands = { top: added.suggestion.top, bottom: added.suggestion.bottom };
@@ -647,9 +669,20 @@
       $hint.textContent = unmatchedMessage(added.reason);
       return { status: 'unmatched', reason: added.reason, changed: false };
     }
-    if (added.status === 'idle') return { status: 'idle', changed: false };
-    if (!captureSession.isCurrent(token)) return { status: 'stale', changed: false };
-    if (!renderTimeline()) return { status: 'terminal', reason: 'render-failed', changed: false };
+    if (added.status === 'idle') {
+      transaction.commit();
+      return { status: 'idle', changed: false };
+    }
+    if (!captureSession.isCurrent(token)) {
+      transaction.rollback();
+      return { status: 'stale', changed: false };
+    }
+    if (!renderTimeline()) {
+      transaction.rollback();
+      refreshEditControls();
+      return { status: 'terminal', reason: 'render-failed', changed: false };
+    }
+    transaction.commit();
     captureSession.updateStitchedPixels(token, stitchCanvas.width, stitchedHeight);
     refreshEditControls();
     const offeredSuggestion = maybeOfferFixedSuggestion();
@@ -888,17 +921,33 @@
     return '操作失败：' + (result.reason || '未知原因');
   }
 
-  function finishTimelineEdit(result, successMessage) {
+  function finishTimelineEdit(mutate, successMessage) {
+    const transaction = stitchTimeline.beginTransaction();
+    let result;
+    try {
+      result = mutate();
+    } catch (_) {
+      transaction.rollback();
+      $hint.style.color = '#ff5a5a';
+      $hint.textContent = '操作失败，上一版已保留';
+      refreshEditControls();
+      return false;
+    }
     if (!result || !result.ok) {
+      transaction.commit();
       $hint.style.color = '#ff5a5a';
       $hint.textContent = timelineMutationMessage(result);
       return false;
     }
     if (!renderTimeline()) {
+      transaction.rollback();
       $hint.style.color = '#ff5a5a';
       $hint.textContent = '重新拼接失败，上一版导出图仍保留';
+      updateCount(stitchTimeline.getState().frames.length);
+      refreshEditControls();
       return false;
     }
+    transaction.commit();
     updateCount(stitchTimeline.getState().frames.length);
     refreshEditControls();
     $hint.style.color = '';
@@ -909,19 +958,19 @@
   function deleteSelectedSegment() {
     if (!stitchTimeline || capturing || finishing) return;
     const id = $segmentSelect.value;
-    finishTimelineEdit(stitchTimeline.deleteFrame(id), '已删除选中帧并从原始帧重新拼接');
+    finishTimelineEdit(() => stitchTimeline.deleteFrame(id), '已删除选中帧并从原始帧重新拼接');
   }
 
   function undoTimelineEdit() {
     if (!stitchTimeline || capturing || finishing) return;
     suggestedFixedBands = null;
-    finishTimelineEdit(stitchTimeline.undo(), '已撤销并重新拼接');
+    finishTimelineEdit(() => stitchTimeline.undo(), '已撤销并重新拼接');
   }
 
   function redoTimelineEdit() {
     if (!stitchTimeline || capturing || finishing) return;
     suggestedFixedBands = null;
-    finishTimelineEdit(stitchTimeline.redo(), '已重做并重新拼接');
+    finishTimelineEdit(() => stitchTimeline.redo(), '已重做并重新拼接');
   }
 
   function suggestFixedRegions() {
@@ -944,9 +993,11 @@
     if (!stitchTimeline || capturing || finishing) return;
     const top = Math.max(0, parseInt($fixedTop.value, 10) || 0);
     const bottom = Math.max(0, parseInt($fixedBottom.value, 10) || 0);
-    const result = stitchTimeline.setFixedBands({ top, bottom });
-    if (result.ok) suggestedFixedBands = null;
-    finishTimelineEdit(result, '已应用固定顶部/底部并重新拼接');
+    const applied = finishTimelineEdit(
+      () => stitchTimeline.setFixedBands({ top, bottom }),
+      '已应用固定顶部/底部并重新拼接'
+    );
+    if (applied) suggestedFixedBands = null;
   }
 
   // ====== 完成：导出 -> 保存 + 复制 -> 关窗 ======
@@ -972,6 +1023,19 @@
       const cropT = Math.max(0, Math.min(parseInt($cropTop.value, 10) || 0, stitchedHeight - 8));
       const cropB = Math.max(0, Math.min(parseInt($cropBottom.value, 10) || 0, stitchedHeight - 8 - cropT));
       const finalH = stitchedHeight - cropT - cropB;
+      const reusableWorkflow = savedExportWorkflow &&
+        savedExportWorkflow.sourceCanvas === stitchCanvas &&
+        savedExportWorkflow.cropTop === cropT &&
+        savedExportWorkflow.cropBottom === cropB &&
+        savedExportWorkflow.horizontal === captureHorizontal;
+      const exportWorkflow = reusableWorkflow ? savedExportWorkflow : {
+        sourceCanvas: stitchCanvas,
+        cropTop: cropT,
+        cropBottom: cropB,
+        horizontal: captureHorizontal,
+        saveConfirmed: false,
+      };
+      savedExportWorkflow = exportWorkflow;
       let exportCanvas = stitchCanvas;
 
       // 裁剪和横向还原最多只创建一个额外 canvas，避免“预留裁剪 + 手动裁剪 +
@@ -1018,19 +1082,20 @@
       if (!dataURL || dataURL.length < 32 || dataURL === 'data:,') {
         throw new Error('导出失败：拼接图过大或为空，无法生成 PNG');
       }
-      // 只有主进程明确返回 saved:true 才复制并关窗；取消保存或失败时保留拼接图供重试。
+      // 只有保存 saved:true 且剪贴板明确返回 true 才关窗；任一步失败都保留拼接图供重试。
       await saveLongshotAndClose(
         kkapi,
         dataURL,
-        () => finishing && finishGeneration === operationGeneration
+        () => finishing && finishGeneration === operationGeneration,
+        exportWorkflow
       );
     } catch (e) {
       if (finishGeneration !== operationGeneration) return;
       // 不要静默关窗丢图：唯一一份拼接图在内存里，关窗即丢失。给出可见提示并保留控制条供重试。
-      console.error('[longshot] 保存失败', e);
+      console.error('[longshot] 完成失败', e);
       finishing = false;
       $bar.classList.remove('busy');
-      $hint.textContent = '保存失败：' + ((e && e.message) || e) + '，可点「完成」重试或「取消」放弃';
+      $hint.textContent = '完成失败：' + ((e && e.message) || e) + '，可点「完成」重试或「取消」放弃';
       $btnStart.disabled = false;
       $btnStart.querySelector('.label').textContent = '继续';
       refreshEditControls();
@@ -1062,8 +1127,14 @@
   $btnRedo.addEventListener('click', redoTimelineEdit);
   $btnSuggestFixed.addEventListener('click', suggestFixedRegions);
   $btnApplyFixed.addEventListener('click', applyFixedRegions);
-  $cropTop.addEventListener('input', () => { $cropTopVal.textContent = $cropTop.value + 'px'; });
-  $cropBottom.addEventListener('input', () => { $cropBottomVal.textContent = $cropBottom.value + 'px'; });
+  $cropTop.addEventListener('input', () => {
+    savedExportWorkflow = null;
+    $cropTopVal.textContent = $cropTop.value + 'px';
+  });
+  $cropBottom.addEventListener('input', () => {
+    savedExportWorkflow = null;
+    $cropBottomVal.textContent = $cropBottom.value + 'px';
+  });
   $btnDone.addEventListener('click', finish);
   $btnCancel.addEventListener('click', cancel);
 

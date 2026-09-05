@@ -87,6 +87,29 @@
     resultEl.scrollTop = resultEl.scrollHeight;
   }
 
+  async function copyTextWithConfirmation(text) {
+    const copied = await kkapi.copyText(text);
+    if (copied !== true) throw new Error('剪贴板未确认写入。');
+    return true;
+  }
+
+  async function openSettingsWithFeedback() {
+    try {
+      const outcome = await kkapi.openSettings();
+      if (!outcome || outcome.ok !== true) {
+        const detail = outcome && outcome.error;
+        const message = typeof detail === 'string'
+          ? detail
+          : (detail && detail.message) || '设置窗口打开失败。';
+        throw new Error(message);
+      }
+      return true;
+    } catch (error) {
+      showError('设置窗口打开失败：' + ((error && error.message) || error));
+      return false;
+    }
+  }
+
   // 清空结果区
   function clearResult() {
     resultEl.innerHTML = '';
@@ -147,7 +170,7 @@
     const rows = readEditableTable();
     if (!rows.length || !window.KKTableModel) return;
     try {
-      await kkapi.copyText(serializer(rows));
+      await copyTextWithConfirmation(serializer(rows));
       const old = button.textContent;
       button.textContent = '已复制 ✓';
       setTimeout(() => { button.textContent = old; }, 1200);
@@ -191,11 +214,7 @@
       const link = document.createElement('span');
       link.className = 'link';
       link.textContent = '前往「设置」填写 API Key →';
-      link.addEventListener('click', () => {
-        try {
-          kkapi.openSettings();
-        } catch (_) {}
-      });
+      link.addEventListener('click', () => { openSettingsWithFeedback(); });
       tip.appendChild(link);
       box.appendChild(tip);
     }
@@ -543,20 +562,18 @@
   }
 
   // ---------- 事件绑定 ----------
-  btnSettings.addEventListener('click', () => {
-    try {
-      kkapi.openSettings();
-    } catch (_) {}
-  });
+  btnSettings.addEventListener('click', () => { openSettingsWithFeedback(); });
   btnRetry.addEventListener('click', startStructuredRecognition);
   btnCopyResult.addEventListener('click', async () => {
     if (!liveText) return;
     try {
-      await kkapi.copyText(liveText);
+      await copyTextWithConfirmation(liveText);
       const old = btnCopyResult.textContent;
       btnCopyResult.textContent = '已复制 ✓';
       setTimeout(() => { btnCopyResult.textContent = old; }, 1200);
-    } catch (_) {}
+    } catch (error) {
+      showError('复制结果失败：' + ((error && error.message) || error));
+    }
   });
   btnTableRaw.addEventListener('click', () => {
     const showingRaw = !resultEl.hidden;
@@ -592,13 +609,15 @@
     const t = ocrText.value;
     if (!t) return;
     try {
-      await kkapi.copyText(t);
+      await copyTextWithConfirmation(t);
       const old = ocrCopy.textContent;
       ocrCopy.textContent = '已复制 ✓';
       setTimeout(() => {
         ocrCopy.textContent = old;
       }, 1200);
-    } catch (_) {}
+    } catch (error) {
+      showError('复制识别文字失败：' + ((error && error.message) || error));
+    }
   });
   ocrTranslate.addEventListener('click', () => {
     const t = ocrText.value.trim();

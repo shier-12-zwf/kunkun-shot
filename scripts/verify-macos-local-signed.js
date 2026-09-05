@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const {
+  assertPackagedResources,
   discoverReleaseArtifacts,
   isSafeArchiveEntry
 } = require('./verify-macos-release');
@@ -80,6 +81,7 @@ function extractDesignatedRequirement(requirement, appPath) {
 }
 
 function verifySignedApp(appPath, expectedHash) {
+  assertPackagedResources(appPath);
   runCommand('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath]);
   const signature = runCommand(
     '/usr/bin/codesign',

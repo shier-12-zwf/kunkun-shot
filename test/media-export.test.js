@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const media = require('../src/main/media');
 
 const {
   SUPPORTED_IMAGE_FORMATS,
@@ -20,6 +22,42 @@ test('image exporter advertises the complete stable format list', () => {
   assert.deepEqual(SUPPORTED_IMAGE_FORMATS, ['png', 'jpeg', 'webp', 'bmp', 'avif', 'pdf']);
   assert.deepEqual(listSupportedImageFormats(), ['png', 'jpeg', 'webp', 'bmp', 'avif', 'pdf']);
   assert.notEqual(listSupportedImageFormats(), SUPPORTED_IMAGE_FORMATS);
+});
+
+test('PNG, JPEG and PDF remain exportable without an external FFmpeg binary', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kk-shot-native-image-export-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const jpeg = Buffer.from([
+    0xff, 0xd8,
+    0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x03, 0x01, 0x11,
+    0xff, 0xd9,
+  ]);
+  let nativeCreates = 0;
+  const nativeImage = {
+    createFromBuffer() {
+      nativeCreates += 1;
+      return {
+        isEmpty: () => false,
+        toPNG: () => Buffer.from(PNG_DATA_URL.split(',')[1], 'base64'),
+        toJPEG: () => jpeg,
+      };
+    },
+  };
+  const media = {
+    async convertImage() { throw new Error('FFmpeg must not be used'); },
+  };
+
+  const pngPath = path.join(dir, 'capture.png');
+  const jpegPath = path.join(dir, 'capture.jpg');
+  const pdfPath = path.join(dir, 'capture.pdf');
+  await exportImage({ dataURL: PNG_DATA_URL, outputPath: pngPath, format: 'png', quality: 90 }, { media, nativeImage });
+  await exportImage({ dataURL: PNG_DATA_URL, outputPath: jpegPath, format: 'jpeg', quality: 82 }, { media, nativeImage });
+  await exportImage({ dataURL: PNG_DATA_URL, outputPath: pdfPath, format: 'pdf', quality: 82 }, { media, nativeImage });
+
+  assert.equal(fs.readFileSync(pngPath).subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+  assert.equal(fs.readFileSync(jpegPath).subarray(0, 2).toString('hex'), 'ffd8');
+  assert.equal(fs.readFileSync(pdfPath).subarray(0, 5).toString('ascii'), '%PDF-');
+  assert.equal(nativeCreates, 2, 'PNG-to-PNG is copied directly; JPEG and PDF use Electron nativeImage');
 });
 
 test('export options strictly validate image data URLs, target extensions and quality', () => {
@@ -225,9 +263,23 @@ test('multi-page PDF rejects non-PDF targets, empty/oversized page lists and pre
   assert.deepEqual(fs.readdirSync(dir), ['merged.pdf']);
 });
 
-test('all advertised formats produce non-empty files with recognizable containers', async (t) => {
+test('every export format produces a valid container or a precise missing-encoder error', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kkshot-export-formats-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const ffmpeg = media.resolveFfmpeg();
+  if (!ffmpeg) {
+    t.skip('optional system FFmpeg is not installed');
+    return;
+  }
+  const encoderProbe = spawnSync(ffmpeg, ['-hide_banner', '-encoders'], { encoding: 'utf8' });
+  assert.equal(encoderProbe.status, 0, encoderProbe.stderr);
+  const encoders = `${encoderProbe.stdout || ''}\n${encoderProbe.stderr || ''}`;
+  const sourcePath = path.join(dir, 'source-64x64.png');
+  const source = spawnSync(ffmpeg, [
+    '-y', '-f', 'lavfi', '-i', 'color=c=black:s=64x64', '-frames:v', '1', '-c:v', 'png', sourcePath,
+  ], { encoding: 'utf8' });
+  assert.equal(source.status, 0, source.stderr);
+  const integrationPngDataUrl = `data:image/png;base64,${fs.readFileSync(sourcePath).toString('base64')}`;
   const cases = [
     ['png', '.png', (b) => b.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))],
     ['jpeg', '.jpg', (b) => b[0] === 0xff && b[1] === 0xd8],
@@ -239,7 +291,20 @@ test('all advertised formats produce non-empty files with recognizable container
 
   for (const [format, ext, recognizes] of cases) {
     const outputPath = path.join(dir, `capture${ext}`);
-    const result = await exportImage({ dataURL: PNG_DATA_URL, outputPath, format, quality: 88 });
+    const missingEncoder = format === 'webp' && !/\blibwebp(?:_anim)?\b/.test(encoders)
+      ? 'libwebp'
+      : format === 'avif' && !/\(codec av1\)/.test(encoders)
+        ? 'av1'
+        : null;
+    if (missingEncoder) {
+      await assert.rejects(
+        exportImage({ dataURL: integrationPngDataUrl, outputPath, format, quality: 88 }),
+        new RegExp(`缺少 ${missingEncoder} 编码器`),
+      );
+      assert.equal(fs.existsSync(outputPath), false);
+      continue;
+    }
+    const result = await exportImage({ dataURL: integrationPngDataUrl, outputPath, format, quality: 88 });
     const bytes = fs.readFileSync(outputPath);
     assert.equal(result.path, outputPath);
     assert.ok(bytes.length > 0, `${format} output should not be empty`);

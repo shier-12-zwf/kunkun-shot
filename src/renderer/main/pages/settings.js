@@ -775,7 +775,7 @@
         stackField(
           '录屏文件名模板',
           inRecordingFileNameTemplate,
-          '可用变量与截图一致；{width}/{height} 为录制像素尺寸，扩展名由 GIF/WebM/MP4 导出器决定。'
+          '可用变量与截图一致；{width}/{height} 为录制像素尺寸。GIF、MP4 与剪辑后 WebM 需要系统 FFmpeg。'
         )
       );
 
@@ -783,7 +783,11 @@
         autoSave({ recording: { toGif: v } }, v ? '将导出为 GIF' : '将导出为视频');
       });
       gRec.body.appendChild(
-        rowField('导出为 GIF', '关闭则导出为视频文件', tgGif)
+        rowField(
+          '导出为 GIF',
+          '需要系统 FFmpeg；若未检测到会自动改存 WebM。关闭后可直接导出未剪辑 WebM，或另选 MP4',
+          tgGif
+        )
       );
 
       const tgSystemAudio = toggle(false, function (v) {

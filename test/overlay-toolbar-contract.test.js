@@ -76,7 +76,11 @@ test('secondary tools remain inside the delegated toolbar and expose accessible 
   assert.match(actionMenu, /data-action="formula"[\s\S]*?>AI 公式</);
   assert.doesNotMatch(actionMenu, /data-action="translate"/);
   assert.match(actionMenu, /data-action="ask"[\s\S]*?>问 AI</);
-  assert.match(actionMenu, /id="trLang"/);
+  assert.doesNotMatch(actionMenu, /id="trLang"/);
+  assert.match(
+    toolbar,
+    /<button\b[^>]*data-action="translate"[^>]*>[\s\S]*?<\/button>\s*<label\b[^>]*class="[^"]*translate-target[^"]*"[^>]*>[\s\S]*?<select\b[^>]*id="trLang"[^>]*aria-label="翻译目标语言"[^>]*>[\s\S]*?<\/select>\s*<\/label>\s*<button\b[^>]*data-action="ocr"/
+  );
   assert.match(actionMenu, /id="selectionWidth"[^>]*type="number"/);
   assert.match(actionMenu, /id="selectionHeight"[^>]*type="number"/);
   assert.match(actionMenu, /id="selectionSizePreset"/);
@@ -120,6 +124,13 @@ test('toolbar labels cannot shrink into clipped vertical text', () => {
   assert.match(css, /\.toolbar-menu-trigger\.has-active-option::after\s*\{/);
   assert.match(js, /function positionOpenToolbarMenu\(\)[\s\S]*?naturalHeight[\s\S]*?spaceAbove[\s\S]*?spaceBelow[\s\S]*?maxHeight/);
   assert.match(js, /MutationObserver[\s\S]*?attributeFilter:\s*\['hidden'\]/);
+});
+
+test('primary translation language selector uses a compact inline layout', () => {
+  const targetStyle = extract(/\.translate-target\s*\{([^}]*)\}/, css, 'primary translation target style');
+  assert.match(targetStyle, /display:\s*inline-flex;/);
+  assert.match(targetStyle, /gap:\s*4px;/);
+  assert.doesNotMatch(targetStyle, /grid-column:/);
 });
 
 test('smart selection can replace an existing region and return to the toolbar', () => {

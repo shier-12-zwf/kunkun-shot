@@ -28,7 +28,7 @@ test('timed cancellation reports the scheduler result instead of claiming every 
 });
 
 test('long screenshot is a visible primary capture action with its configured shortcut', () => {
-  assert.match(source, /key:\s*'long'[\s\S]*?label:\s*'长截图'[\s\S]*?triggerCapture\('long'\)/);
+  assert.match(source, /key:\s*'long'[\s\S]*?label:\s*'长截图'[\s\S]*?runCapture\(aLong,\s*'long'/);
   assert.match(source, /setHint\(aLong,\s*sc\.longShot\)/);
 });
 

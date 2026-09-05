@@ -14,7 +14,6 @@ Original source code in this repository is offered under the [MIT License](LICEN
 
 | Package | Resolved version | Declared license | Upstream |
 | --- | ---: | --- | --- |
-| `ffmpeg-static` | 5.3.0 | GPL-3.0-or-later | [eugeneware/ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) |
 | `jsqr` | 1.4.0 | Apache-2.0 | [cozmo/jsQR](https://github.com/cozmo/jsQR) |
 | `katex` | 0.18.5 | MIT | [KaTeX/KaTeX](https://github.com/KaTeX/KaTeX) |
 | `tesseract.js` | 5.1.1 | Apache-2.0 | [naptha/tesseract.js](https://github.com/naptha/tesseract.js) |
@@ -23,33 +22,31 @@ The renderer also contains a vendored `jsQR` browser bundle at `src/renderer/ove
 
 渲染层还在 `src/renderer/overlay/vendor/jsQR.js` 中包含一份 jsQR 浏览器 bundle，该副本仍受 jsQR 的 Apache-2.0 条款约束。Apache-2.0 全文副本位于 [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt)。
 
-公式贴图窗口在本机加载 KaTeX 及其随附字体，不依赖 CDN。KaTeX 的 MIT 许可证副本位于 [`LICENSES/KaTeX-MIT.txt`](LICENSES/KaTeX-MIT.txt)。
+公式贴图窗口在本机加载 KaTeX 及其随附字体，不依赖 CDN。KaTeX 代码的 MIT 许可证副本位于 [`LICENSES/KaTeX-MIT.txt`](LICENSES/KaTeX-MIT.txt)。随附 KaTeX 字体受 SIL Open Font License 1.1 约束，其版权声明与许可证全文位于 [`LICENSES/KaTeX-Fonts-OFL-1.1.txt`](LICENSES/KaTeX-Fonts-OFL-1.1.txt)。
+
+`tr46@0.0.3` 的发布包元数据声明 MIT，但该旧 npm 包本身未携带许可证文件。仓库随附其上游维护者公布的 MIT 版权与许可文本，见 [`LICENSES/tr46-MIT.txt`](LICENSES/tr46-MIT.txt)。
 
 ### Important FFmpeg distribution note / FFmpeg 分发特别说明
 
-`ffmpeg-static` installs a platform-specific FFmpeg executable and declares `GPL-3.0-or-later`. Its own README states that binary releases are covered by their respective licenses. A packaged application that includes this executable must preserve the applicable notices and independently satisfy the corresponding GPL/FFmpeg source-offer and redistribution obligations. The repository's MIT license must not be presented as the only license governing such a binary distribution.
+The release application deliberately does **not** bundle `ffmpeg-static` or a standalone FFmpeg executable. PNG, JPEG, PDF, and untrimmed WebM work without one. Optional WebP/BMP/AVIF image conversion, GIF/H.264 MP4 recording export, and trimmed recording export invoke an executable installed and managed separately by the user. Some formats require a build containing the corresponding encoder. The license and redistribution terms of that separately installed executable remain independent from this project's MIT license.
 
-`ffmpeg-static` 会安装平台对应的 FFmpeg 可执行文件，并声明为 `GPL-3.0-or-later`。其上游 README 同时说明，各平台二进制受各自许可证约束。若安装包包含该可执行文件，发布者必须保留适用声明，并独立履行相应 GPL/FFmpeg 源码提供及再分发义务；不得把仓库的 MIT 许可证描述成整个二进制分发物唯一适用的许可证。
+正式安装包明确**不内置** `ffmpeg-static` 或独立 FFmpeg 可执行文件。PNG、JPEG、PDF 与未剪辑 WebM 无需它即可使用；WebP/BMP/AVIF 图片转换、GIF/H.264 MP4 录屏导出及剪辑录屏会调用用户另行安装和管理的可执行文件，部分格式还要求该构建包含对应编码器。这个外部程序的许可与再分发条款独立于本项目的 MIT 许可证。
 
 Relevant upstream materials / 上游材料：
 
-- [ffmpeg-static license](https://github.com/eugeneware/ffmpeg-static/blob/master/LICENSE)
-- [ffmpeg-static binary sources](https://github.com/eugeneware/ffmpeg-static#sources-of-the-binaries)
 - [FFmpeg legal information](https://ffmpeg.org/legal.html)
 
 ## Other installed production packages / 其他已解析运行时包
 
-The following packages are present in the current `npm ls --omit=dev --all` tree. License identifiers are taken from installed package metadata; `parse-cache-control` uses the generic `BSD` label in its package metadata and carries a BSD-style license file, so no more specific SPDX identifier is asserted here.
+The following packages are present in the current `npm ls --omit=dev --all` tree. License identifiers are taken from installed package metadata. Optional packages installed for `node-fetch` are included because the packager can include them in the application.
 
-下列软件包出现在当前 `npm ls --omit=dev --all` 依赖树中。许可证标识来自已安装包元数据；`parse-cache-control` 的包元数据只写作通用 `BSD`，并随附 BSD 风格许可证，因此本文不推断更具体的 SPDX 标识。
+下列软件包出现在当前 `npm ls --omit=dev --all` 依赖树中。许可证标识来自已安装包元数据；同时列出为 `node-fetch` 安装的可选包，因为打包器可能把它们收入应用。
 
 | License metadata | Packages and resolved versions |
 | --- | --- |
-| Apache-2.0 | `caseless@0.12.0`, `idb-keyval@6.3.0`, `tesseract.js-core@5.1.1`, `wasm-feature-detect@1.9.0` |
+| Apache-2.0 | `idb-keyval@6.3.0`, `tesseract.js-core@5.1.1`, `wasm-feature-detect@1.9.0` |
 | BSD-2-Clause | `webidl-conversions@3.0.1` |
-| BSD (upstream metadata) | `parse-cache-control@1.0.1` |
-| ISC | `inherits@2.0.4` |
-| MIT | `@derhuerst/http-basic@8.2.4`, `@types/node@10.17.60`, `agent-base@6.0.2`, `bmp-js@0.1.0`, `buffer-from@1.1.2`, `commander@15.0.0`, `concat-stream@2.0.0`, `debug@4.4.3`, `encoding@0.1.13`, `env-paths@2.2.1`, `http-response-object@3.0.2`, `https-proxy-agent@5.0.1`, `iconv-lite@0.6.3`, `is-electron@2.2.2`, `is-url@1.2.4`, `ms@2.1.3`, `node-fetch@2.7.0`, `opencollective-postinstall@2.0.3`, `progress@2.0.3`, `readable-stream@3.6.2`, `regenerator-runtime@0.13.11`, `safe-buffer@5.2.1`, `safer-buffer@2.1.2`, `string_decoder@1.3.0`, `tr46@0.0.3`, `typedarray@0.0.6`, `util-deprecate@1.0.2`, `whatwg-url@5.0.0`, `zlibjs@0.3.1` |
+| MIT | `bmp-js@0.1.0`, `commander@15.0.0`, `encoding@0.1.13` (optional), `iconv-lite@0.6.3` (optional), `is-electron@2.2.2`, `is-url@1.2.4`, `node-fetch@2.7.0`, `opencollective-postinstall@2.0.3`, `regenerator-runtime@0.13.11`, `safer-buffer@2.1.2` (optional), `tr46@0.0.3`, `whatwg-url@5.0.0`, `zlibjs@0.3.1` |
 
 ## Electron and build tools / Electron 与构建工具
 

@@ -245,7 +245,7 @@ test('overlay opens table/formula recognition from a clean copy of the current s
   const api = {
     openAIPanel: async (payload) => {
       calls.push(['open', payload]);
-      return true;
+      return { ok: true };
     },
   };
 
@@ -255,6 +255,14 @@ test('overlay opens table/formula recognition from a clean copy of the current s
     ['open', { mode: 'table', dataURL: VALID_IMAGE }],
   ]);
   await assert.rejects(() => openStructuredRecognition(api, compose, 'ask'), /模式/);
+  await assert.rejects(
+    () => openStructuredRecognition({ openAIPanel: async () => undefined }, compose, 'formula'),
+    /打开失败/,
+  );
+  await assert.rejects(
+    () => openStructuredRecognition({ openAIPanel: async () => ({ ok: false, error: '窗口拒绝打开' }) }, compose, 'formula'),
+    /窗口拒绝打开/,
+  );
 });
 
 test('toolbar and AI panel expose explicit AI labels and a retry control', () => {

@@ -92,7 +92,7 @@
         '</div>' +
         '</div>';
       stage.addEventListener('click', () => {
-        api.triggerCapture('region');
+        runCapture(aRegion, 'region', '已打开区域编辑器');
       });
       el.appendChild(stage);
 
@@ -137,6 +137,30 @@
         }, 2400);
       }
 
+      // CAPTURE_TRIGGER 的 Promise 成功解析不代表截图成功；主进程会用
+      // { ok: false, error/canceled/busy } 表达权限失败、取消和任务冲突。
+      async function runCapture(refs, mode, successText) {
+        if (!refs || !refs.btn || refs.btn.disabled) return;
+        refs.btn.disabled = true;
+        try {
+          const result = await api.triggerCapture(mode);
+          if (result && result.ok === true) {
+            flash(refs, 'ok', successText);
+          } else if (result && result.canceled === true) {
+            flash(refs, 'warn', '已取消');
+          } else {
+            const message = result && result.error
+              ? result.error
+              : (result && result.busy ? '已有截图任务正在进行' : '截图未能启动');
+            flash(refs, 'err', message);
+          }
+        } catch (e) {
+          flash(refs, 'err', (e && e.message) || '截图未能启动');
+        } finally {
+          refs.btn.disabled = false;
+        }
+      }
+
       function escapeHtml(s) {
         return String(s).replace(/[&<>"']/g, (c) => {
           return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -149,7 +173,7 @@
         icon: 'region',
         label: '区域截图',
         primary: true,
-        onClick: () => api.triggerCapture('region'),
+        onClick: () => runCapture(aRegion, 'region', '已打开区域编辑器'),
       });
 
       // 2) 窗口截图（无快捷键；成功/失败原位反馈）
@@ -197,7 +221,7 @@
         key: 'long',
         icon: 'long',
         label: '长截图',
-        onClick: () => api.triggerCapture('long'),
+        onClick: () => runCapture(aLong, 'long', '已打开长截图选区'),
       });
 
       // 5) 延时截图（无快捷键；3s/5s 选择 + 可见倒计时）
@@ -349,7 +373,7 @@
         key: 'record',
         icon: 'record',
         label: '录屏',
-        onClick: () => api.triggerCapture('record'),
+        onClick: () => runCapture(aRecord, 'record', '已打开录屏选区'),
       });
 
       // —— 底部：最近截图 + 自动复制开关 ——

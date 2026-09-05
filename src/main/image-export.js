@@ -30,9 +30,9 @@ const FORMAT_EXTENSIONS = Object.freeze({
 const IMAGE_FORMAT_SPECS = Object.freeze([
   Object.freeze({ format: 'png', name: 'PNG 图片（无损，支持透明）', extensions: Object.freeze(['png']), preferredExtension: 'png' }),
   Object.freeze({ format: 'jpeg', name: 'JPEG 图片（更小，不支持透明）', extensions: Object.freeze(['jpg', 'jpeg']), preferredExtension: 'jpg' }),
-  Object.freeze({ format: 'webp', name: 'WebP 图片（体积小）', extensions: Object.freeze(['webp']), preferredExtension: 'webp' }),
-  Object.freeze({ format: 'bmp', name: 'BMP 图片（无损，兼容性好）', extensions: Object.freeze(['bmp']), preferredExtension: 'bmp' }),
-  Object.freeze({ format: 'avif', name: 'AVIF 图片（高压缩率）', extensions: Object.freeze(['avif']), preferredExtension: 'avif' }),
+  Object.freeze({ format: 'webp', name: 'WebP 图片（体积小；需系统 FFmpeg）', extensions: Object.freeze(['webp']), preferredExtension: 'webp' }),
+  Object.freeze({ format: 'bmp', name: 'BMP 图片（无损；需系统 FFmpeg）', extensions: Object.freeze(['bmp']), preferredExtension: 'bmp' }),
+  Object.freeze({ format: 'avif', name: 'AVIF 图片（高压缩率；需系统 FFmpeg）', extensions: Object.freeze(['avif']), preferredExtension: 'avif' }),
   Object.freeze({ format: 'pdf', name: 'PDF 文档（单页图片）', extensions: Object.freeze(['pdf']), preferredExtension: 'pdf' }),
 ]);
 const FORMAT_SPEC_BY_NAME = Object.freeze(Object.fromEntries(IMAGE_FORMAT_SPECS.map((spec) => [spec.format, spec])));
@@ -201,6 +201,34 @@ function hasImageSignature(buffer, mime) {
   return false;
 }
 
+function resolveNativeImageApi(dependencies) {
+  if (dependencies && Object.prototype.hasOwnProperty.call(dependencies, 'nativeImage')) {
+    return dependencies.nativeImage;
+  }
+  try {
+    const electron = require('electron');
+    return electron && typeof electron === 'object' ? electron.nativeImage : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function encodeWithNativeImage(inputBuffer, format, quality, nativeImageApi) {
+  if (!nativeImageApi || typeof nativeImageApi.createFromBuffer !== 'function') return null;
+  if (format !== 'png' && format !== 'jpeg') return null;
+  const image = nativeImageApi.createFromBuffer(inputBuffer);
+  if (!image || (typeof image.isEmpty === 'function' && image.isEmpty())) {
+    throw new Error('系统图片解码器无法读取输入图片。');
+  }
+  const output = format === 'png'
+    ? image.toPNG()
+    : image.toJPEG(quality);
+  if (!Buffer.isBuffer(output) || !hasImageSignature(output, format === 'png' ? 'image/png' : 'image/jpeg')) {
+    throw new Error(`系统图片编码器未生成有效的 ${format.toUpperCase()}。`);
+  }
+  return output;
+}
+
 function decodeImageDataURL(dataURL) {
   if (typeof dataURL !== 'string') throw new Error('图片数据必须是 base64 data URL。');
   const match = /^data:(image\/(?:png|jpeg|webp|bmp|avif));base64,([A-Za-z0-9+/]*={0,2})$/i.exec(dataURL);
@@ -241,7 +269,9 @@ function buildImageConversionArgs(formatValue, qualityValue) {
   if (format === 'webp') return ['-frames:v', '1', '-c:v', 'libwebp', '-q:v', String(quality)];
   if (format === 'avif') {
     const crf = Math.round(63 - ((quality - 1) / 99) * 63);
-    return ['-frames:v', '1', '-c:v', 'libaom-av1', '-still-picture', '1', '-crf', String(crf), '-cpu-used', '6', '-pix_fmt', 'yuv444p'];
+    // 让 FFmpeg 在可用的 AV1 编码器中自行选择（Homebrew 标准版通常提供
+    // libsvtav1，完整构建也可能提供 libaom-av1），避免硬编码某一个可选库。
+    return ['-frames:v', '1', '-c:v', 'av1', '-crf', String(crf), '-pix_fmt', 'yuv420p'];
   }
   // PDF uses an embedded JPEG generated with the same quality mapping.
   return buildImageConversionArgs('jpeg', quality);
@@ -384,12 +414,23 @@ async function exportImagesToPdf(options, dependencies) {
   const deps = dependencies || {};
   const mediaApi = deps.media || media;
   const tempApi = deps.tempFiles || tempFiles;
+  const nativeImageApi = resolveNativeImageApi(deps);
   if (typeof tempApi.createPrivateTempPath !== 'function') throw new Error('临时文件服务不支持 PDF 导出。');
   const cleanupPaths = [];
   let outputStage = null;
   try {
     const jpegs = [];
     for (const page of normalized.decoded) {
+      const nativeJpeg = encodeWithNativeImage(
+        page.inputBuffer,
+        'jpeg',
+        normalized.quality,
+        nativeImageApi
+      );
+      if (nativeJpeg) {
+        jpegs.push(nativeJpeg);
+        continue;
+      }
       const inputPath = tempApi.writePrivateTempFile(page.inputBuffer, 'kkshot-pdf-input', page.inputExtension);
       cleanupPaths.push(inputPath);
       const jpegPath = tempApi.createPrivateTempPath('kkshot-pdf-page', 'jpg');
@@ -415,27 +456,55 @@ async function exportImage(options, dependencies) {
   const deps = dependencies || {};
   const mediaApi = deps.media || media;
   const tempApi = deps.tempFiles || tempFiles;
+  const nativeImageApi = resolveNativeImageApi(deps);
   let inputPath = null;
   let pdfJpegPath = null;
   let outputStage = null;
   try {
-    inputPath = tempApi.writePrivateTempFile(
-      normalized.inputBuffer,
-      'kkshot-image-export',
-      normalized.inputExtension
-    );
     outputStage = createOutputStage(normalized.outputPath, normalized.format);
     if (normalized.format === 'pdf') {
-      if (typeof tempApi.createPrivateTempPath !== 'function') throw new Error('临时文件服务不支持 PDF 导出。');
-      pdfJpegPath = tempApi.createPrivateTempPath('kkshot-pdf-export', 'jpg');
-      await mediaApi.convertImage(inputPath, pdfJpegPath, buildImageConversionArgs('jpeg', normalized.quality));
-      fs.writeFileSync(outputStage, createSingleImagePdf(fs.readFileSync(pdfJpegPath)), { mode: 0o600 });
-    } else {
-      await mediaApi.convertImage(
-        inputPath,
-        outputStage,
-        buildImageConversionArgs(normalized.format, normalized.quality)
+      let jpeg = encodeWithNativeImage(
+        normalized.inputBuffer,
+        'jpeg',
+        normalized.quality,
+        nativeImageApi
       );
+      if (!jpeg) {
+        if (typeof tempApi.createPrivateTempPath !== 'function') throw new Error('临时文件服务不支持 PDF 导出。');
+        inputPath = tempApi.writePrivateTempFile(
+          normalized.inputBuffer,
+          'kkshot-image-export',
+          normalized.inputExtension
+        );
+        pdfJpegPath = tempApi.createPrivateTempPath('kkshot-pdf-export', 'jpg');
+        await mediaApi.convertImage(inputPath, pdfJpegPath, buildImageConversionArgs('jpeg', normalized.quality));
+        jpeg = fs.readFileSync(pdfJpegPath);
+      }
+      fs.writeFileSync(outputStage, createSingleImagePdf(jpeg), { mode: 0o600 });
+    } else if (normalized.format === 'png' && normalized.mime === 'image/png') {
+      // 截图的默认 PNG 路径无需外部编码器，直接保留原始像素与透明度。
+      fs.writeFileSync(outputStage, normalized.inputBuffer, { mode: 0o600 });
+    } else {
+      const encoded = encodeWithNativeImage(
+        normalized.inputBuffer,
+        normalized.format,
+        normalized.quality,
+        nativeImageApi
+      );
+      if (encoded) {
+        fs.writeFileSync(outputStage, encoded, { mode: 0o600 });
+      } else {
+        inputPath = tempApi.writePrivateTempFile(
+          normalized.inputBuffer,
+          'kkshot-image-export',
+          normalized.inputExtension
+        );
+        await mediaApi.convertImage(
+          inputPath,
+          outputStage,
+          buildImageConversionArgs(normalized.format, normalized.quality)
+        );
+      }
     }
     commitOutputStage(outputStage, normalized.outputPath);
     outputStage = null;

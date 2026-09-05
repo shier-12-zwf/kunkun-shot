@@ -118,3 +118,18 @@ test('decoded images with invalid dimensions fail closed', async () => {
   assert.match(loader.getState().error, /尺寸/);
   assert.equal(loader.getState().committedDataURL, '');
 });
+
+test('the exact decoded image element is committed so display does not decode the source twice', async () => {
+  const imageElement = { naturalWidth: 640, naturalHeight: 360 };
+  let committed;
+  const loader = createPinImageLoader({
+    decode: async () => ({ width: 640, height: 360, imageElement }),
+    onCommit(value) { committed = value; },
+  });
+
+  const result = await loader.load('data:image/png;base64,atomic');
+
+  assert.equal(result.status, 'ready');
+  assert.equal(committed.imageElement, imageElement);
+  assert.equal(result.imageElement, imageElement);
+});

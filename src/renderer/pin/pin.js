@@ -94,6 +94,25 @@
     return window.kkapi || null;
   }
 
+  function operationErrorMessage(outcome, fallback) {
+    var error = outcome && outcome.error;
+    if (typeof error === 'string' && error.trim()) return error.trim();
+    if (error && typeof error.message === 'string' && error.message.trim()) return error.message.trim();
+    return fallback;
+  }
+
+  function confirmClipboardWrite(outcome) {
+    if (outcome !== true) throw new Error('剪贴板未确认写入。');
+    return true;
+  }
+
+  function confirmAIPanelOpened(outcome) {
+    if (!outcome || outcome.ok !== true) {
+      throw new Error(operationErrorMessage(outcome, 'AI 面板未能打开。'));
+    }
+    return outcome;
+  }
+
   var IMAGE_ACTION_IDS = ['btnCopy', 'btnSave', 'btnOcr', 'btnAsk', 'btnText', 'btnAnnotate'];
   var IMAGE_CONTEXT_ACTIONS = ['copy', 'save', 'ocr', 'ask', 'textSel', 'annotate'];
   var TRANSFORM_CONTEXT_ACTIONS = ['crop', 'rotateCW', 'rotateCCW', 'flipHorizontal', 'flipVertical'];
@@ -188,7 +207,7 @@
           reject(new Error('图片已载入但尺寸无效。'));
           return;
         }
-        resolve({ width: width, height: height });
+        resolve({ width: width, height: height, imageElement: probe });
       }
       probe.onload = function () { finish(); };
       probe.onerror = function () { finish(new Error('图片数据无法解码。')); };
@@ -202,6 +221,20 @@
   }
 
   function commitDecodedImage(result) {
+    var nextImage = result && result.imageElement;
+    if (!nextImage || !imgEl || typeof imgEl.replaceWith !== 'function') {
+      throw new Error('贴图显示节点无法更新。');
+    }
+    nextImage.id = 'pinImg';
+    nextImage.className = 'pin-img';
+    nextImage.alt = '贴图';
+    nextImage.draggable = false;
+    nextImage.hidden = false;
+    // 将已经完成 load/decode 的同一个元素原子放进页面，避免探针成功后
+    // 可见 <img> 再解码一次并在资源压力下单独失败。
+    imgEl.replaceWith(nextImage);
+    imgEl = nextImage;
+
     var payload = pendingImagePayload || {};
     var nextUpdater = createContentUpdater(payload.dataURL, payload.contentRevision);
     if (state.sourceDataURL && state.sourceDataURL !== result.dataURL) {
@@ -220,8 +253,6 @@
     state.sourceDataURL = result.dataURL;
     state.dataURL = result.dataURL;
     contentUpdater = nextUpdater;
-    imgEl.src = result.dataURL;
-    imgEl.hidden = false;
   }
 
   function initializeImageLoader() {
@@ -631,18 +662,21 @@
     if (!k) return;
     if (state.kind === 'text') {
       Promise.resolve(k.copyText(state.text))
+        .then(confirmClipboardWrite)
         .then(function () { toast('已复制文字', 'ok'); })
         .catch(function () { toast('复制失败', 'err'); });
       return;
     }
     if (state.kind === 'color') {
       Promise.resolve(k.copyText(state.color))
+        .then(confirmClipboardWrite)
         .then(function () { toast('已复制颜色 ' + state.color, 'ok'); })
         .catch(function () { toast('复制失败', 'err'); });
       return;
     }
     if (state.kind === 'file') {
       Promise.resolve(k.copyText(state.file))
+        .then(confirmClipboardWrite)
         .then(function () { toast('已复制文件路径', 'ok'); })
         .catch(function () { toast('复制失败', 'err'); });
       return;
@@ -650,6 +684,7 @@
     if (!requireReadyImage() || !state.dataURL) return;
     getComposedDataURL()
       .then(function (dataURL) { return k.copyImage(dataURL); })
+      .then(confirmClipboardWrite)
       .then(function () {
         toast('已复制图片', 'ok');
       })
@@ -682,6 +717,7 @@
     // 打开 AI 面板进行 OCR
     getCurrentDataURL()
       .then(function (dataURL) { return k.openAIPanel({ mode: 'ocr', dataURL: dataURL }); })
+      .then(confirmAIPanelOpened)
       .catch(function (error) { toast('OCR 启动失败：' + ((error && error.message) || error), 'err'); });
   }
 
@@ -691,6 +727,7 @@
     // 打开 AI 面板进行问图
     getCurrentDataURL()
       .then(function (dataURL) { return k.openAIPanel({ mode: 'ask', dataURL: dataURL }); })
+      .then(confirmAIPanelOpened)
       .catch(function (error) { toast('问图启动失败：' + ((error && error.message) || error), 'err'); });
   }
 
@@ -1023,6 +1060,7 @@
       var k = api();
       if (k && typeof k.copyText === 'function') {
         Promise.resolve(k.copyText(text))
+          .then(confirmClipboardWrite)
           .then(function () {
             toast('已复制：' + (text.length > 18 ? text.slice(0, 18) + '…' : text), 'ok');
           })

@@ -77,6 +77,7 @@
             width: Math.round(Number(width)),
             height: Math.round(Number(height)),
             generation: token,
+            imageElement: decoded && decoded.imageElement,
           };
           if (typeof options.onCommit === 'function') options.onCommit(committed, snapshot());
           state.status = 'ready';
@@ -92,6 +93,7 @@
             dataURL: committed.dataURL,
             width: committed.width,
             height: committed.height,
+            imageElement: committed.imageElement,
           };
         })
         .catch(function (error) {

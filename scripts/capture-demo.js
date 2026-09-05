@@ -16,6 +16,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { app, BrowserWindow, session } = require('electron');
 const { version: APP_VERSION } = require('../package.json');
+const { resolveFfmpeg } = require('../src/main/media');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const RENDERER_ROOT = path.join(REPO_ROOT, 'src', 'renderer');
@@ -641,10 +642,37 @@ async function probeOverlayToolbar() {
         });
       const toolbar = document.getElementById('toolbar');
       const menu = ${JSON.stringify(menuId)} ? document.getElementById(${JSON.stringify(menuId)}) : null;
+      const translateButton = toolbar.querySelector('#actionGroup > [data-action="translate"]');
+      const translateTarget = toolbar.querySelector('#actionGroup > .translate-target');
+      const translateSelect = translateTarget && translateTarget.querySelector('#trLang');
       return {
         viewport: { width: innerWidth, height: innerHeight },
         toolbar: roundRect(toolbar.getBoundingClientRect()),
         toolbarScrollWidth: toolbar.scrollWidth,
+        toolbarItems: Array.from(toolbar.children)
+          .filter(visible)
+          .map((node) => ({
+            id: node.id || null,
+            className: node.className,
+            width: roundRect(node.getBoundingClientRect()).width
+          })),
+        actionItems: Array.from(toolbar.querySelectorAll('#actionGroup > button, #actionGroup > label'))
+          .filter(visible)
+          .map((node) => ({
+            id: node.id || null,
+            action: node.dataset.action || null,
+            className: node.className,
+            width: roundRect(node.getBoundingClientRect()).width
+          })),
+        primaryTranslation: translateButton && translateTarget && translateSelect ? {
+          button: roundRect(translateButton.getBoundingClientRect()),
+          target: roundRect(translateTarget.getBoundingClientRect()),
+          select: roundRect(translateSelect.getBoundingClientRect()),
+          visible: visible(translateButton) && visible(translateTarget) && visible(translateSelect),
+          directChild: translateButton.parentElement === translateTarget.parentElement
+            && translateTarget.parentElement.id === 'actionGroup',
+          adjacent: translateButton.nextElementSibling === translateTarget
+        } : null,
         menu: menu && visible(menu) ? roundRect(menu.getBoundingClientRect()) : null,
         menuClientHeight: menu && visible(menu) ? menu.clientHeight : null,
         menuScrollHeight: menu && visible(menu) ? menu.scrollHeight : null,
@@ -762,8 +790,19 @@ async function probeOverlayToolbar() {
     }
     if (base.toolbar.left < 1 || base.toolbar.right > base.viewport.width - 1) failures.push(`toolbar leaves viewport: ${JSON.stringify(base.toolbar)}`);
     if (base.toolbar.height > 46) failures.push(`toolbar is no longer a compact single row: ${base.toolbar.height}px`);
-    if (base.toolbar.width > Math.min(1000, base.viewport.width - 4)) failures.push(`toolbar is too wide: ${base.toolbar.width}px`);
+    if (base.toolbar.width > Math.min(1000, base.viewport.width - 4)) {
+      failures.push(`toolbar is too wide: ${base.toolbar.width}px (${JSON.stringify({ toolbarItems: base.toolbarItems, actionItems: base.actionItems })})`);
+    }
     if (base.toolbarScrollWidth > Math.ceil(base.toolbar.width) + 1) failures.push(`toolbar content overflows: ${base.toolbarScrollWidth}/${base.toolbar.width}`);
+    if (!base.primaryTranslation || !base.primaryTranslation.visible || !base.primaryTranslation.directChild || !base.primaryTranslation.adjacent) {
+      failures.push(`translation target is not an adjacent primary control: ${JSON.stringify(base.primaryTranslation)}`);
+    } else {
+      const translationGap = base.primaryTranslation.target.left - base.primaryTranslation.button.right;
+      const verticalDelta = Math.abs(base.primaryTranslation.target.top - base.primaryTranslation.button.top);
+      if (translationGap < -0.5 || translationGap > 4.5 || verticalDelta > 0.5) {
+        failures.push(`translation target is not compactly aligned: ${JSON.stringify({ translationGap, verticalDelta, primaryTranslation: base.primaryTranslation })}`);
+      }
+    }
     for (const sample of [base, action, annotation]) {
       for (const label of sample.labels) {
         if (label.lineCount !== 1 || label.clipped || label.whiteSpace !== 'nowrap') {
@@ -1122,8 +1161,8 @@ function createGif(frames) {
   lines.push(`file ${quoteConcatPath(frames[frames.length - 1].path)}`);
   fs.writeFileSync(concatPath, `${lines.join('\n')}\n`, { mode: 0o600 });
 
-  const ffmpeg = require('ffmpeg-static');
-  if (!ffmpeg || !fs.existsSync(ffmpeg)) throw new Error('ffmpeg-static binary is unavailable');
+  const ffmpeg = resolveFfmpeg();
+  if (!ffmpeg) throw new Error('A system FFmpeg executable is required to generate demo.gif');
   const gifPath = path.join(STAGE_DIR, 'demo.gif');
   const filter = [
     'fps=10',

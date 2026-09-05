@@ -4,11 +4,11 @@
 
 An open-source, macOS-first Electron screenshot utility with precision capture and annotation, pinned reference windows, multilingual offline OCR, QR/barcode recognition, editable scrolling capture, region recording with camera/action overlays, and optional AI-assisted image Q&A, translation, table recognition, and formula recognition.
 
-> Status: early preview. Available source code and automated tests do not imply that every hands-on flow has passed acceptance. The project does not claim Windows/Linux support, nor does it claim that public builds are Apple-signed or notarized. See the [release checklist](docs/RELEASE_CHECKLIST.md) for the evidence required before a release.
+> Status: early preview. Available source code and automated tests do not imply that every hands-on flow has passed acceptance. The v0.3.2 application binary must be rebuilt from the final release commit and pass negative-content scans before upload. Once those gates pass, the GitHub Release is planned to attach exactly one informed-testing DMG in addition to GitHub's generated source archives, and no application ZIP. The outer DMG will not be separately code-signed; its contained `.app` will use the fixed local development certificate, not Apple Developer ID, and will be neither notarized nor stapled. The project does not claim Windows/Linux support. See the [release checklist](docs/RELEASE_CHECKLIST.md) for its evidence and risk boundaries.
 
-> Current source version: `v0.3.1`.
+> Current source version: `v0.3.2`.
 
-Start with the [complete Chinese user guide](docs/使用指南.md). The [PixPin comparison and improvement report](docs/PixPin-竞品对比与改进报告.md) documents the evidence, current gaps, and priorities. See the [changelog](CHANGELOG.md) for version history.
+Start with the [complete Chinese user guide](docs/使用指南.md). The [PixPin comparison and improvement report](docs/PixPin-竞品对比与改进报告.md) documents the evidence, current gaps, and priorities. See the [v0.3.2 release notes](docs/release-notes-v0.3.2.md) for this release and the [changelog](CHANGELOG.md) for version history.
 
 ![Kunkun Shot demo](docs/assets/demo.gif)
 
@@ -22,15 +22,15 @@ Start with the [complete Chinese user guide](docs/使用指南.md). The [PixPin 
 
 - Region, window, full-screen, and timed capture. Regions support exact source-pixel width/height, common size presets, free/1:1/4:3/16:9 ratios, keyboard adjustment, and independent X/Y mapping for scaled displays.
 - Rectangle, ellipse, arrow, line, pen, highlighter, polyline, text, mosaic, numbered marker, real blur, elliptical spotlight, text watermark, and exportable magnifier annotations with undo/redo.
-- Translation is the first top-level capture action, followed by OCR. Pin, Copy, and Cancel also remain top-level; lower-frequency actions live under More.
-- Pin images, text, colors, or Finder files to the desktop. Image pins support annotation, crop, 90-degree rotation, horizontal/vertical flip, and composite copy/save/OCR/AI/drag-out. Multiple pins can be grouped for movement, collapsed/expanded, and ungrouped. A local KaTeX window creates LaTeX formula pins without a network request. Open pins are restored as a local workspace after a normal quit.
+- Translation is the first top-level capture action, with its target-language selector immediately beside it instead of under More, followed by OCR. Pin, Copy, and Cancel also remain top-level; lower-frequency actions live under More.
+- Pin images, text, colors, or Finder files to the desktop. Image pins support annotation, crop, 90-degree rotation, horizontal/vertical flip, and composite copy/save/OCR/AI/drag-out. The decoded image element itself is committed to the visible window, and the latest payload is injected again after a renderer reload to reduce intermittent blank pins. Multiple pins can be grouped for movement, collapsed/expanded, and ungrouped. A local KaTeX window creates LaTeX formula pins without a network request. Open pins are restored as a local workspace after a normal quit.
 - Offline OCR with bundled Simplified Chinese, Traditional Chinese, English, Japanese, Korean, French, German, Spanish, and Portuguese data, plus preset language-plus-English combinations. macOS Vision provides a separate local text-box path.
 - Persistent QR/common-barcode results, with a manual full-resolution rescan when the initial scan fails.
 - Screenshot history is stored under `history/` in Electron's user-data directory. Automatic history capture is off by default, but a successful Save or Quick Save still stores another copy in history. Clearing history removes only those history copies, not files saved elsewhere by the user. History supports search, filters, copy, export, and bulk deletion.
-- Screenshot export to PNG, JPEG, WebP, BMP, AVIF, or single-page PDF. Separate screenshot/recording filename templates support date, time, timestamp, type, index, width, and height variables. History can merge up to 100 selected images into one ordered multi-page PDF.
-- Region recording to WebM, or conversion through FFmpeg to H.264 MP4/GIF. System audio and microphone are independent opt-ins. Camera picture-in-picture, click/special-key or modifier-shortcut prompts, and encoded pen strokes can be written into the output. Cropping and overlays use the desktop stream's actual pixel dimensions for Retina/multi-display mapping.
+- Screenshot export to PNG, JPEG, WebP, BMP, AVIF, or single-page PDF. PNG, JPEG, and PDF do not need external FFmpeg; WebP, BMP, and AVIF require a separately installed system FFmpeg build with the applicable encoder. Separate screenshot/recording filename templates support date, time, timestamp, type, index, width, and height variables. History can merge up to 100 selected images into one ordered multi-page PDF.
+- Region recording defaults to untrimmed WebM without external FFmpeg. GIF, H.264 MP4, and recording trim require a separately installed system FFmpeg build with the necessary encoders and filters. Without FFmpeg, a GIF request automatically falls back to WebM, while a trim request asks the user to save the full untrimmed WebM or cancel. System audio and microphone are independent opt-ins. Camera picture-in-picture, click/special-key or modifier-shortcut prompts, and encoded pen strokes can be written into the output. Cropping and overlays use the desktop stream's actual pixel dimensions for Retina/multi-display mapping.
 - An AI workspace for OCR-assisted Q&A, translation, summarization, and rewriting. Recognized tables are editable cell by cell and can be copied as CSV, TSV, or GFM Markdown with spreadsheet-formula-injection protection. Formula recognition returns LaTeX; a configured vision model can receive the selected image directly.
-- Vertical or horizontal scrolling capture with pause/continue, raw-frame deletion and restitching, undo/redo, fixed top/bottom-region assistance, and output cropping. It remains experimental and requires manual scrolling and review on complex pages.
+- Vertical or horizontal scrolling capture with pause/continue, raw-frame deletion and restitching, undo/redo, fixed top/bottom-region assistance, and output cropping. The control bar is clamped to the active display, failed recomposition rolls back to the last exportable result, and unreachable raw frames are released under the memory budget. It remains experimental and requires manual scrolling and review on complex pages.
 
 ## Quick start
 
@@ -39,7 +39,8 @@ Requirements:
 - macOS (the current development and support focus)
 - Node.js 22.12 or later
 - npm
-- Network access to npm and the `ffmpeg-static` binary source during the initial dependency installation
+- Network access to npm during initial dependency installation
+- Optional: install system FFmpeg separately for WebP/BMP/AVIF, GIF, H.264 MP4, or recording trim, and confirm that build includes the encoders/filters required by the target format; neither the app nor its installer bundles `ffmpeg-static` or a standalone FFmpeg CLI
 
 ```bash
 git clone https://github.com/shier-12-zwf/kunkun-shot.git
@@ -138,18 +139,18 @@ env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron scripts/capture-demo.js
 
 Automated tests cannot replace hands-on checks for screen permission, multiple displays, global shortcuts, OCR, recording, pin drag-and-drop, or Apple's distribution pipeline. Before publishing, complete [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) and attach actual evidence to the release notes.
 
-`npm run dist:mac:local` (`dist` and `dist:mac` remain compatibility aliases) uses a configured, fixed local code-signing certificate by default and verifies the resulting local artifacts. This path is neither notarized nor built with Hardened Runtime; its purpose is to keep development installs on the same Mac matched to Screen Recording and other TCC permissions across updates. It is not a Developer ID distribution signature and is not evidence of Gatekeeper acceptance or a formal release. `npm run dist:mac:adhoc` is available for one-off isolated tests, but its ad-hoc identity is unstable: never use it to replace the day-to-day install, deliver an update, or preserve TCC permissions. Only `npm run dist:mac:release` is the fail-closed Developer ID, Hardened Runtime, and Apple notarization path. See the [local signing guide](docs/MACOS_LOCAL_BUILD.md) and [macOS release guide](docs/MACOS_RELEASE.md) for setup, credentials, procedure, and hands-on evidence requirements. The repository currently contains no Apple credentials, notarization record, or verified formal artifact that could prove a formal release has been completed.
+`npm run dist:mac:local` (`dist` and `dist:mac` remain compatibility aliases) uses a configured, fixed local code-signing certificate by default and verifies the resulting local artifacts. This path is not notarized, has no stapled ticket, and is not built with Hardened Runtime; its purpose is to keep development installs on the same Mac matched to Screen Recording and other TCC permissions across updates. It is not a Developer ID distribution signature and is not evidence of Gatekeeper acceptance or a formal release. The sole application-binary attachment planned for v0.3.2 is a DMG freshly built by that pipeline from the final commit after its negative-content scans pass: the outer DMG will not be separately code-signed, while its contained `.app` will use the fixed local development certificate. It is explicitly an informed-testing/preview package; no application ZIP will be uploaded, and download availability must not be presented as Gatekeeper or cross-Mac validation. Do not reuse a stale build; verify that the new artifact's `app.asar`, `app.asar.unpacked`, and mounted DMG contain neither `ffmpeg-static` nor a standalone FFmpeg CLI. `npm run dist:mac:adhoc` is available for one-off isolated tests, but its ad-hoc identity is unstable: never use it to replace the day-to-day install, deliver an update, or preserve TCC permissions. Only `npm run dist:mac:release` is the fail-closed Developer ID, Hardened Runtime, and Apple notarization path. See the [local signing guide](docs/MACOS_LOCAL_BUILD.md) and [macOS release guide](docs/MACOS_RELEASE.md) for setup, credentials, procedure, and hands-on evidence requirements. The repository currently contains no Apple credentials, notarization record, or artifact evidence proving a formal Apple distribution.
 
 ## Known limitations
 
 - macOS is the only current support and acceptance focus. Generic Electron APIs in the source are not a cross-platform support commitment.
 - Scrolling capture still requires manual scrolling and remains experimental. Animation, live updates, reverse scrolling, and complex nested containers can prevent reliable stitching; fixed top/bottom assistance still requires human confirmation.
-- GIF conversion can be slow and storage-intensive, especially for long, high-resolution recordings.
+- Optional conversions depend on the user's particular FFmpeg build; merely finding an `ffmpeg` executable does not prove that it has the WebP/AVIF/H.264/GIF encoders or filters required by a requested format. GIF conversion can be slow and storage-intensive, especially for long, high-resolution recordings.
 - System audio, microphone and camera hot-plug behavior, mixed-DPI multi-display mapping, AVIF/PDF behavior in Preview/Finder, and cross-restart pin-workspace restoration still require acceptance on target macOS hardware.
 - The recording pen is encoded into the resulting video but is not shown as a separate live desktop overlay. A camera disconnected during recording does not stop the screen recording, but it cannot hot-reconnect within that same recording.
 - Global shortcuts may conflict with macOS or other applications.
 - OCR accuracy depends on image quality, language data, and layout. AI output can also be wrong.
-- There is no in-app auto-update or notarized public installer. GitHub Releases are source-only, and local development installs are updated manually.
+- There is no in-app auto-update or notarized public installer. v0.3.2 will attach one informed-testing DMG only after a clean rebuild passes the release checklist; its outer container will not be separately code-signed and its contained `.app` will use the fixed local development certificate. No application ZIP is planned, and updates remain manual.
 - Any unchecked automated or manual item in the release checklist remains unverified.
 
 ## Contributing and security
@@ -164,4 +165,4 @@ Never paste API keys, access tokens, or unredacted personal data into a public i
 
 Original project source is available under the [MIT License](LICENSE), copyright © 2026 Kunkun / 困困.
 
-Runtime distributions include third-party components under other licenses. In particular, the current lockfile resolves `ffmpeg-static` under GPL-3.0-or-later and it installs a platform-specific FFmpeg binary. MIT does not override those terms. Read [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and satisfy every license obligation that applies to the exact source or binary artifact you distribute.
+Runtime distributions include third-party components under other licenses. The current dependency manifest and lockfile no longer include `ffmpeg-static`, and new builds deliberately exclude a standalone FFmpeg CLI. Optional media conversion invokes system FFmpeg installed and managed separately by the user; its license and redistribution terms remain independent from this project's MIT license. Read [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and inventory the exact contents of every source or binary artifact before distribution.

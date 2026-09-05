@@ -164,6 +164,46 @@ test('raw-frame timeline deletes first, middle, or last and transactionally rest
   assert.deepEqual(composedGreenRows(timeline.compose()), globalRows(0, 10));
 });
 
+test('raw-frame memory stays within budget across repeated delete and capture cycles', () => {
+  const timeline = createStitchTimeline(timelineOptions({
+    historyLimit: 1,
+    maxSourcePixels: 48,
+  }));
+  assert.equal(timeline.addFrame(rowFrame('anchor', globalRows(0, 6))).ok, true);
+
+  for (let index = 0; index < 40; index += 1) {
+    const id = 'moving-' + index;
+    const added = timeline.addFrame(rowFrame(id, globalRows(3, 6)));
+    assert.equal(added.ok, true, 'capture cycle ' + index + ' should remain usable');
+    assert.ok(timeline.getState().retainedSourcePixels <= 48);
+    assert.equal(timeline.deleteFrame(id).ok, true);
+    assert.ok(timeline.getState().retainedSourcePixels <= 48);
+  }
+
+  // moving-0 disappeared from current/history/future many cycles ago. Its id must
+  // therefore be reusable, proving that its RGBA buffer is no longer retained.
+  const reused = timeline.addFrame(rowFrame('moving-0', globalRows(3, 6)));
+  assert.equal(reused.ok, true);
+  assert.ok(timeline.getState().retainedSourcePixels <= 48);
+});
+
+test('a timeline transaction can restore frames, pixels, and edit history atomically', () => {
+  const timeline = createStitchTimeline(timelineOptions());
+  assert.equal(timeline.addFrame(rowFrame('a', globalRows(0, 6))).ok, true);
+  assert.equal(timeline.addFrame(rowFrame('b', globalRows(3, 6))).ok, true);
+  const beforeRows = composedGreenRows(timeline.compose());
+  const beforeState = timeline.getState();
+
+  const transaction = timeline.beginTransaction();
+  assert.equal(timeline.deleteFrame('b').ok, true);
+  assert.deepEqual(timeline.getState().frames.map((frame) => frame.id), ['a']);
+  assert.equal(transaction.rollback().ok, true);
+
+  assert.deepEqual(timeline.getState(), beforeState);
+  assert.deepEqual(composedGreenRows(timeline.compose()), beforeRows);
+  assert.equal(timeline.deleteFrame('b').ok, true, 'the restored frame remains editable');
+});
+
 test('a rejected frame preserves the last good result and a later frame can continue', () => {
   const timeline = createStitchTimeline(timelineOptions());
   assert.equal(timeline.addFrame(rowFrame('a', globalRows(0, 6))).ok, true);

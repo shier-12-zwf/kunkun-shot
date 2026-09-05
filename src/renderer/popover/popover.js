@@ -205,7 +205,14 @@
         setHeadStatus('就绪');
         return;
       }
-      await api.openAIPanel({ mode, dataURL });
+      const opened = await api.openAIPanel({ mode, dataURL });
+      if (!opened || opened.ok !== true) {
+        const detail = opened && opened.error;
+        const message = typeof detail === 'string'
+          ? detail
+          : (detail && detail.message) || 'AI 窗口未能打开';
+        throw new Error(message);
+      }
       await api.hidePopover();
     } catch (err) {
       showStatus('err', (err && err.message) ? err.message : '打开失败', true);

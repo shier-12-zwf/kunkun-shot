@@ -1174,8 +1174,14 @@ function registerIpc() {
     const { dx, dy } = normalizeWindowMove(payload);
     return { moved: windows.movePinGroup(e.sender.id, dx, dy) };
   });
-  ipcMain.handle(C.OPEN_SETTINGS, () => windows.openSettings());
-  ipcMain.handle(C.OPEN_AI_PANEL, (_e, payload) => windows.openAIPanel(payload));
+  ipcMain.handle(C.OPEN_SETTINGS, () => {
+    windows.openSettings();
+    return { ok: true };
+  });
+  ipcMain.handle(C.OPEN_AI_PANEL, (_e, payload) => {
+    windows.openAIPanel(payload);
+    return { ok: true };
+  });
 
   ipcMain.handle(C.CAPTURE_TRIGGER, (_e, mode) => {
     const safeMode = mode == null ? 'region' : mode;
@@ -1301,6 +1307,14 @@ function registerIpc() {
           break;
         case 'record': {
           const dd = displayData;
+          const requestedGif = !!cfg.recording.toGif;
+          const recordingExport = media.resolveRecordingExportMode(requestedGif, media.resolveFfmpeg());
+          if (recordingExport.fallbackToWebm && Notification.isSupported()) {
+            new Notification({
+              title: '困困截图',
+              body: '未找到系统 FFmpeg，本次录屏将安全改为保存 WebM。',
+            }).show();
+          }
           const recorderResult = windows.createRecorder({
             rect: safeRect,
             displayBounds: dd.bounds,
@@ -1309,7 +1323,7 @@ function registerIpc() {
             // 显示器序号：macOS 上 source.display_id 可能为空，录屏端据此按序号兜底匹配，避免录错屏。
             displayIndex: screen.getAllDisplays().findIndex((d) => String(d.id) === String(displayId)),
             fps: cfg.recording.fps,
-            toGif: cfg.recording.toGif,
+            toGif: recordingExport.wantGif,
             systemAudio: cfg.recording.systemAudio,
             microphone: cfg.recording.microphone,
           });
@@ -1788,7 +1802,10 @@ function registerIpc() {
     const cfg = config.get();
     const tmp = media.writeTempRecording(buffer, 'webm');
     try {
-      const wantGif = toGif !== undefined ? !!toGif : !!cfg.recording.toGif;
+      const requestedGif = toGif !== undefined ? !!toGif : !!cfg.recording.toGif;
+      const ffmpegPath = media.resolveFfmpeg();
+      const recordingExport = media.resolveRecordingExportMode(requestedGif, ffmpegPath);
+      const { wantGif, fallbackToWebm: gifFallbackToWebm } = recordingExport;
       const dir = cfg.general.saveDir || app.getPath('videos') || app.getPath('downloads');
       const ext = wantGif ? 'gif' : 'webm';
       const filename = buildFilename({
@@ -1800,24 +1817,47 @@ function registerIpc() {
         width,
         height,
       });
-      const { canceled, filePath } = await dialog.showSaveDialog({
-        title: '保存录屏',
+      const { canceled, filePath: selectedPath } = await dialog.showSaveDialog({
+        title: gifFallbackToWebm ? '保存录屏（未找到系统 FFmpeg，已改为 WebM）' : '保存录屏',
         defaultPath: nextAvailablePath(dir, filename),
         filters: wantGif
-          ? [{ name: 'GIF 动图', extensions: ['gif'] }]
-          : [
+          ? [{ name: 'GIF 动图（需系统 FFmpeg）', extensions: ['gif'] }]
+          : ffmpegPath ? [
               { name: 'WebM 视频', extensions: ['webm'] },
-              { name: 'MP4 视频（H.264，兼容性更好）', extensions: ['mp4'] },
-            ],
+              { name: 'MP4 视频（H.264；需系统 FFmpeg）', extensions: ['mp4'] },
+            ] : [{ name: 'WebM 视频（直接保存）', extensions: ['webm'] }],
       });
-      if (canceled || !filePath) return { saved: false, canceled: true };
+      if (canceled || !selectedPath) return { saved: false, canceled: true };
       try {
-        if (wantGif) {
-          await media.convertToGif(tmp, filePath, safeFps || cfg.recording.fps, trimArgs);
-        } else if (path.extname(filePath || '').toLowerCase() === '.mp4') {
-          await media.convertToMp4(tmp, filePath, trimArgs);
-        } else if (trimArgs.length) {
-          await media.convertImage(tmp, filePath, trimArgs.concat(['-c', 'copy']));
+        // Save Panel 的过滤器不是安全边界：用户仍可手动键入其他后缀。
+        // 在任何目标文件写入前严格校验，避免把 WebM 字节误标成 GIF/MOV。
+        const target = media.resolveRecordingExportTarget(selectedPath, wantGif, ffmpegPath);
+        const filePath = target.outputPath;
+        let effectiveTrimArgs = trimArgs;
+        let trimFallbackToFullWebm = false;
+        if (!ffmpegPath && trimArgs.length) {
+          const confirmation = await dialog.showMessageBox({
+            type: 'warning',
+            title: '无法剪辑录屏',
+            message: '未找到系统 FFmpeg，当前无法输出剪辑后的片段。',
+            detail: '可以改为保存完整、未剪辑的 WebM；也可以取消，安装 FFmpeg 后从录屏窗口重试。',
+            buttons: ['保存完整 WebM', '取消并返回'],
+            defaultId: 1,
+            cancelId: 1,
+            noLink: true,
+          });
+          if (!confirmation || confirmation.response !== 0) {
+            return { saved: false, canceled: true, warning: media.FFMPEG_INSTALL_MESSAGE };
+          }
+          effectiveTrimArgs = [];
+          trimFallbackToFullWebm = true;
+        }
+        if (target.format === 'gif') {
+          await media.convertToGif(tmp, filePath, safeFps || cfg.recording.fps, effectiveTrimArgs);
+        } else if (target.format === 'mp4') {
+          await media.convertToMp4(tmp, filePath, effectiveTrimArgs);
+        } else if (effectiveTrimArgs.length) {
+          await media.convertImage(tmp, filePath, effectiveTrimArgs.concat(['-c', 'copy']));
         } else {
           media.copyFileAtomic(tmp, filePath);
         }
@@ -1834,7 +1874,27 @@ function registerIpc() {
           width,
           height,
         });
-        return { saved: true, path: filePath, historySaved: !!historyItem };
+        if ((gifFallbackToWebm || trimFallbackToFullWebm) && Notification.isSupported()) {
+          new Notification({
+            title: '录屏已保存为 WebM',
+            body: trimFallbackToFullWebm
+              ? '系统未检测到 FFmpeg，已按你的确认保存完整、未剪辑录屏。'
+              : '系统未检测到 FFmpeg，已自动使用无需转码的 WebM。',
+          }).show();
+        }
+        return {
+          saved: true,
+          path: filePath,
+          historySaved: !!historyItem,
+          ...((gifFallbackToWebm || trimFallbackToFullWebm)
+            ? {
+                fallback: 'webm',
+                warning: trimFallbackToFullWebm
+                  ? `已保存完整、未剪辑的 WebM。${media.FFMPEG_INSTALL_MESSAGE}`
+                  : media.FFMPEG_INSTALL_MESSAGE,
+              }
+            : {}),
+        };
       } catch (err) {
         dialog.showErrorBox('保存录屏失败', err.message);
         return { saved: false, error: err.message };

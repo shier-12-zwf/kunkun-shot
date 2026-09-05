@@ -65,7 +65,7 @@ module.exports = {
   TRANSLATE_POPUP_CLOSE: 'translate:popup-close', // (popup->main) 关闭划词卡片
 
   // ---- 录屏 ----
-  RECORD_SAVE: 'record:save', // ({ buffer, mime, toGif, fps }) => { saved, path }
+  RECORD_SAVE: 'record:save', // ({ buffer, mime, toGif, fps }) => { saved, path, fallback?, warning? }
   RECORD_STATE: 'record:state', // ({ state, generation, saveAttempt }) => { ok }; 主进程据此防止二次启动/关闭丢失未保存内容
   RECORD_ACTION_START: 'record:action-start', // () => { ok, active, error? } 开启本次录屏的操作提示监听
   RECORD_ACTION_STOP: 'record:action-stop', // () => { ok, active } 停止并清理监听 helper

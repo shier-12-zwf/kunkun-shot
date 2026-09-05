@@ -69,11 +69,12 @@ class FakeElement {
 }
 
 class FakeCanvas {
-  constructor(renderedCanvases) {
+  constructor(renderedCanvases, faults) {
     this._width = 0;
     this._height = 0;
     this._pixels = new Uint8ClampedArray();
     this._renderedCanvases = renderedCanvases;
+    this._faults = faults;
     this._context = new FakeCanvasContext(this);
   }
 
@@ -121,6 +122,10 @@ class FakeCanvasContext {
   }
 
   createImageData(width, height) {
+    if (this.canvas._faults.createImageData > 0) {
+      this.canvas._faults.createImageData -= 1;
+      throw new Error('injected timeline render failure');
+    }
     return { data: new Uint8ClampedArray(width * height * 4) };
   }
 
@@ -147,6 +152,7 @@ function rowPixels(start, count, width = 4) {
 
 function createRuntime() {
   const renderedCanvases = [];
+  const faults = { createImageData: 0 };
   const elements = new Map();
   const buttonIds = new Set([
     'btnStart', 'btnDone', 'btnDir', 'btnCancel', 'btnDeleteSegment',
@@ -167,7 +173,7 @@ function createRuntime() {
   const document = {
     getElementById: getElement,
     createElement(tagName) {
-      if (tagName === 'canvas') return new FakeCanvas(renderedCanvases);
+      if (tagName === 'canvas') return new FakeCanvas(renderedCanvases, faults);
       return new FakeElement(tagName);
     },
   };
@@ -232,12 +238,14 @@ function createRuntime() {
   });
 
   return {
+    kkapi,
     elements,
     renderedCanvases,
     defineFrame(url, start, count = 12, width = 4) {
       frameDefinitions.set(url, { width, height: count, pixels: rowPixels(start, count, width) });
     },
     queueCapture(url) { captureQueue.push(url); },
+    failNextTimelineRender() { faults.createImageData += 1; },
     click(id) { getElement(id).dispatch('click'); },
     async runNextTimer() {
       const entry = pendingTimers.entries().next().value;
@@ -313,4 +321,163 @@ test('renderer can pause, edit, survive a bad frame, and continue from retained 
     renderedGreenRows(runtime.renderedCanvases.at(-1)),
     Array.from({ length: 20 }, (_, row) => 20 + row * 10)
   );
+});
+
+test('renderer rolls back an accepted frame when fresh-canvas rendering throws', async () => {
+  const runtime = createRuntime();
+  runtime.defineFrame('frame:a', 0);
+  runtime.defineFrame('frame:b', 4);
+
+  runtime.queueCapture('frame:a');
+  runtime.click('btnStart');
+  await settle();
+  assert.equal(runtime.elements.get('count').textContent, '1');
+  const lastGoodCanvas = runtime.renderedCanvases.at(-1);
+
+  runtime.failNextTimelineRender();
+  runtime.queueCapture('frame:b');
+  await runtime.runNextTimer();
+  assert.equal(runtime.elements.get('count').textContent, '1');
+  assert.equal(runtime.renderedCanvases.at(-1), lastGoodCanvas);
+
+  runtime.queueCapture('frame:b');
+  runtime.click('btnStart');
+  await settle();
+  assert.equal(runtime.elements.get('count').textContent, '2', 'the rejected model mutation must be retryable');
+});
+
+test('renderer rolls back an edit when fresh-canvas rendering throws', async () => {
+  const runtime = createRuntime();
+  runtime.defineFrame('frame:a', 0);
+  runtime.defineFrame('frame:b', 4);
+
+  runtime.queueCapture('frame:a');
+  runtime.click('btnStart');
+  await settle();
+  runtime.queueCapture('frame:b');
+  await runtime.runNextTimer();
+  runtime.click('btnStart');
+  assert.equal(runtime.elements.get('count').textContent, '2');
+  const lastGoodCanvas = runtime.renderedCanvases.at(-1);
+
+  runtime.failNextTimelineRender();
+  runtime.click('btnDeleteSegment');
+  assert.equal(runtime.elements.get('count').textContent, '2');
+  assert.equal(runtime.renderedCanvases.at(-1), lastGoodCanvas);
+  assert.match(runtime.elements.get('hint').textContent, /失败/);
+
+  runtime.click('btnDeleteSegment');
+  assert.equal(runtime.elements.get('count').textContent, '1', 'the rolled-back edit must be retryable');
+});
+
+test('renderer keeps the longshot window retryable and shows an error when clipboard copy fails', async () => {
+  const copyOutcomes = [
+    { name: 'false', run: async () => false },
+    { name: 'undefined', run: async () => undefined },
+    { name: 'rejection', run: async () => { throw new Error('clipboard unavailable'); } },
+  ];
+
+  for (const outcome of copyOutcomes) {
+    const runtime = createRuntime();
+    const calls = [];
+    runtime.kkapi.saveImage = async () => {
+      calls.push('save');
+      return { saved: true };
+    };
+    runtime.kkapi.copyImage = async () => {
+      calls.push('copy');
+      return outcome.run();
+    };
+    runtime.kkapi.closeSelf = async () => calls.push('close');
+    runtime.defineFrame('frame:a', 0);
+    runtime.queueCapture('frame:a');
+    runtime.click('btnStart');
+    await settle();
+
+    runtime.click('btnDone');
+    await settle();
+
+    assert.deepEqual(calls, ['save', 'copy'], outcome.name);
+    assert.match(runtime.elements.get('hint').textContent, /复制到剪贴板失败/, outcome.name);
+    assert.equal(runtime.elements.get('bar').classList.contains('busy'), false, outcome.name);
+    assert.equal(runtime.elements.get('btnStart').disabled, false, outcome.name);
+  }
+});
+
+test('renderer retries clipboard without reopening save when the exported image is unchanged', async () => {
+  const runtime = createRuntime();
+  const calls = [];
+  let copySucceeds = false;
+  runtime.kkapi.saveImage = async () => {
+    calls.push('save');
+    return { saved: true };
+  };
+  runtime.kkapi.copyImage = async () => {
+    calls.push('copy');
+    return copySucceeds;
+  };
+  runtime.kkapi.closeSelf = async () => calls.push('close');
+  runtime.defineFrame('frame:a', 0);
+  runtime.queueCapture('frame:a');
+  runtime.click('btnStart');
+  await settle();
+
+  runtime.click('btnDone');
+  await settle();
+  copySucceeds = true;
+  runtime.click('btnDone');
+  await settle();
+
+  assert.deepEqual(calls, ['save', 'copy', 'copy', 'close']);
+});
+
+test('renderer saves again after crop or timeline changes following a clipboard failure', async () => {
+  const mutations = [
+    {
+      name: 'crop',
+      run(runtime) {
+        const cropTop = runtime.elements.get('cropTop');
+        cropTop.value = '1';
+        cropTop.dispatch('input');
+        cropTop.value = '0';
+        cropTop.dispatch('input');
+      },
+    },
+    {
+      name: 'timeline',
+      run(runtime) { runtime.click('btnDeleteSegment'); },
+    },
+  ];
+
+  for (const mutation of mutations) {
+    const runtime = createRuntime();
+    const calls = [];
+    let copySucceeds = false;
+    runtime.kkapi.saveImage = async () => {
+      calls.push('save');
+      return { saved: true };
+    };
+    runtime.kkapi.copyImage = async () => {
+      calls.push('copy');
+      return copySucceeds;
+    };
+    runtime.kkapi.closeSelf = async () => calls.push('close');
+    runtime.defineFrame('frame:a', 0);
+    runtime.defineFrame('frame:b', 4);
+    runtime.queueCapture('frame:a');
+    runtime.click('btnStart');
+    await settle();
+    runtime.queueCapture('frame:b');
+    await runtime.runNextTimer();
+    runtime.click('btnStart');
+
+    runtime.click('btnDone');
+    await settle();
+    mutation.run(runtime);
+    copySucceeds = true;
+    runtime.click('btnDone');
+    await settle();
+
+    assert.deepEqual(calls, ['save', 'copy', 'save', 'copy', 'close'], mutation.name);
+  }
 });

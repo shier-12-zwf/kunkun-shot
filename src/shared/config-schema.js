@@ -99,7 +99,7 @@ const DEFAULT_CONFIG = {
   recording: {
     fps: 12,
     fileNameTemplate: '困困录屏-{timestamp}', // 录屏与截图分开配置，扩展名由实际导出器决定
-    toGif: true, // 同时导出 GIF
+    toGif: false, // 默认直接保存 WebM；GIF 需要用户另装系统 FFmpeg
     systemAudio: false, // 显式开启后录制系统声音；旧配置缺失时保持无声录制
     microphone: false, // 显式开启后请求麦克风权限并混入录制
   },

@@ -5,6 +5,8 @@ const {
   prepareInlineTranslation,
   clearInlineTranslationState,
   commitInlineTranslationCells,
+  copyTextWithConfirmation,
+  persistTranslationTarget,
 } = require('../src/renderer/overlay/overlay.js');
 
 test('inline translation uses a clean capture, configured target, and commits export cells', async () => {
@@ -77,4 +79,28 @@ test('clearing inline translation removes both DOM and export state and invalida
   clearInlineTranslationState(state);
   assert.equal(commitInlineTranslationCells(state, staleRequestId, [{ text: 'late result' }]), false);
   assert.deepEqual(state.trCells, []);
+});
+
+test('overlay copy feedback only succeeds after the clipboard confirms the write', async () => {
+  await assert.doesNotReject(() => copyTextWithConfirmation({ copyText: async () => true }, '已复制'));
+  await assert.rejects(
+    () => copyTextWithConfirmation({ copyText: async () => false }, '未复制'),
+    /剪贴板/
+  );
+});
+
+test('translation target persistence rejects resolved configuration failures', async () => {
+  const patches = [];
+  await persistTranslationTarget({
+    setConfig: async (patch) => {
+      patches.push(patch);
+      return { ok: true };
+    },
+  }, '日语');
+  assert.deepEqual(patches, [{ translate: { target: '日语' } }]);
+
+  await assert.rejects(
+    () => persistTranslationTarget({ setConfig: async () => ({ ok: false, error: '无法写入配置' }) }, '英语'),
+    /无法写入配置/
+  );
 });

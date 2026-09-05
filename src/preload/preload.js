@@ -68,7 +68,7 @@ const C = {
   TRANSLATE_POPUP_CLOSE: 'translate:popup-close', // (popup->main) 关闭划词卡片
 
   // ---- 录屏 ----
-  RECORD_SAVE: 'record:save', // ({ buffer, mime, toGif, fps }) => { saved, path }
+  RECORD_SAVE: 'record:save', // ({ buffer, mime, toGif, fps }) => { saved, path, fallback?, warning? }
   RECORD_STATE: 'record:state', // ({ state, generation, saveAttempt }) => { ok }
   RECORD_ACTION_START: 'record:action-start',
   RECORD_ACTION_STOP: 'record:action-stop',

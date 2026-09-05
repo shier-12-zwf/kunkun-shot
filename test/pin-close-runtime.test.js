@@ -72,6 +72,7 @@ function makeElement(id) {
     setAttribute() {},
     getAttribute() { return null; },
     appendChild() {},
+    replaceWith() {},
     focus() {},
     getBoundingClientRect() { return { left: 0, top: 0, width: 100, height: 100 }; },
     getContext() {

@@ -108,6 +108,14 @@ function whenLoaded(win, data) {
   });
 }
 
+function hydratePinOnEveryLoad(win, webContentsId) {
+  win.webContents.on('did-finish-load', () => {
+    if (win.isDestroyed()) return;
+    const latestPayload = pinPayloads.get(webContentsId);
+    if (latestPayload) win.webContents.send(C.WINDOW_INIT, latestPayload);
+  });
+}
+
 function calculateImageEditorLayout(display, image) {
   const workArea = display && (display.workArea || display.bounds);
   const x = Number(workArea && workArea.x);
@@ -152,6 +160,55 @@ function calculateImageEditorLayout(display, image) {
     scaleFactor: scaleFactorX,
     scaleFactorX,
     scaleFactorY,
+  };
+}
+
+function calculateCaptureControlBounds({ rect, displayBounds, width, height, gap = 10 }) {
+  const db = displayBounds && typeof displayBounds === 'object' ? displayBounds : {};
+  const selection = rect && typeof rect === 'object' ? rect : {};
+  const displayX = Number(db.x);
+  const displayY = Number(db.y);
+  const displayWidth = Number(db.width);
+  const displayHeight = Number(db.height);
+  const rectX = Number(selection.x);
+  const rectY = Number(selection.y);
+  const rectWidth = Number(selection.width);
+  const rectHeight = Number(selection.height);
+  const requestedWidth = Number(width);
+  const requestedHeight = Number(height);
+  const spacing = Math.max(0, Math.round(Number(gap) || 0));
+  const values = [
+    displayX, displayY, displayWidth, displayHeight,
+    rectX, rectY, rectWidth, rectHeight,
+    requestedWidth, requestedHeight,
+  ];
+  if (values.some((value) => !Number.isFinite(value))) {
+    throw new TypeError('控制条窗口参数无效。');
+  }
+  if (displayWidth < 1 || displayHeight < 1 || requestedWidth < 1 || requestedHeight < 1) {
+    throw new RangeError('控制条窗口尺寸无效。');
+  }
+
+  const controlWidth = Math.min(Math.floor(displayWidth), Math.floor(requestedWidth));
+  const controlHeight = Math.min(Math.floor(displayHeight), Math.floor(requestedHeight));
+  const minX = Math.round(displayX);
+  const minY = Math.round(displayY);
+  const maxX = Math.round(displayX + displayWidth - controlWidth);
+  const maxY = Math.round(displayY + displayHeight - controlHeight);
+  const preferredX = Math.round(displayX + rectX + rectWidth / 2 - controlWidth / 2);
+  const belowY = Math.round(displayY + rectY + rectHeight + spacing);
+  const aboveY = Math.round(displayY + rectY - controlHeight - spacing);
+
+  let controlY;
+  if (belowY <= maxY) controlY = belowY;
+  else if (aboveY >= minY) controlY = aboveY;
+  else controlY = Math.max(minY, Math.min(belowY, maxY));
+
+  return {
+    x: Math.max(minX, Math.min(preferredX, maxX)),
+    y: controlY,
+    width: controlWidth,
+    height: controlHeight,
   };
 }
 
@@ -389,11 +446,11 @@ function createPin(payload) {
   }
   win.setAlwaysOnTop(keepOnTop, 'floating');
   applyPinWorkspaceState(win, state);
-  win.loadFile(rfile('pin', 'pin.html'));
-  whenLoaded(win, safePayload);
   pins.add(win);
   const webContentsId = win.webContents.id;
   pinPayloads.set(webContentsId, safePayload);
+  hydratePinOnEveryLoad(win, webContentsId);
+  win.loadFile(rfile('pin', 'pin.html'));
   win.on('move', () => notifyPinWorkspaceChanged('bounds'));
   win.on('resize', () => notifyPinWorkspaceChanged('bounds'));
   win.on('closed', () => {
@@ -911,16 +968,14 @@ function createRecorder(initData) {
   const db = initData.displayBounds;
   const barW = 520;
   const barH = 56;
-  let x = Math.round(db.x + r.x + r.width / 2 - barW / 2);
-  let y = Math.round(db.y + r.y + r.height + 10);
-  // 越界则放到区域上方
-  if (y + barH > db.y + db.height) y = Math.round(db.y + r.y - barH - 10);
-  x = Math.max(db.x, Math.min(x, db.x + db.width - barW));
-  const win = newTrackedWindow({
-    x,
-    y,
+  const controlBounds = calculateCaptureControlBounds({
+    rect: r,
+    displayBounds: db,
     width: barW,
     height: barH,
+  });
+  const win = newTrackedWindow({
+    ...controlBounds,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -1026,15 +1081,14 @@ function createLongShot(initData) {
   // 两行帧/固定区域编辑器需要可见空间；宽度仍限制在当前屏幕内。
   const barW = Math.min(860, Math.max(460, Math.floor(db.width)));
   const barH = 126;
-  let x = Math.round(db.x + r.x + r.width / 2 - barW / 2);
-  let y = Math.round(db.y + r.y + r.height + 10);
-  if (y + barH > db.y + db.height) y = Math.round(db.y + r.y - barH - 10);
-  x = Math.max(db.x, Math.min(x, db.x + db.width - barW));
-  const win = newTrackedWindow({
-    x,
-    y,
+  const controlBounds = calculateCaptureControlBounds({
+    rect: r,
+    displayBounds: db,
     width: barW,
     height: barH,
+  });
+  const win = newTrackedWindow({
+    ...controlBounds,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -1289,6 +1343,7 @@ module.exports = {
   createOverlay,
   createImageEditor,
   calculateImageEditorLayout,
+  calculateCaptureControlBounds,
   closeOverlay,
   createPin,
   openSettings,

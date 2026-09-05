@@ -4,9 +4,66 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const asar = require('@electron/asar');
 
 const PROJECT_ROOT = path.join(__dirname, '..');
 const DEFAULT_RELEASE_DIR = path.join(PROJECT_ROOT, 'dist', 'release-mac');
+const REQUIRED_LEGAL_RESOURCES = Object.freeze([
+  'licenses/LICENSE',
+  'licenses/THIRD_PARTY_NOTICES.md',
+  'licenses/LICENSES/KaTeX-Fonts-OFL-1.1.txt',
+  'licenses/LICENSES/tr46-MIT.txt',
+]);
+
+function isForbiddenStandaloneFfmpegPath(relativePath) {
+  const portable = String(relativePath || '').replaceAll('\\', '/').replace(/^\/+/, '');
+  const segments = portable.toLowerCase().split('/').filter(Boolean);
+  return segments.includes('ffmpeg-static')
+    || segments.at(-1) === 'ffmpeg'
+    || segments.at(-1) === 'ffmpeg.exe'
+    || segments.at(-1) === 'ffprobe'
+    || segments.at(-1) === 'ffprobe.exe';
+}
+
+function walkFiles(currentPath, visit) {
+  const stat = fs.lstatSync(currentPath);
+  if (stat.isSymbolicLink()) return;
+  visit(currentPath, stat);
+  if (!stat.isDirectory()) return;
+  for (const entry of fs.readdirSync(currentPath).sort()) {
+    walkFiles(path.join(currentPath, entry), visit);
+  }
+}
+
+function assertPackagedResources(appPath) {
+  const resources = path.join(appPath, 'Contents', 'Resources');
+  const appAsar = path.join(resources, 'app.asar');
+  if (!fs.existsSync(appAsar) || !fs.statSync(appAsar).isFile()) {
+    throw new Error(`Packaged app is missing Resources/app.asar: ${appPath}`);
+  }
+
+  const forbidden = [];
+  for (const entry of asar.listPackage(appAsar)) {
+    if (isForbiddenStandaloneFfmpegPath(entry)) forbidden.push(`app.asar:${entry}`);
+  }
+  walkFiles(resources, (entryPath, stat) => {
+    if (entryPath === appAsar || !stat.isFile()) return;
+    const relative = path.relative(resources, entryPath);
+    if (isForbiddenStandaloneFfmpegPath(relative)) forbidden.push(relative);
+  });
+  if (forbidden.length) {
+    throw new Error(
+      `Packaged app contains forbidden standalone FFmpeg content: ${forbidden.slice(0, 5).join(', ')}`
+    );
+  }
+
+  for (const relative of REQUIRED_LEGAL_RESOURCES) {
+    const filePath = path.join(resources, ...relative.split('/'));
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile() || fs.statSync(filePath).size === 0) {
+      throw new Error(`Packaged app is missing required legal notice: ${relative}`);
+    }
+  }
+}
 
 function isSafeArchiveEntry(entry) {
   if (typeof entry !== 'string' || entry.length === 0 || entry.includes('\0')) return false;
@@ -76,6 +133,7 @@ function runCommand(command, args, { capture = false } = {}) {
 }
 
 function verifySignedApp(appPath) {
+  assertPackagedResources(appPath);
   runCommand('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath]);
   const signature = runCommand(
     '/usr/bin/codesign',
@@ -192,7 +250,10 @@ if (require.main === module) {
 
 module.exports = {
   DEFAULT_RELEASE_DIR,
+  REQUIRED_LEGAL_RESOURCES,
+  assertPackagedResources,
   discoverReleaseArtifacts,
+  isForbiddenStandaloneFfmpegPath,
   isSafeArchiveEntry,
   verifyRelease,
   verifySignedApp

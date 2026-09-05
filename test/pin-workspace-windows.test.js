@@ -116,6 +116,33 @@ test('an image replacement is revision-checked and updates payload, aspect ratio
   }), /版本/);
 });
 
+test('pin renderer reload receives the latest payload instead of reopening blank', () => {
+  const { windows } = loadWindowsWithFakeElectron();
+  const initial = 'data:image/png;base64,QUFBQQ==';
+  const updated = 'data:image/png;base64,QkJCQg==';
+  const pin = windows.createPin({
+    dataURL: initial,
+    bounds: { x: 10, y: 20, width: 200, height: 100 },
+  });
+
+  pin.webContents.emit('did-finish-load');
+  assert.equal(pin.sent.length, 1);
+  assert.equal(pin.sent[0].channel, C.WINDOW_INIT);
+  assert.equal(pin.sent[0].payload.dataURL, initial);
+
+  windows.updatePinContent(pin.webContents.id, {
+    baseRevision: 0,
+    revision: 1,
+    dataURL: updated,
+  });
+  pin.webContents.emit('did-finish-load');
+
+  assert.equal(pin.sent.length, 2, 'every completed renderer load must be rehydrated');
+  assert.equal(pin.sent[1].channel, C.WINDOW_INIT);
+  assert.equal(pin.sent[1].payload.dataURL, updated);
+  assert.equal(pin.sent[1].payload.contentRevision, 1);
+});
+
 test('grouped pins move together, can hide/show siblings, and ungroup without stranding hidden windows', () => {
   const { windows } = loadWindowsWithFakeElectron();
   const first = windows.createPin({ text: 'one', bounds: { x: 10, y: 20, width: 100, height: 80 } });

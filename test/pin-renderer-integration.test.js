@@ -35,11 +35,36 @@ test('pin image decoding has a persistent retry state and gates image actions un
   assert.doesNotMatch(source, /state\.dataURL\s*=\s*payload\.dataURL;[\s\S]{0,160}imgEl\.src\s*=\s*payload\.dataURL/);
 });
 
+test('pin display atomically adopts the already-decoded image element', () => {
+  assert.match(source, /resolve\(\{ width: width, height: height, imageElement: probe \}\)/);
+  assert.match(source, /result\.imageElement/);
+  assert.match(source, /imgEl\.replaceWith\(nextImage\)/);
+  assert.doesNotMatch(source, /imgEl\.src\s*=\s*result\.dataURL/);
+});
+
 test('copy and save export the composed image rather than the original data URL', () => {
   assert.match(source, /composeAnnotatedDataURL/);
   assert.match(source, /getComposedDataURL\(\)/);
   assert.doesNotMatch(source, /k\.copyImage\(state\.dataURL\)/);
   assert.doesNotMatch(source, /k\.saveImage\(state\.dataURL\)/);
+});
+
+test('pin only reports clipboard and AI actions after an explicit success result', () => {
+  assert.match(source, /function\s+confirmClipboardWrite\s*\(outcome\)/);
+  assert.match(source, /outcome\s*!==\s*true/);
+  assert.equal(
+    (source.match(/\.then\(confirmClipboardWrite\)/g) || []).length,
+    5,
+    'every pin copyText/copyImage action must validate the resolved result before its success toast',
+  );
+
+  assert.match(source, /function\s+confirmAIPanelOpened\s*\(outcome\)/);
+  assert.match(source, /outcome\.ok\s*!==\s*true/);
+  assert.equal(
+    (source.match(/\.then\(confirmAIPanelOpened\)/g) || []).length,
+    2,
+    'both pin OCR and ask actions must reject a resolved non-ok window-open result',
+  );
 });
 
 test('all image-content consumers wait for the ordered composed content', () => {

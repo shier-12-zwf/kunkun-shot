@@ -438,6 +438,9 @@ body {
   padding: 0;
   justify-content: center;
 }
+.action-btn.icon-only > span {
+  display: none;
+}
 /* 默认高亮项（由 mode 决定，按 Enter 执行） */
 .action-btn.default-action {
   outline: 2px solid var(--accent);
@@ -581,16 +584,14 @@ body {
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
 }
 .translate-target {
-  grid-column: 1 / -1;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 36px;
-  padding: 4px 4px 0 10px;
-  border-top: 1px solid var(--border);
+  flex: 0 0 auto;
+  gap: 4px;
+  height: 30px;
+  padding: 0 2px;
   color: var(--text-2);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1;
   white-space: nowrap;
 }
@@ -598,14 +599,15 @@ body {
 /* 翻译目标语言选择（工具栏内，紧邻「翻译」按钮） */
 .tr-lang {
   flex: 0 0 auto;
-  height: 30px;
+  width: 62px;
+  height: 28px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 6px;
   background: var(--panel-2);
   color: var(--text);
   font-size: 12px;
   font-family: var(--font);
-  padding: 0 4px;
+  padding: 0 3px;
   white-space: nowrap;
   word-break: keep-all;
   cursor: pointer;
@@ -613,6 +615,10 @@ body {
 }
 .tr-lang:hover {
   background: var(--panel);
+}
+.tr-lang:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
 }
 
 /* 极窄显示器仍优先保证所有图标可达；完整中文名称保留在 title 与弹层中。 */
@@ -630,6 +636,9 @@ body {
     justify-content: center;
   }
   #actionGroup > .action-btn:not(.toolbar-menu-item) > span {
+    display: none;
+  }
+  .translate-target > span {
     display: none;
   }
 }

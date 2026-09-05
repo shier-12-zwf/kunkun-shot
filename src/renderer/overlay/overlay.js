@@ -45,6 +45,43 @@
     return true;
   }
 
+  async function copyTextWithConfirmation(api, text) {
+    if (!api || typeof api.copyText !== 'function') {
+      throw new Error('剪贴板功能不可用。');
+    }
+    var copied = await api.copyText(text);
+    if (copied !== true) throw new Error('剪贴板未确认写入。');
+    return true;
+  }
+
+  async function persistTranslationTarget(api, target) {
+    if (!api || typeof api.setConfig !== 'function') {
+      throw new Error('配置功能不可用。');
+    }
+    var outcome = await api.setConfig({ translate: { target: target } });
+    if (outcome && outcome.ok === false) {
+      var detail = outcome.error;
+      var message = typeof detail === 'string'
+        ? detail
+        : (detail && detail.message) || '翻译目标语言保存失败。';
+      throw new Error(message);
+    }
+    return true;
+  }
+
+  async function openAIPanelWithConfirmation(api, payload) {
+    if (!api || typeof api.openAIPanel !== 'function') {
+      throw new Error('AI 窗口功能不可用。');
+    }
+    var outcome = await api.openAIPanel(payload);
+    if (outcome && outcome.ok === true) return outcome;
+    var detail = outcome && outcome.error;
+    var message = typeof detail === 'string'
+      ? detail
+      : (detail && detail.message) || 'AI 窗口打开失败。';
+    throw new Error(message);
+  }
+
   // 静态截图动作必须等待底图完成解码，否则 canvas 会导出一张尺寸正确但全透明的 PNG。
   // 长截图与录屏只提交选区坐标，不依赖当前静态底图。
   function getOverlayActionReadiness(state, action) {
@@ -224,7 +261,7 @@
     }
     var dataURL = compose({ clean: true });
     if (!dataURL) throw new Error('当前选区无法生成图片。');
-    return api.openAIPanel({ mode: mode, dataURL: dataURL });
+    return openAIPanelWithConfirmation(api, { mode: mode, dataURL: dataURL });
   }
 
   function clearInlineTranslationState(state) {
@@ -705,6 +742,9 @@
     module.exports = {
       getOverlayActionReadiness,
       submitOverlayResult,
+      copyTextWithConfirmation,
+      persistTranslationTarget,
+      openAIPanelWithConfirmation,
       resolveInitialOverlayRect,
       mapOverlayRectToSource,
       buildOverlayResultGeometry,
@@ -1681,7 +1721,10 @@
     trLang.addEventListener('click', function (e) { e.stopPropagation(); });
     trLang.addEventListener('change', function () {
       translateTargetChanged = true;
-      try { kkapi.setConfig({ translate: { target: trLang.value } }); } catch (_) {}
+      Promise.resolve(persistTranslationTarget(kkapi, trLang.value))
+        .catch(function (err) {
+          showTip('目标语言保存失败：' + ((err && err.message) || err));
+        });
     });
     translateConfigReady = Promise.resolve(kkapi.getConfig())
       .then(function (cfg) {
@@ -2712,19 +2755,21 @@
     btnOcrCopy.addEventListener('click', function () {
       var t = ocrTextArea.value;
       if (!t) return;
-      Promise.resolve(kkapi.copyText(t))
+      Promise.resolve(copyTextWithConfirmation(kkapi, t))
         .then(function () { showTip('已复制识别文字'); })
         .catch(function () { showTip('复制失败'); });
     });
     btnOcrTranslate.addEventListener('click', function () {
       var t = ocrTextArea.value.trim();
       if (!t) return;
-      Promise.resolve(kkapi.openAIPanel({ mode: 'translate', text: t })).catch(function () {});
+      Promise.resolve(openAIPanelWithConfirmation(kkapi, { mode: 'translate', text: t }))
+        .catch(function (err) { showTip('AI 打开失败：' + ((err && err.message) || err)); });
     });
     btnOcrPolish.addEventListener('click', function () {
       var t = ocrTextArea.value.trim();
       if (!t) return;
-      Promise.resolve(kkapi.openAIPanel({ mode: 'polish', text: t })).catch(function () {});
+      Promise.resolve(openAIPanelWithConfirmation(kkapi, { mode: 'polish', text: t }))
+        .catch(function (err) { showTip('AI 打开失败：' + ((err && err.message) || err)); });
     });
     btnOcrClose.addEventListener('click', hideOcrPanel);
   }
@@ -2883,7 +2928,7 @@
     btnQrCopy.addEventListener('click', function () {
       var text = formatBarcodeResultsForCopy(S.qrResults);
       if (!text) return;
-      Promise.resolve(kkapi.copyText(text))
+      Promise.resolve(copyTextWithConfirmation(kkapi, text))
         .then(function () { showTip(S.qrResults.length > 1 ? '已复制 ' + S.qrResults.length + ' 个条码结果' : '已复制条码内容'); })
         .catch(function () { showTip('复制失败'); });
     });
@@ -3415,9 +3460,16 @@
     copyBtn.addEventListener('click', function (e) {
       e.stopPropagation();
       if (S.aiLiveText) {
-        try { kkapi.copyText(S.aiLiveText); } catch (_) {}
-        copyBtn.textContent = '已复制';
-        setTimeout(function () { copyBtn.textContent = '复制'; }, 1200);
+        copyBtn.disabled = true;
+        Promise.resolve(copyTextWithConfirmation(kkapi, S.aiLiveText))
+          .then(function () { copyBtn.textContent = '已复制'; })
+          .catch(function () { copyBtn.textContent = '复制失败'; })
+          .finally(function () {
+            setTimeout(function () {
+              copyBtn.textContent = '复制';
+              copyBtn.disabled = false;
+            }, 1200);
+          });
       }
     });
     var closeBtn = document.createElement('button');
@@ -3665,7 +3717,7 @@
         return;
       }
       var fmt = colorStr(c, e.shiftKey);
-      Promise.resolve(kkapi.copyText(fmt))
+      Promise.resolve(copyTextWithConfirmation(kkapi, fmt))
         .then(function () {
           showTip('已复制 ' + fmt);
         })
