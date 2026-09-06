@@ -24,6 +24,7 @@ function loadWindows() {
     isDestroyed() { return this.destroyed; }
     isVisible() { return this.visible; }
     getBounds() { return { ...this.bounds }; }
+    getContentBounds() { return { ...this.bounds }; }
     setBounds(bounds) { this.bounds = { ...bounds }; }
     setAlwaysOnTop(value, level) { this.top = [value, level]; }
     setVisibleOnAllWorkspaces(value, options) { this.workspaces = [value, options]; }
@@ -77,6 +78,22 @@ test('longshot owns a permanently mouse-transparent non-focusing guide and a sep
   assert.equal(guide.showInactiveCalls, 1);
   assert.equal(controls.showInactiveCalls, 1);
   assert.equal(controls.moveTopCalls, 2, 'a later-loading guide must not dim or cover the controls');
+});
+
+test('guide coordinates account for macOS clamping the native content origin below the menu bar', () => {
+  const { windows, created } = loadWindows();
+  const controls = windows.createLongShot(init());
+  const guide = created.find((win) => win !== controls);
+  guide.bounds.y += 38;
+  guide.bounds.x += 4;
+  guide.webContents.emit('did-finish-load');
+  assert.deepEqual(guide.sent.at(-1)[1].guideOffset, { x: -4, y: -38 });
+  assert.deepEqual(guide.sent.at(-1)[1].rect, init().rect, 'the registered capture selection must not move');
+  guide.bounds.y += 10;
+  guide.emit('move');
+  assert.equal(guide.sent.at(-1)[0], C.LONGSHOT_STATE);
+  assert.deepEqual(guide.sent.at(-1)[1].guideOffset, { x: -4, y: -48 });
+  windows.closeLongShot();
 });
 
 test('native close, renderer crash and new sessions cannot leave an invisible event-eating guide behind', () => {
@@ -233,6 +250,15 @@ test('expanding a toolbar in-flight cannot move it into the capture rectangle be
     const oldBounds = controls.getBounds();
     windows.updateLongshotPresentation(controls.webContents.id, { expanded: true });
     assert.deepEqual(controls.getBounds(), oldBounds);
+    const { guide } = windows.getLongShotSnapshot();
+    for (const event of ['move', 'resize']) {
+      guide.bounds.y += 10;
+      guide.emit(event);
+      assert.deepEqual(controls.getBounds(), oldBounds, `${event} must not apply a deferred toolbar expansion`);
+      assert.deepEqual(guide.sent.at(-1), [C.LONGSHOT_STATE, {
+        guideOffset: { x: 0, y: init().displayBounds.y - guide.bounds.y },
+      }], 'only the guide coordinate correction is safe during capture');
+    }
     return 'clean frame';
   });
   assert.equal(controls.bounds.height, 300);

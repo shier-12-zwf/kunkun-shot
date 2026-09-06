@@ -1124,6 +1124,11 @@ function createLongShot(initData) {
     }
   };
   group.close = closeGroup;
+  // macOS may clamp a screen-sized window below the menu bar even though the
+  // requested bounds start at the display origin. Keep renderer coordinates
+  // tied to the actual content origin, not the requested BrowserWindow bounds.
+  guide.on('move', () => syncLongshotPresentation(group));
+  guide.on('resize', () => syncLongshotPresentation(group));
   for (const [member, surface, filename] of [
     [guide, 'guide', 'longshot-guide.html'],
     [win, 'controls', 'longshot.html'],
@@ -1137,6 +1142,7 @@ function createLongShot(initData) {
     });
     member.webContents.on('did-finish-load', () => {
       if (group.closing || member.isDestroyed()) return;
+      if (surface === 'guide') member.showInactive();
       member.webContents.send(C.WINDOW_INIT, {
         ...group.initData,
         surface,
@@ -1144,8 +1150,9 @@ function createLongShot(initData) {
         previewAvailable: !!group.layout.preview,
         layout: group.layout,
         presentation: group.presentation,
+        ...(surface === 'guide' ? { guideOffset: longshotGuideOffset(group) } : {}),
       });
-      member.showInactive();
+      if (surface !== 'guide') member.showInactive();
       // guide 可能比 controls 晚完成加载；只调整层级，不把焦点从原页面抢回来。
       if (!win.isDestroyed() && win.isVisible()) win.moveTop();
     });
@@ -1167,17 +1174,31 @@ function requireLongshotSession(webContentsId) {
 
 function syncLongshotPresentation(group) {
   if (group.closing) return;
+  // 原生 move/resize 也会进入这里；抓帧中只校正辅助层坐标，
+  // 待应用的工具条展开和预览更新必须等采集结束，避免进入选区。
+  if (group.captureInFlight) {
+    group.guide.webContents.send(C.LONGSHOT_STATE, { guideOffset: longshotGuideOffset(group) });
+    return;
+  }
   group.layout = calculateLongshotLayout({ ...group.initData, expanded: group.presentation.expanded });
   const bounds = group.controls.getBounds();
   if (['x', 'y', 'width', 'height'].some((key) => bounds[key] !== group.layout.toolbarBounds[key])) {
     group.controls.setBounds(group.layout.toolbarBounds);
   }
-  const state = { ...group.presentation, layout: group.layout };
+  const state = { ...group.presentation, layout: group.layout, guideOffset: longshotGuideOffset(group) };
   // 暂停/静止帧只同步状态，避免重复传输和解码同一缩略图。
   // guide 首次加载或 reload 仍从 WINDOW_INIT 接收完整 presentation。
   if (group.lastSentPreview === state.previewDataURL) delete state.previewDataURL;
   group.guide.webContents.send(C.LONGSHOT_STATE, state);
   group.lastSentPreview = group.presentation.previewDataURL;
+}
+
+function longshotGuideOffset(group) {
+  const bounds = group.guide.getContentBounds();
+  return {
+    x: group.initData.displayBounds.x - bounds.x,
+    y: group.initData.displayBounds.y - bounds.y,
+  };
 }
 
 function updateLongshotPresentation(webContentsId, payload) {

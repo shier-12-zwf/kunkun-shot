@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>Owned long screenshot scroll fixture</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 100%; height: 100%; background: #ffffff; color: #24282c; }
+  body { font: 16px/1.8 -apple-system, BlinkMacSystemFont, sans-serif; }
+  #scrollArea { position: absolute; inset: 0; overflow-y: auto; scroll-behavior: auto; }
+  #scrollArea::-webkit-scrollbar { display: none; }
+  main { width: 620px; margin: 0 auto; padding: 44px 0 320px; }
+  article { height: 210px; padding: 14px 0 24px; border-bottom: 1px solid #e7e9ec; }
+  h2 { margin: 0 0 14px; font-size: 20px; line-height: 1.5; font-weight: 600; }
+  p { margin: 0 0 12px; }
+  small { font-size: 12px; color: #737b86; }
+  header { display: none; position: fixed; z-index: 1; inset: 0 0 auto; height: 64px;
+    border-bottom: 1px solid #cfd5dc; background: #edf1f6; color: #2d3949; padding: 16px 38px;
+    font-size: 17px; font-weight: 600; }
+  header span { float: right; color: #526378; font-weight: 400; }
+  body.fixed-header header { display: block; }
+  body.fixed-header main { padding-top: 88px; }
+  body.sparse-chat, body.sparse-chat #scrollArea { background: #17191c; color: #dddfe4; }
+  body.sparse-chat article { border-color: #30343a; }
+  body.sparse-chat h2 { font-size: 16px; color: #c0c6d2; }
+  body.sparse-chat small { color: #979fac; }
+</style>
+<body>
+  <div id="scrollArea"><main id="document"></main></div>
+  <header>知识工作手册 · 阅读模式 <span>目录　收藏　搜索</span></header>
+  <script>
+    'use strict';
+    const scenario = new URLSearchParams(location.search).get('scenario') || 'sparse-article';
+    document.body.className = scenario;
+    const entries = [
+      ['01 怎样开始一个清楚的问题', '先记录问题发生的场景，再区分已经观察到的事实与尚未验证的判断。', '明确目标，并让每次讨论都能回到这个目标。'],
+      ['02 保留完整的现场信息', '截图可以帮助我们描述当前状态，但一次操作前后的差异同样重要。', '时间、步骤和实际结果，是复现问题的起点。'],
+      ['03 缓慢滚动时的阅读体验', '读者通常会在一段文字结束后停留片刻，然后继续向下浏览。', '这个停留不应中断采集，也不应改变已有的内容。'],
+      ['04 标题与正文之间的空白', '适当的间距可以让长文章更容易阅读，并且帮助眼睛找到下一段。', '大块相同的背景，并不代表所有位置都是同一个位置。'],
+      ['05 固定导航只是页面的一部分', '导航在屏幕顶部保持不动，而下面的正文会随着滚动进入新的位置。', '最终图片应该保留导航一次，并保持正文连续。'],
+      ['06 变化需要独立的证据', '测试时记录真实的滚动距离和实际画面，才能知道新内容是否进入截图。', '按钮可点击，并不等于完整操作流程已经有效。'],
+      ['07 检查图片里的每一段', '将最终图片和原始页面逐行比较，可以发现接缝处重复或缺少的文字。', '不仅检查尺寸增长，也要检查增长的究竟是什么。'],
+      ['08 保存与恢复', '完成之后要确认图片能够再次打开，原有历史和偏好也应继续保留。', '每一步都留下可验证的结果。'],
+    ];
+    const root = document.getElementById('document');
+    for (const [title, first, second] of entries) {
+      const section = document.createElement('article');
+      for (const [tag, text] of [['h2', title], ['p', first], ['p', second], ['small', '本地测试文档 · 无网络资源']]) {
+        const element = document.createElement(tag);
+        element.textContent = text;
+        section.appendChild(element);
+      }
+      root.appendChild(section);
+    }
+  </script>
+</body>
+</html>

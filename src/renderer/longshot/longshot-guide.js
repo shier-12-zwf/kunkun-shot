@@ -3,12 +3,27 @@
   const get = (id) => document.getElementById(id);
   let currentLayout = null;
   let previewGeneration = 0;
+  let selection = null;
+  let display = null;
+  let guideOffset = { x: 0, y: 0 };
 
   function place(element, rect) {
-    element.style.left = rect.x + 'px';
-    element.style.top = rect.y + 'px';
+    element.style.left = (rect.x + guideOffset.x) + 'px';
+    element.style.top = (rect.y + guideOffset.y) + 'px';
     element.style.width = Math.max(0, rect.width) + 'px';
     element.style.height = Math.max(0, rect.height) + 'px';
+  }
+
+  function placeSelection() {
+    const r = selection;
+    const d = display;
+    if (!r || !d) return;
+    place(get('selectionOutline'), r);
+    get('selectionOutline').hidden = false;
+    place(get('shadeTop'), { x: 0, y: 0, width: d.width, height: r.y });
+    place(get('shadeBottom'), { x: 0, y: r.y + r.height, width: d.width, height: d.height - r.y - r.height });
+    place(get('shadeLeft'), { x: 0, y: r.y, width: r.x, height: r.height });
+    place(get('shadeRight'), { x: r.x + r.width, y: r.y, width: d.width - r.x - r.width, height: r.height });
   }
 
   function applyLayout(layout) {
@@ -20,6 +35,11 @@
 
   function update(state) {
     if (!state) return;
+    if (Number.isFinite(state.guideOffset?.x) && Number.isFinite(state.guideOffset?.y)) {
+      guideOffset = { ...state.guideOffset };
+      placeSelection();
+      if (currentLayout) applyLayout(currentLayout);
+    }
     if (state.layout) applyLayout(state.layout);
     if (Number.isFinite(state.frameCount)) get('previewCount').textContent = state.frameCount + ' 帧';
     if (state.outputWidth > 0 && state.outputHeight > 0) {
@@ -51,14 +71,11 @@
     const r = payload.rect;
     const d = payload.displayBounds;
     if (!d || r.width <= 0 || r.height <= 0) return;
-    place(get('selectionOutline'), r);
-    get('selectionOutline').hidden = false;
-    place(get('shadeTop'), { x: 0, y: 0, width: d.width, height: r.y });
-    place(get('shadeBottom'), { x: 0, y: r.y + r.height, width: d.width, height: d.height - r.y - r.height });
-    place(get('shadeLeft'), { x: 0, y: r.y, width: r.x, height: r.height });
-    place(get('shadeRight'), { x: r.x + r.width, y: r.y, width: d.width - r.x - r.width, height: r.height });
-    applyLayout(payload.layout);
-    update(payload.presentation);
+    selection = r;
+    display = d;
+    guideOffset = { x: 0, y: 0 };
+    placeSelection();
+    update({ ...payload.presentation, layout: payload.layout, guideOffset: payload.guideOffset });
   });
   kkapi.onLongshotUpdate(update);
 })();

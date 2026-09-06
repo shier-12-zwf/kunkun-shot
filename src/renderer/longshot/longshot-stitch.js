@@ -126,12 +126,16 @@
   function stripMetrics(first, firstStart, second, secondStart, height, options) {
     const opts = options || {};
     if (height < 1 || first.width !== second.width) return { score: 0, meanError: Infinity };
-    const rows = samplePositions(height, opts.sampleRows || 14);
+    const rows = opts.rowOffsets || samplePositions(height, opts.sampleRows || 14);
     const columns = sampledColumns(first.width, opts.sampleColumns || 24, opts.ignoreRightRatio == null ? 0.03 : opts.ignoreRightRatio);
     const tolerance = Math.max(0, Number(opts.tolerance) || 18);
     let same = 0;
     let total = 0;
     let errorTotal = 0;
+    const low = [255, 255, 255, 255];
+    const high = [0, 0, 0, 0];
+    const secondLow = [255, 255, 255, 255];
+    const secondHigh = [0, 0, 0, 0];
     for (const rowOffset of rows) {
       const firstRow = firstStart + rowOffset;
       const secondRow = secondStart + rowOffset;
@@ -141,6 +145,14 @@
         total += 1;
         let withinTolerance = true;
         for (let channel = 0; channel < 4; channel += 1) {
+          if (opts.requireContent) {
+            const value = first.pixels[firstOffset + channel];
+            if (value < low[channel]) low[channel] = value;
+            if (value > high[channel]) high[channel] = value;
+            const secondValue = second.pixels[secondOffset + channel];
+            if (secondValue < secondLow[channel]) secondLow[channel] = secondValue;
+            if (secondValue > secondHigh[channel]) secondHigh[channel] = secondValue;
+          }
           const difference = Math.abs(first.pixels[firstOffset + channel] - second.pixels[secondOffset + channel]);
           errorTotal += difference;
           if (difference > tolerance) withinTolerance = false;
@@ -149,6 +161,10 @@
           withinTolerance
         ) same += 1;
       }
+    }
+    if (opts.requireContent && (!high.some((value, channel) => value - low[channel] >= (Number(opts.contentRange) || 18)) ||
+        !secondHigh.some((value, channel) => value - secondLow[channel] >= (Number(opts.contentRange) || 18)))) {
+      return { score: 0, meanError: Infinity };
     }
     return {
       score: total ? same / total : 0,
@@ -162,6 +178,66 @@
 
   function stripSimilarity(first, firstStart, second, secondStart, height, options) {
     return stripMetrics(first, firstStart, second, secondStart, height, options).score;
+  }
+
+  function bodiesAreIdentical(first, firstBody, second, secondBody) {
+    if (first.width !== second.width || firstBody.height !== secondBody.height) return false;
+    const rowBytes = first.width * 4;
+    const firstStart = firstBody.start * rowBytes;
+    const secondStart = secondBody.start * rowBytes;
+    const length = firstBody.height * rowBytes;
+    // Exact comparison is intentional: a sparse sample can miss both thin text
+    // and a local animation. An unchanged periodic/blank-heavy body is idle even
+    // when many alternative overlaps would otherwise tie for the best score.
+    for (let offset = 0; offset < length; offset += 1) {
+      if (first.pixels[firstStart + offset] !== second.pixels[secondStart + offset]) return false;
+    }
+    return true;
+  }
+
+  function informativeRows(frame, bounds, options) {
+    const opts = options || {};
+    const columns = sampledColumns(frame.width, opts.sampleColumns || 24, opts.ignoreRightRatio == null ? 0.03 : opts.ignoreRightRatio);
+    const threshold = Math.max(1, Number(opts.contentRange) || 18);
+    const rows = [];
+    // Discover thin text/edges once in a few columns, not by reading every pixel
+    // for every possible overlap. Uniform margins carry no alignment evidence.
+    for (let row = bounds.start; row < bounds.end; row += 1) {
+      const anchor = (row * frame.width + columns[0]) * 4;
+      let informative = false;
+      for (const column of columns) {
+        const offset = (row * frame.width + column) * 4;
+        for (let channel = 0; channel < 4; channel += 1) {
+          const value = frame.pixels[offset + channel];
+          if (Math.abs(value - frame.pixels[anchor + channel]) >= threshold ||
+              (row > bounds.start && Math.abs(value - frame.pixels[offset - frame.width * 4 + channel]) >= threshold)) {
+            informative = true;
+            break;
+          }
+        }
+        if (informative) break;
+      }
+      if (informative) rows.push(row);
+    }
+    return rows;
+  }
+
+  function featureOffsets(rows, start, height) {
+    function lowerBound(value) {
+      let low = 0;
+      let high = rows.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (rows[middle] < value) low = middle + 1;
+        else high = middle;
+      }
+      return low;
+    }
+    const begin = lowerBound(start);
+    const end = lowerBound(start + height);
+    // Bound each candidate to at most 32 evidence rows from each image even for
+    // large Retina frames. Sampling feature rows keeps text visible between gaps.
+    return end > begin ? samplePositions(end - begin, 32).map((index) => rows[begin + index] - start) : [];
   }
 
   function dimensionMismatch(first, second, scaleTolerance) {
@@ -192,6 +268,9 @@
     const laterBody = bodyBounds(later, bands);
     if (!earlierBody.ok || !laterBody.ok) return { ok: false, reason: 'invalid-fixed-bands' };
     if (!hasVisualContent(later, bands, opts)) return { ok: false, reason: 'blank-frame' };
+    if (bodiesAreIdentical(earlier, earlierBody, later, laterBody)) {
+      return { ok: true, idle: true, overlap: laterBody.height, novelHeight: 0, score: 1, meanError: 0, confidence: 1 };
+    }
 
     const maxOverlap = Math.min(earlierBody.height, laterBody.height);
     const minimum = Math.max(1, Math.min(maxOverlap, finiteInteger(opts.minOverlap, 8)));
@@ -199,9 +278,11 @@
     const ambiguityMargin = Math.max(0, Math.min(0.2, Number(opts.ambiguityMargin) || 0.025));
     const idleThreshold = Math.max(1, finiteInteger(opts.idleThreshold, Math.max(2, Math.floor(laterBody.height * 0.005))));
     const candidates = [];
+    const earlierFeatures = informativeRows(earlier, earlierBody, opts);
+    const laterFeatures = informativeRows(later, laterBody, opts);
 
     for (let overlap = maxOverlap; overlap >= minimum; overlap -= 1) {
-      const metrics = stripMetrics(
+      let metrics = stripMetrics(
         earlier,
         earlierBody.end - overlap,
         later,
@@ -210,7 +291,18 @@
         opts
       );
       if (metrics.score >= threshold - ambiguityMargin) {
-        candidates.push({ overlap, score: metrics.score, meanError: metrics.meanError });
+        const earlierStart = earlierBody.end - overlap;
+        const rowOffsets = Array.from(new Set([
+          ...samplePositions(overlap, opts.sampleRows || 14),
+          ...featureOffsets(earlierFeatures, earlierStart, overlap),
+          ...featureOffsets(laterFeatures, laterBody.start, overlap),
+        ]));
+        metrics = stripMetrics(earlier, earlierStart, later, laterBody.start, overlap, {
+          ...opts, rowOffsets, requireContent: true,
+        });
+        if (metrics.score >= threshold - ambiguityMargin) {
+          candidates.push({ overlap, score: metrics.score, meanError: metrics.meanError });
+        }
       }
     }
     candidates.sort((left, right) => (
@@ -342,28 +434,49 @@
     const minimum = Math.max(1, finiteInteger(opts.minBand, 2));
     let top = 0;
     let bottom = 0;
-    let scoreTotal = 0;
+    let topScore = 0;
+    let bottomScore = 0;
 
     for (let row = 0; row < maximum; row += 1) {
       const score = rowSimilarity(first, row, second, row, opts);
       if (score < threshold) break;
       top += 1;
-      scoreTotal += score;
+      topScore += score;
     }
     for (let offset = 0; offset < maximum; offset += 1) {
       const row = first.height - 1 - offset;
       const score = rowSimilarity(first, row, second, row, opts);
       if (score < threshold) break;
       bottom += 1;
-      scoreTotal += score;
+      bottomScore += score;
     }
-    if (top < minimum) top = 0;
-    if (bottom < minimum) bottom = 0;
-    if (top + bottom >= first.height) bottom = Math.max(0, first.height - top - 1);
+
+    // Reaching the scan limit is not evidence of a real boundary. In particular,
+    // an idle 758px viewport used to suggest arbitrary 227px bands at both ends.
+    // Only accept a boundary at the limit if the next row actually differs.
+    const unboundedTop = maximum > 0 && top === maximum &&
+      rowSimilarity(first, top, second, top, opts) >= threshold;
+    const bottomBoundaryRow = first.height - bottom - 1;
+    const unboundedBottom = maximum > 0 && bottom === maximum &&
+      rowSimilarity(first, bottomBoundaryRow, second, bottomBoundaryRow, opts) >= threshold;
+    if (unboundedTop || unboundedBottom) {
+      return { top: 0, bottom: 0, confidence: 0, reason: 'fixed-band-boundary-unknown' };
+    }
+    if (top < minimum) { top = 0; topScore = 0; }
+    if (bottom < minimum) { bottom = 0; bottomScore = 0; }
+    if (!top && !bottom) return { top: 0, bottom: 0, confidence: 0 };
+
+    // Same-position rows alone also describe a stationary page with a blinking
+    // cursor/carousel. Require a unique, non-idle translation of the remaining
+    // body before treating those rows as fixed page chrome.
+    const motion = detectFrameMotion([first], second, { ...opts, fixedBands: { top, bottom } });
+    if (!motion.ok || motion.direction === 'idle') {
+      return { top: 0, bottom: 0, confidence: 0, reason: 'no-fixed-band-motion' };
+    }
     return {
       top,
       bottom,
-      confidence: top + bottom ? scoreTotal / Math.max(1, top + bottom) : 0,
+      confidence: Math.min((topScore + bottomScore) / (top + bottom), motion.score),
     };
   }
 
@@ -610,46 +723,53 @@
       const reference = frames[0];
       const mismatch = dimensionMismatch(reference, frame, matchOptions.scaleTolerance);
       if (mismatch) return mismatch;
-      const motion = detectFrameMotion(frames, frame, {
+      let candidateBands = fixedBands;
+      let autoFixedBands = null;
+      let motion = detectFrameMotion(frames, frame, {
         ...matchOptions,
         fixedBands,
         lockedDirection: direction,
       });
       if (!motion.ok) {
-        // A fixed toolbar breaks the ordinary tail→head hypothesis before a
-        // second frame can be admitted. Detect same-position repeated bands from
-        // this rejected candidate and hand the values to the UI for confirmation.
+        // A real fixed toolbar can block the ordinary tail→head hypothesis. The
+        // detector proves both the boundary and body motion before we retry with
+        // candidate bands. Nothing is committed until the entire candidate plan
+        // passes the normal matching and memory checks below.
         if (fixedBands.top === 0 && fixedBands.bottom === 0) {
-          const suggestion = suggestFixedBands(frames[frames.length - 1], frame, {
+          const edge = direction === 'prepend' ? frames[0] : frames[frames.length - 1];
+          const suggestion = suggestFixedBands(edge, frame, {
             ...matchOptions,
             minBand: 2,
+            lockedDirection: direction,
           });
           if (suggestion.top || suggestion.bottom) {
-            return {
-              ok: false,
-              reason: 'fixed-bands-suggested',
-              cause: motion.reason,
-              suggestion,
-            };
+            candidateBands = { top: suggestion.top, bottom: suggestion.bottom };
+            autoFixedBands = candidateBands;
+            motion = detectFrameMotion(frames, frame, {
+              ...matchOptions,
+              fixedBands: candidateBands,
+              lockedDirection: direction,
+            });
           }
         }
-        return motion;
+        if (!motion.ok) return motion;
       }
       if (motion.direction === 'idle') return { ok: true, status: 'idle', frameId: null, motion, plan };
 
       const candidateFrames = motion.direction === 'prepend' ? [frame, ...frames] : [...frames, frame];
-      const candidatePlan = buildPlan(candidateFrames, fixedBands, matchOptions);
+      const candidatePlan = buildPlan(candidateFrames, candidateBands, matchOptions);
       const validation = validateCandidateFrames(candidateFrames, candidatePlan);
       if (!validation.ok) return validation;
       const retained = prepareAcceptedFrame(candidateFrames);
       if (!retained.ok) return retained;
       frames = candidateFrames;
+      fixedBands = candidateBands;
       rawFrames.set(frame.id, frame);
       plan = candidatePlan;
       direction = direction || motion.direction;
       nextId += 1;
       pruneRawFrames();
-      return { ok: true, status: 'accepted', frameId: frame.id, direction, motion, plan };
+      return { ok: true, status: 'accepted', frameId: frame.id, direction, motion, plan, ...(autoFixedBands ? { autoFixedBands: { ...autoFixedBands } } : {}) };
     }
 
     function deleteFrame(frameId) {

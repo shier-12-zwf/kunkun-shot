@@ -736,7 +736,11 @@
         fixedSuggestionShown = true;
         $fixedTop.value = String(suggestedFixedBands.top);
         $fixedBottom.value = String(suggestedFixedBands.bottom);
-        return { status: 'terminal', reason: 'fixed-bands-suggested', changed: false };
+        // A suggestion is not a capture failure. Keep sampling so a transient
+        // animation or uncertain boundary cannot strand the user on frame one.
+        $hint.style.color = '#b45309';
+        $hint.textContent = '正在等待稳定重叠，请继续小段滚动；也可点「调整」检查固定区域';
+        return { status: 'unmatched', reason: added.reason, changed: false };
       }
       if (['width-mismatch', 'scale-mismatch', 'pixel-read-failed'].includes(added.reason)) {
         return { status: 'terminal', reason: added.reason, changed: false };
@@ -792,7 +796,6 @@
     if (reason === 'pixel-limit' || reason === 'source-pixel-limit') return '已达图像/原始帧内存上限，可删除片段或完成';
     if (reason === 'width-mismatch') return '抓帧宽度已变化，为避免错位已拒绝；恢复原窗口尺寸后可继续';
     if (reason === 'scale-mismatch') return '显示器或 DPR 已变化，为避免错位已拒绝；恢复后可继续';
-    if (reason === 'fixed-bands-suggested') return '检测到固定顶部/底部建议；确认数值并点「应用」后继续';
     if (reason === 'render-failed') return '重新拼接失败，旧图与原始帧仍保留';
     return '捕获已停止，内容已保留，可继续或完成';
   }
@@ -809,7 +812,6 @@
     $btnStart.querySelector('.label').textContent = stitchCanvas ? '继续' : '开始';
     $btnDir.disabled = !!stitchCanvas;
     refreshEditControls();
-    if (reason === 'fixed-bands-suggested') setAdjustmentExpanded(true);
     publishPresentation(false);
   }
 

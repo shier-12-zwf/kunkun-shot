@@ -152,7 +152,7 @@ function rowPixels(start, count, width = 4) {
   return pixels;
 }
 
-function createRuntime() {
+function createRuntime({ stitchApi = LongshotStitch } = {}) {
   const renderedCanvases = [];
   const faults = { createImageData: 0 };
   const elements = new Map();
@@ -211,7 +211,7 @@ function createRuntime() {
     async closeSelf() {},
   };
   const window = {
-    LongshotStitch,
+    LongshotStitch: stitchApi,
     kkapi,
     addEventListener(type, listener) { windowListeners.set(type, listener); },
   };
@@ -348,6 +348,45 @@ test('renderer rolls back an accepted frame when fresh-canvas rendering throws',
   runtime.click('btnStart');
   await settle();
   assert.equal(runtime.elements.get('count').textContent, '2', 'the rejected model mutation must be retryable');
+});
+
+test('an unconfirmed fixed-region suggestion does not pause or expand capture and the next scroll remains usable', async () => {
+  const runtime = createRuntime({
+    stitchApi: {
+      ...LongshotStitch,
+      createStitchTimeline(options) {
+        const timeline = LongshotStitch.createStitchTimeline(options);
+        let calls = 0;
+        return {
+          ...timeline,
+          addFrame(frame) {
+            calls += 1;
+            if (calls === 2) return {
+              ok: false, reason: 'fixed-bands-suggested',
+              suggestion: { top: 3, bottom: 3 },
+            };
+            return timeline.addFrame(frame);
+          },
+        };
+      },
+    },
+  });
+  runtime.defineFrame('frame:a', 0);
+  runtime.defineFrame('frame:b', 4);
+  runtime.queueCapture('frame:a');
+  runtime.click('btnStart');
+  await settle();
+  const original = runtime.renderedCanvases.at(-1);
+  runtime.queueCapture('frame:b');
+  await runtime.runNextTimer();
+  assert.equal(runtime.elements.get('btnStart').label.textContent, '暂停', 'unconfirmed matching advice must not stop polling');
+  assert.equal(runtime.elements.get('adjustPanel').hidden, true);
+  assert.equal(runtime.elements.get('btnAdjust')['aria-expanded'], 'false');
+  assert.equal(runtime.renderedCanvases.at(-1), original, 'uncertain frame must not corrupt the existing result');
+  runtime.queueCapture('frame:b');
+  await runtime.runNextTimer();
+  assert.equal(runtime.elements.get('count').textContent, '2');
+  assert.deepEqual(renderedGreenRows(runtime.renderedCanvases.at(-1)), Array.from({ length: 16 }, (_, row) => 20 + row * 10));
 });
 
 test('renderer rolls back an edit when fresh-canvas rendering throws', async () => {

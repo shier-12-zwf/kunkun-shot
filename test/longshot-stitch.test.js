@@ -79,6 +79,67 @@ test('the matcher exposes confidence and rejects repeated-pattern overlap ambigu
   assert.equal(match.confidence, 0);
 });
 
+test('a short blank margin cannot compete with an overlap containing real document content', () => {
+  const first = rowFrame('first', [10, 20, 30, 40, 200, 200, 70, 80, 200, 200]);
+  const second = rowFrame('second', [200, 200, 70, 80, 200, 200, 130, 140, 150, 160]);
+  const match = matchAdjacentFrames(first, second, timelineOptions());
+  assert.equal(match.ok, true);
+  assert.equal(match.overlap, 6);
+  assert.equal(match.novelHeight, 4);
+});
+
+test('thin text rows between broad whitespace are verified instead of lost between grid samples', () => {
+  const rows = Array.from({ length: 240 }, (_, index) => {
+    const line = Math.floor(index / 37);
+    return index % 37 === 20 || index % 37 === 21 ? 10 + line * 29 : 240;
+  });
+  const first = rowFrame('first', rows.slice(0, 140));
+  const second = rowFrame('second', rows.slice(30, 170));
+  const match = matchAdjacentFrames(first, second);
+  assert.equal(match.ok, true);
+  assert.equal(match.overlap, 110);
+  assert.equal(match.novelHeight, 30);
+});
+
+test('an unchanged repeated-pattern viewport is idle, not an ambiguous fixed toolbar', () => {
+  const rows = Array.from({ length: 758 }, (_, index) => index % 2 ? 60 : 10);
+  const first = rowFrame('first', rows);
+  const second = rowFrame('second', rows);
+  const timeline = createStitchTimeline(timelineOptions());
+
+  assert.equal(timeline.addFrame(first).ok, true);
+  const unchanged = timeline.addFrame(second);
+  assert.equal(unchanged.ok, true);
+  assert.equal(unchanged.status, 'idle');
+  assert.equal(timeline.getState().frames.length, 1);
+  assert.deepEqual(timeline.getState().fixedBands, { top: 0, bottom: 0 });
+});
+
+test('stationary edges around a changing animation do not prove fixed header/footer bands', () => {
+  const rows = Array.from({ length: 758 }, (_, index) => index % 2 ? 60 : 10);
+  const changedRows = rows.map((value, index) => index >= 250 && index < 508 ? 180 : value);
+  const first = rowFrame('first', rows);
+  const second = rowFrame('animation', changedRows);
+  const suggestion = suggestFixedBands(first, second, timelineOptions());
+
+  assert.deepEqual({ top: suggestion.top, bottom: suggestion.bottom }, { top: 0, bottom: 0 });
+  const timeline = createStitchTimeline(timelineOptions());
+  assert.equal(timeline.addFrame(first).ok, true);
+  const rejected = timeline.addFrame(second);
+  assert.notEqual(rejected.reason, 'fixed-bands-suggested');
+  assert.deepEqual(timeline.getState().fixedBands, { top: 0, bottom: 0 });
+  assert.equal(timeline.getState().frames.length, 1);
+});
+
+test('an unchanged viewport never suggests arbitrary 30-percent fixed bands', () => {
+  const first = rowFrame('first', globalRows(0, 12));
+  const second = rowFrame('second', globalRows(0, 12));
+  const suggestion = suggestFixedBands(first, second, timelineOptions());
+
+  assert.deepEqual({ top: suggestion.top, bottom: suggestion.bottom }, { top: 0, bottom: 0 });
+  assert.equal(suggestion.confidence, 0);
+});
+
 test('tolerance does not let a one-row near match silently win over the exact overlap', () => {
   const smoothRows = (start, count) => Array.from({ length: count }, (_, index) => {
     const row = start + index;
@@ -247,7 +308,7 @@ test('fixed header/footer suggestions can be applied manually and appear only on
   ]);
 });
 
-test('a fixed toolbar that blocks the second match pauses with actionable band values', () => {
+test('proven fixed header/footer bands are applied while admitting the second scrolled frame', () => {
   const header = [[3, 180, 30, 255], [4, 181, 31, 255]];
   const footer = [[8, 220, 70, 255], [9, 221, 71, 255]];
   const first = rowFrame('first', [...header, 20, 40, 60, 80, 100, 120, ...footer]);
@@ -255,18 +316,91 @@ test('a fixed toolbar that blocks the second match pauses with actionable band v
   const timeline = createStitchTimeline(timelineOptions());
 
   assert.equal(timeline.addFrame(first).ok, true);
-  const blocked = timeline.addFrame(second);
-  assert.equal(blocked.ok, false);
-  assert.equal(blocked.reason, 'fixed-bands-suggested');
-  assert.deepEqual(
-    { top: blocked.suggestion.top, bottom: blocked.suggestion.bottom },
-    { top: 2, bottom: 2 }
-  );
-  assert.deepEqual(timeline.getState().frames.map((frame) => frame.id), ['first']);
-
-  assert.equal(timeline.setFixedBands(blocked.suggestion).ok, true);
-  assert.equal(timeline.addFrame(second).ok, true);
+  const accepted = timeline.addFrame(second);
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.status, 'accepted');
+  assert.deepEqual(accepted.autoFixedBands, { top: 2, bottom: 2 });
+  assert.deepEqual(timeline.getState().fixedBands, { top: 2, bottom: 2 });
+  assert.deepEqual(timeline.getState().frames.map((frame) => frame.id), ['first', 'second']);
   assert.deepEqual(composedGreenRows(timeline.compose()), [
     180, 181, 20, 40, 60, 80, 100, 120, 140, 160, 220, 221,
   ]);
+});
+
+test('a fixed-band candidate that reaches the scanning cap has no verified boundary', () => {
+  const header = [[3, 180, 30, 255], [4, 181, 31, 255], [5, 182, 32, 255], [6, 183, 33, 255]];
+  const first = rowFrame('first', [...header, 20, 40, 60, 80, 100, 120]);
+  const second = rowFrame('second', [...header, 60, 80, 100, 120, 140, 160]);
+  const suggestion = suggestFixedBands(first, second, timelineOptions());
+
+  assert.deepEqual({ top: suggestion.top, bottom: suggestion.bottom }, { top: 0, bottom: 0 });
+});
+
+test('fixed-band detection requires translated content, not just unchanged screen edges', () => {
+  const header = [[3, 180, 30, 255], [4, 181, 31, 255]];
+  const footer = [[8, 220, 70, 255], [9, 221, 71, 255]];
+  const first = rowFrame('first', [...header, 20, 40, 60, 80, 100, 120, ...footer]);
+  const second = rowFrame('animation', [...header, 140, 160, 180, 200, 220, 240, ...footer]);
+  const suggestion = suggestFixedBands(first, second, timelineOptions());
+
+  assert.deepEqual({ top: suggestion.top, bottom: suggestion.bottom }, { top: 0, bottom: 0 });
+});
+
+test('automatic fixed bands remain transactional on memory rejection and renderer rollback', () => {
+  const header = [[3, 180, 30, 255], [4, 181, 31, 255]];
+  const footer = [[8, 220, 70, 255], [9, 221, 71, 255]];
+  const first = rowFrame('first', [...header, 20, 40, 60, 80, 100, 120, ...footer]);
+  const second = rowFrame('second', [...header, 60, 80, 100, 120, 140, 160, ...footer]);
+  const constrained = createStitchTimeline(timelineOptions({ maxSourcePixels: 40 }));
+  assert.equal(constrained.addFrame(first).ok, true);
+  const before = constrained.getState();
+  const rejected = constrained.addFrame(second);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.reason, 'source-pixel-limit');
+  assert.deepEqual(constrained.getState(), before);
+
+  const timeline = createStitchTimeline(timelineOptions());
+  assert.equal(timeline.addFrame(first).ok, true);
+  const initial = timeline.getState();
+  const transaction = timeline.beginTransaction();
+  assert.equal(timeline.addFrame(second).ok, true);
+  assert.deepEqual(timeline.getState().fixedBands, { top: 2, bottom: 2 });
+  assert.equal(transaction.rollback().ok, true);
+  assert.deepEqual(timeline.getState(), initial);
+  assert.deepEqual(composedGreenRows(timeline.compose()), composedGreenRows(first));
+});
+
+test('automatic fixed bands retain prepend geometry and reject subsequent direction reversal', () => {
+  const header = [[3, 180, 30, 255], [4, 181, 31, 255]];
+  const footer = [[8, 220, 70, 255], [9, 221, 71, 255]];
+  const first = rowFrame('first', [...header, 60, 80, 100, 120, 140, 160, ...footer]);
+  const earlier = rowFrame('earlier', [...header, 20, 40, 60, 80, 100, 120, ...footer]);
+  const later = rowFrame('later', [...header, 100, 120, 140, 160, 180, 200, ...footer]);
+  const timeline = createStitchTimeline(timelineOptions());
+  assert.equal(timeline.addFrame(first).ok, true);
+  const accepted = timeline.addFrame(earlier);
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.direction, 'prepend');
+  assert.equal(accepted.motion.displacement, -2);
+  assert.deepEqual(accepted.autoFixedBands, { top: 2, bottom: 2 });
+  assert.deepEqual(composedGreenRows(timeline.compose()), [
+    180, 181, 20, 40, 60, 80, 100, 120, 140, 160, 220, 221,
+  ]);
+  const rejected = timeline.addFrame(later);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.reason, 'reverse-direction');
+});
+
+test('automatic fixed-band admission verifies the composed pixel budget before committing', () => {
+  const header = [[3, 180, 30, 255], [4, 181, 31, 255]];
+  const footer = [[8, 220, 70, 255], [9, 221, 71, 255]];
+  const first = rowFrame('first', [...header, 20, 40, 60, 80, 100, 120, ...footer]);
+  const second = rowFrame('second', [...header, 60, 80, 100, 120, 140, 160, ...footer]);
+  const timeline = createStitchTimeline(timelineOptions({ maxPixels: 40 }));
+  assert.equal(timeline.addFrame(first).ok, true);
+  const before = timeline.getState();
+  const rejected = timeline.addFrame(second);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.reason, 'pixel-limit');
+  assert.deepEqual(timeline.getState(), before);
 });
