@@ -139,18 +139,22 @@ ipcMain.handle('longshot-visual:capture', async (event, payload) => {
   const context = contextFor(event);
   assert.deepEqual(payload.rect, context.init.rect);
   assert.equal(payload.displayId, 'owned-document');
-  const top = await scrollTop(context.source);
+  const topBefore = await scrollTop(context.source);
   const image = await capturePainted(context.source);
+  const topAfter = await scrollTop(context.source);
   assert.deepEqual(image.getSize(), { width: WIDTH, height: HEIGHT });
   assert.equal(image.isEmpty(), false, 'the source must produce actual compositor pixels');
   const hash = sha256(image.toPNG());
   context.captureCalls += 1;
   context.evidence.captureCalls = context.captureCalls;
-  if (!context.frameHashes.has(top)) {
-    context.frameHashes.set(top, hash);
-    context.evidence.frames.push({ scrollTop: top, sha256: hash });
-    retainImage(`${context.scenario}-frame-${top}`, image);
-  }
+  // DOM observation and compositor capture are asynchronous. Record both sides
+  // of every actual capture; neither observation is an exact image timestamp.
+  // Keep the original offset-based assertions, but never discard diagnostics
+  // when the same DOM offset later produces a different compositor image.
+  if (!context.frameHashes.has(topBefore)) context.frameHashes.set(topBefore, hash);
+  const captureId = context.captureCalls;
+  context.evidence.frames.push({ captureId, scrollTop: topBefore, topBefore, topAfter, sha256: hash });
+  retainImage(`${context.scenario}-capture-${String(captureId).padStart(3, '0')}-${topBefore}-to-${topAfter}`, image);
   return image.toDataURL();
 });
 
@@ -167,12 +171,14 @@ ipcMain.handle('longshot-visual:present', (event, payload) => {
 ipcMain.handle('longshot-visual:save', (event, dataURL) => {
   const context = contextFor(event);
   assert.equal(context.savedDataURL, undefined, 'successful completion saves exactly once');
+  context.saveCalls += 1;
   context.savedDataURL = dataURL;
   return { saved: true };
 });
 ipcMain.handle('longshot-visual:copy', (event, dataURL) => {
   const context = contextFor(event);
-  assert.equal(dataURL, context.savedDataURL, 'copy and save must use the same final PNG');
+  assert.equal(context.copiedDataURL, undefined, 'successful completion copies exactly once');
+  context.copiedDataURL = dataURL;
   context.copyCalls += 1;
   return true;
 });
@@ -249,7 +255,7 @@ async function runScenario(scenario) {
   const controls = createWindow(800, 300, true);
   const scenarioEvidence = { scenario, captureCalls: 0, frames: [], scrollEvents: [] };
   evidence.push(scenarioEvidence);
-  const context = { source, controls, scenario, captureCalls: 0, copyCalls: 0, closeCalls: 0,
+  const context = { source, controls, scenario, captureCalls: 0, copyCalls: 0, saveCalls: 0, closeCalls: 0,
     latest: null, frameHashes: new Map(), evidence: scenarioEvidence,
     init: { rect: { x: 0, y: 0, width: WIDTH, height: HEIGHT },
       displayId: 'owned-document', scaleFactor: 1, autoStart: true, previewAvailable: true,
@@ -287,16 +293,23 @@ async function runScenario(scenario) {
     checks.push(`${scenario}:wheel-${step}-grows-output`);
   }
 
+  // Copy is the default; the fixed-navigation scenario independently saves.
+  // Both paths must preserve the same exact scroll/pixel oracle below.
+  const exportAction = scenario === 'fixed-header' ? 'save' : 'copy';
+  const exportButton = exportAction === 'save' ? 'btnSave' : 'btnDone';
   // Do not wait on an execution reply after the renderer closes itself.
   const closed = new Promise((resolve) => controls.once('closed', resolve));
-  await Promise.race([closed, controls.webContents.executeJavaScript("document.getElementById('btnDone').click()").catch((error) => {
+  await Promise.race([closed, controls.webContents.executeJavaScript(`document.getElementById(${JSON.stringify(exportButton)}).click()`).catch((error) => {
     if (!controls.isDestroyed()) throw error;
   })]);
-  await until(`${scenario}: successful final save/copy closes owned controls`, () => controls.isDestroyed());
-  assert.equal(context.copyCalls, 1);
+  await until(`${scenario}: independent ${exportAction} closes owned controls`, () => controls.isDestroyed());
+  assert.equal(context.copyCalls, exportAction === 'copy' ? 1 : 0, 'saving must not invoke the clipboard');
+  assert.equal(context.saveCalls, exportAction === 'save' ? 1 : 0, 'default copy must not open a save dialog');
   assert.equal(context.closeCalls, 1);
-  assert.ok(context.savedDataURL?.startsWith('data:image/png;base64,'));
-  const finalImage = nativeImage.createFromDataURL(context.savedDataURL);
+  checks.push(`${scenario}:independent-${exportAction}-without-other-action`);
+  const finalDataURL = exportAction === 'save' ? context.savedDataURL : context.copiedDataURL;
+  assert.ok(finalDataURL?.startsWith('data:image/png;base64,'));
+  const finalImage = nativeImage.createFromDataURL(finalDataURL);
   assert.deepEqual(finalImage.getSize(), { width: WIDTH, height: HEIGHT + STEP * 3 });
   retainImage(`${scenario}-final`, finalImage);
   scenarioEvidence.final = compareFinalPixels(scenario, finalImage, referenceImage);

@@ -348,32 +348,27 @@
     };
   }
 
-  async function saveLongshotAndClose(api, dataURL, shouldContinue, workflowState) {
+  async function exportLongshotAndClose(api, dataURL, action = 'copy', shouldContinue) {
+    if (action !== 'copy' && action !== 'save') throw new Error('不支持的长截图导出操作');
     const isCurrent = typeof shouldContinue === 'function' ? shouldContinue : () => true;
-    const workflow = workflowState && typeof workflowState === 'object' ? workflowState : null;
     if (!isCurrent()) return { stale: true };
-    if (!workflow || workflow.saveConfirmed !== true) {
-      const result = await api.saveImage(dataURL);
-      if (!isCurrent()) return { stale: true };
-      if (!result || result.saved !== true) {
-        throw new Error('保存已取消或失败');
-      }
-      if (workflow) workflow.saveConfirmed = true;
-    }
-    let copied;
+    let result;
     try {
-      copied = await api.copyImage(dataURL);
+      result = action === 'copy' ? await api.copyImage(dataURL) : await api.saveImage(dataURL);
     } catch (error) {
       if (!isCurrent()) return { stale: true };
       const detail = error && error.message ? '：' + error.message : '';
-      throw new Error('复制到剪贴板失败' + detail);
+      throw new Error((action === 'copy' ? '复制到剪贴板失败' : '保存失败') + detail);
     }
     if (!isCurrent()) return { stale: true };
-    if (copied !== true) {
+    if (action === 'save') {
+      if (result && result.canceled === true) return { canceled: true };
+      if (!result || result.saved !== true) throw new Error('保存失败' + (result && result.error ? '：' + result.error : ''));
+    } else if (result !== true) {
       throw new Error('复制到剪贴板失败');
     }
     await api.closeSelf();
-    return { saved: true };
+    return action === 'copy' ? { copied: true } : { saved: true };
   }
 
   // Node 回归测试只加载上面的纯函数，不初始化 renderer DOM。
@@ -387,7 +382,7 @@
       DEFAULT_MAX_CONSECUTIVE_FAILURES,
       getMaxCanvasHeight,
       isFrameWithinCanvasBudget,
-      saveLongshotAndClose,
+      exportLongshotAndClose,
       createLongshotSession,
       runCaptureStep,
       createDisplacementGate,
@@ -427,7 +422,6 @@
   let idleStreak = 0;
   let failureStreak = 0;
   let operationGeneration = 0; // 保存/取消也需要抵御迟到回调
-  let savedExportWorkflow = null; // 当前导出版本已通过保存确认时，复制失败只重试剪贴板阶段
 
   const stitchApi = window.LongshotStitch;
 
@@ -446,6 +440,7 @@
   const $dot = document.getElementById('liveDot');
   const $btnStart = document.getElementById('btnStart');
   const $btnDone = document.getElementById('btnDone');
+  const $btnSave = document.getElementById('btnSave');
   const $cropBox = document.getElementById('cropBox');
   const $cropTop = document.getElementById('cropTop');
   const $cropBottom = document.getElementById('cropBottom');
@@ -469,7 +464,7 @@
   let initialized = false;
 
   function scrollHint() {
-    const instruction = captureHorizontal ? '在选区内向右滚动，自动拼接' : '在选区内向下滚动，自动拼接';
+    const instruction = captureHorizontal ? '请自行在选区内向右滚动，自动拼接' : '请自行在选区内向下滚动，自动拼接';
     return previewAvailable ? instruction : instruction + ' · 选区外空间不足，暂不显示预览';
   }
 
@@ -622,7 +617,6 @@
       stitchCanvas = nextCanvas;
       stitchCtx = nextContext;
       stitchedHeight = composed.height;
-      savedExportWorkflow = null;
       return true;
     } catch (_) {
       return false;
@@ -632,6 +626,8 @@
   function refreshEditControls() {
     const state = stitchTimeline && stitchTimeline.getState();
     const frames = state ? state.frames : [];
+    $btnDone.disabled = !stitchCanvas || stitchedHeight <= 0 || finishing;
+    $btnSave.disabled = $btnDone.disabled;
     $btnAdjust.disabled = frames.length === 0 || captureBusy || finishing;
     $btnDir.disabled = frames.length > 1 || captureBusy || finishing;
     $editBox.hidden = frames.length === 0;
@@ -713,12 +709,12 @@
 
   function unmatchedMessage(reason) {
     if (reason === 'ambiguous-match' || reason === 'ambiguous-direction') {
-      return '重叠候选不唯一，已保留上一版——请小段慢速滚动';
+      return '重叠不唯一，请回滚一点后小段滚动 · 已保留上一版';
     }
     if (reason === 'reverse-direction') {
       return '检测到反向滚动，本帧未接入——请沿原方向继续';
     }
-    return '未找到可靠重叠，已保留上一版——请放慢滚动';
+    return '重叠不足，请稍停或回滚一点再继续 · 已保留上一版';
   }
 
   function consumeFrame(frame, token) {
@@ -792,12 +788,12 @@
     if (reason === 'capture-failures') {
       return '连续 ' + String(count || DEFAULT_MAX_CONSECUTIVE_FAILURES) + ' 次抓帧失败，已保留原始帧，可点「继续」';
     }
-    if (reason === 'frame-limit') return '已达会话最大帧数，可完成或删除片段后继续';
-    if (reason === 'pixel-limit' || reason === 'source-pixel-limit') return '已达图像/原始帧内存上限，可删除片段或完成';
+    if (reason === 'frame-limit') return '已达会话最大帧数，可复制、保存，或删除片段后继续';
+    if (reason === 'pixel-limit' || reason === 'source-pixel-limit') return '已达图像/原始帧内存上限，可复制、保存或删除片段';
     if (reason === 'width-mismatch') return '抓帧宽度已变化，为避免错位已拒绝；恢复原窗口尺寸后可继续';
     if (reason === 'scale-mismatch') return '显示器或 DPR 已变化，为避免错位已拒绝；恢复后可继续';
     if (reason === 'render-failed') return '重新拼接失败，旧图与原始帧仍保留';
-    return '捕获已停止，内容已保留，可继续或完成';
+    return '捕获已停止，内容已保留，可复制、保存或继续';
   }
 
   function endCapture(reason, count) {
@@ -1003,7 +999,7 @@
     $btnStart.querySelector('.label').textContent = '继续';
     $btnDir.disabled = !!stitchTimeline;
     $hint.style.color = '';
-    $hint.textContent = '已暂停 · 点「继续」接着滚动，或点「调整」修改长图';
+    $hint.textContent = '已暂停 · 可复制、保存；点「继续」接着滚动';
     refreshEditControls();
   }
 
@@ -1097,23 +1093,25 @@
     if (applied) suggestedFixedBands = null;
   }
 
-  // ====== 完成：导出 -> 保存 + 复制 -> 关窗 ======
-  async function finish() {
-    if (finishing) return;
+  // ====== 导出：默认复制，保存独立；两种操作都使用原尺寸 PNG ======
+  async function finish(action = 'copy') {
+    if (finishing || !stitchCanvas || stitchedHeight <= 0) return;
     stopCapture('finished');
     const finishGeneration = ++operationGeneration;
-
-    if (!stitchCanvas || stitchedHeight <= 0) {
-      // 还没开始捕获就点完成：直接关闭
-      finishing = true;
-      await kkapi.closeSelf();
-      return;
-    }
-
     finishing = true;
+    refreshEditControls();
     $bar.classList.add('busy');
     $hint.style.color = '';
-    $hint.textContent = '正在拼接并保存…';
+    $hint.textContent = action === 'save' ? '正在保存长截图…' : '正在复制长截图…';
+
+    function restoreForRetry(message) {
+      finishing = false;
+      $bar.classList.remove('busy');
+      $hint.textContent = message;
+      $btnStart.disabled = false;
+      $btnStart.querySelector('.label').textContent = '继续';
+      refreshEditControls();
+    }
 
     try {
       // P2-3：手动裁剪（上/下裁掉多余区域）
@@ -1122,19 +1120,6 @@
       const cropT = geometry.cropTop;
       const cropB = geometry.cropBottom;
       const finalH = geometry.finalHeight;
-      const reusableWorkflow = savedExportWorkflow &&
-        savedExportWorkflow.sourceCanvas === stitchCanvas &&
-        savedExportWorkflow.cropTop === cropT &&
-        savedExportWorkflow.cropBottom === cropB &&
-        savedExportWorkflow.horizontal === captureHorizontal;
-      const exportWorkflow = reusableWorkflow ? savedExportWorkflow : {
-        sourceCanvas: stitchCanvas,
-        cropTop: cropT,
-        cropBottom: cropB,
-        horizontal: captureHorizontal,
-        saveConfirmed: false,
-      };
-      savedExportWorkflow = exportWorkflow;
       let exportCanvas = stitchCanvas;
 
       // 裁剪和横向还原最多只创建一个额外 canvas，避免“预留裁剪 + 手动裁剪 +
@@ -1181,23 +1166,20 @@
       if (!dataURL || dataURL.length < 32 || dataURL === 'data:,') {
         throw new Error('导出失败：拼接图过大或为空，无法生成 PNG');
       }
-      // 只有保存 saved:true 且剪贴板明确返回 true 才关窗；任一步失败都保留拼接图供重试。
-      await saveLongshotAndClose(
+      // 仅执行用户选择的操作；取消保存或失败均保留内存中的原图。
+      const result = await exportLongshotAndClose(
         kkapi,
         dataURL,
-        () => finishing && finishGeneration === operationGeneration,
-        exportWorkflow
+        action,
+        () => finishing && finishGeneration === operationGeneration
       );
+      if (finishGeneration !== operationGeneration || result.stale) return;
+      if (result.canceled) restoreForRetry('已取消保存，长图已保留；可复制、保存或继续滚动');
     } catch (e) {
       if (finishGeneration !== operationGeneration) return;
       // 不要静默关窗丢图：唯一一份拼接图在内存里，关窗即丢失。给出可见提示并保留控制条供重试。
-      console.error('[longshot] 完成失败', e);
-      finishing = false;
-      $bar.classList.remove('busy');
-      $hint.textContent = '完成失败：' + ((e && e.message) || e) + '，可点「完成」重试或「取消」放弃';
-      $btnStart.disabled = false;
-      $btnStart.querySelector('.label').textContent = '继续';
-      refreshEditControls();
+      console.error('[longshot] 导出失败', e);
+      restoreForRetry(((e && e.message) || e) + '；长图已保留，可重新复制或保存');
     }
   }
 
@@ -1220,7 +1202,6 @@
     rawFrameSequence = 0;
     fixedSuggestionShown = false;
     suggestedFixedBands = null;
-    savedExportWorkflow = null;
     $cropTop.value = '0';
     $cropBottom.value = '0';
     $cropBox.hidden = true;
@@ -1246,22 +1227,28 @@
   $btnSuggestFixed.addEventListener('click', suggestFixedRegions);
   $btnApplyFixed.addEventListener('click', applyFixedRegions);
   $cropTop.addEventListener('input', () => {
-    savedExportWorkflow = null;
     $cropTopVal.textContent = $cropTop.value + 'px';
     publishPresentation(true);
   });
   $cropBottom.addEventListener('input', () => {
-    savedExportWorkflow = null;
     $cropBottomVal.textContent = $cropBottom.value + 'px';
     publishPresentation(true);
   });
-  $btnDone.addEventListener('click', finish);
+  $btnDone.addEventListener('click', () => finish('copy'));
+  $btnSave.addEventListener('click', () => finish('save'));
   $btnCancel.addEventListener('click', cancel);
 
-  // Esc 取消 / Enter 完成（已捕获时）
+  // 工具条获得焦点时：Esc 取消 / Enter 或 ⌘C 复制 / ⌘S 保存。
   window.addEventListener('keydown', (e) => {
     const editingField = e.target && ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName);
     const modifier = e.metaKey || e.ctrlKey;
+    if (!editingField && modifier && !e.shiftKey && !e.altKey && ['c', 's'].includes(e.key.toLowerCase())) {
+      if (!$btnDone.disabled) {
+        e.preventDefault();
+        finish(e.key.toLowerCase() === 's' ? 'save' : 'copy');
+      }
+      return;
+    }
     if (!editingField && modifier && e.key.toLowerCase() === 'z' && stitchTimeline && !capturing && !finishing) {
       e.preventDefault();
       if (e.shiftKey) redoTimelineEdit();
@@ -1271,7 +1258,8 @@
     if (e.key === 'Escape') {
       e.preventDefault();
       cancel();
-    } else if (e.key === 'Enter' && !editingField) {
+    } else if (e.key === 'Enter' && !editingField && e.target?.tagName !== 'BUTTON') {
+      // Native buttons must retain their own Enter activation (save, pause, cancel, etc.).
       if (!$btnDone.disabled) {
         e.preventDefault();
         finish();
@@ -1310,8 +1298,9 @@
     }
     $size.textContent = Math.round(RECT.width * SCALE) + ' × ' + Math.round(RECT.height * SCALE);
     $btnDone.disabled = true;
+    $btnSave.disabled = true;
     $btnAdjust.disabled = true;
-    $hint.textContent = '在选区内向下滚动，自动拼接';
+    $hint.textContent = scrollHint();
     // 首帧自动捕获；显式关闭仅用于不会读取桌面像素的窗口协议冒烟测试。
     if (payload.autoStart !== false) timer = setTimeout(() => { timer = null; startCapture(); }, 0);
     else $btnStart.querySelector('.label').textContent = '开始';

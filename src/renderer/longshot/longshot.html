@@ -15,7 +15,8 @@
         <button class="btn direction" id="btnDir" title="切换滚动方向（拼接新内容前可切换）"><span aria-hidden="true">↕</span><span class="label">纵向</span></button>
         <button class="btn" id="btnStart" title="暂停或继续捕获"><span class="label">暂停</span></button>
         <button class="btn" id="btnAdjust" aria-expanded="false" aria-controls="adjustPanel" title="暂停并调整片段、固定区域或裁剪">调整</button>
-        <button class="btn btn-ok" id="btnDone" title="完成并保存到文件，同时复制图片" disabled><span aria-hidden="true">✓</span> 完成</button>
+        <button class="btn" id="btnSave" title="保存图片（⌘S），不修改剪贴板" disabled><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></svg>保存</button>
+        <button class="btn btn-primary" id="btnDone" title="复制图片（Enter / ⌘C），然后在目标应用按 ⌘V 粘贴" disabled><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 4H5a2 2 0 0 0-2 2v11"/></svg>复制</button>
         <button class="btn btn-close" id="btnCancel" aria-label="取消长截图" title="取消长截图">×</button>
       </div>
     </div>

@@ -8,7 +8,7 @@ const {
   MAX_CANVAS_PIXELS,
   getMaxCanvasHeight,
   isFrameWithinCanvasBudget,
-  saveLongshotAndClose,
+  exportLongshotAndClose,
   createLongshotSession,
   runCaptureStep,
   createDisplacementGate,
@@ -116,9 +116,8 @@ test('longshot canvas height is bounded by total pixels instead of height alone'
 });
 
 test('canceled or failed longshot saves keep the image retryable and never copy or close', async () => {
-  for (const saveResult of [{ saved: false }, null, undefined]) {
+  for (const saveResult of [{ saved: false, canceled: true }, { saved: false }, null, undefined]) {
     const calls = [];
-    const workflow = { saveConfirmed: false };
     const api = {
       saveImage: async () => {
         calls.push('save');
@@ -128,16 +127,16 @@ test('canceled or failed longshot saves keep the image retryable and never copy 
       closeSelf: async () => calls.push('close'),
     };
 
-    await assert.rejects(
-      saveLongshotAndClose(api, 'data:image/png;base64,test', undefined, workflow),
-      /保存已取消或失败/
-    );
+    if (saveResult && saveResult.canceled) {
+      assert.deepEqual(await exportLongshotAndClose(api, 'data:image/png;base64,test', 'save'), { canceled: true });
+    } else {
+      await assert.rejects(exportLongshotAndClose(api, 'data:image/png;base64,test', 'save'), /保存失败/);
+    }
     assert.deepEqual(calls, ['save']);
-    assert.equal(workflow.saveConfirmed, false);
   }
 });
 
-test('longshot closes only after explicit save and clipboard success responses', async () => {
+test('longshot defaults to copying without saving and explicit save does not copy', async () => {
   const calls = [];
   const api = {
     saveImage: async () => {
@@ -151,8 +150,11 @@ test('longshot closes only after explicit save and clipboard success responses',
     closeSelf: async () => calls.push('close'),
   };
 
-  await saveLongshotAndClose(api, 'data:image/png;base64,test');
-  assert.deepEqual(calls, ['save', 'copy', 'close']);
+  assert.deepEqual(await exportLongshotAndClose(api, 'data:image/png;base64,test'), { copied: true });
+  assert.deepEqual(calls, ['copy', 'close']);
+  calls.length = 0;
+  assert.deepEqual(await exportLongshotAndClose(api, 'data:image/png;base64,test', 'save'), { saved: true });
+  assert.deepEqual(calls, ['save', 'close']);
 });
 
 test('longshot keeps the window open unless clipboard copy explicitly resolves true', async () => {
@@ -177,17 +179,16 @@ test('longshot keeps the window open unless clipboard copy explicitly resolves t
     };
 
     await assert.rejects(
-      saveLongshotAndClose(api, 'data:image/png;base64,test'),
+      exportLongshotAndClose(api, 'data:image/png;base64,test'),
       /复制到剪贴板失败/,
       scenario.name
     );
-    assert.deepEqual(calls, ['save', 'copy'], scenario.name);
+    assert.deepEqual(calls, ['copy'], scenario.name);
   }
 });
 
-test('clipboard retry reuses an explicit successful save checkpoint', async () => {
+test('clipboard retry never asks for a save checkpoint', async () => {
   const calls = [];
-  const workflow = { saveConfirmed: false };
   let copySucceeds = false;
   const api = {
     saveImage: async () => {
@@ -202,14 +203,26 @@ test('clipboard retry reuses an explicit successful save checkpoint', async () =
   };
 
   await assert.rejects(
-    saveLongshotAndClose(api, 'data:image/png;base64,test', undefined, workflow),
+    exportLongshotAndClose(api, 'data:image/png;base64,test'),
     /复制到剪贴板失败/
   );
-  assert.equal(workflow.saveConfirmed, true);
 
   copySucceeds = true;
-  await saveLongshotAndClose(api, 'data:image/png;base64,test', undefined, workflow);
-  assert.deepEqual(calls, ['save', 'copy', 'copy', 'close']);
+  await exportLongshotAndClose(api, 'data:image/png;base64,test');
+  assert.deepEqual(calls, ['copy', 'copy', 'close']);
+});
+
+test('invalid export actions have no side effects and save failure preserves its detail', async () => {
+  const calls = [];
+  const api = {
+    saveImage: async () => { calls.push('save'); return { saved: false, error: 'disk full' }; },
+    copyImage: async () => { calls.push('copy'); return true; },
+    closeSelf: async () => calls.push('close'),
+  };
+  await assert.rejects(exportLongshotAndClose(api, 'png', 'paste'), /不支持/);
+  assert.deepEqual(calls, []);
+  await assert.rejects(exportLongshotAndClose(api, 'png', 'save'), /保存失败：disk full/);
+  assert.deepEqual(calls, ['save']);
 });
 
 test('capture direction is locked for the whole session and one opposite sample cannot reverse it', () => {
@@ -295,7 +308,7 @@ test('canceling while save is pending prevents late copy and close side effects'
     closeSelf: async () => calls.push('close'),
   };
 
-  const pending = saveLongshotAndClose(api, 'data:image/png;base64,test', () => active);
+  const pending = exportLongshotAndClose(api, 'data:image/png;base64,test', 'save', () => active);
   active = false;
   resolveSave({ saved: true });
   const result = await pending;

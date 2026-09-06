@@ -1374,8 +1374,17 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle(C.CLIPBOARD_WRITE_IMAGE, (_e, dataURL) => {
+  ipcMain.handle(C.CLIPBOARD_WRITE_IMAGE, (e, dataURL) => {
     clipboard.writeImage(validatedNativeImage(dataURL));
+    // 长截图直接复制也遵循自动历史设置；历史页/main/贴图复制不得重复入库。
+    // 剪贴板已经成功写入，后续配置或历史失败不能让 renderer 谎报复制失败。
+    try {
+      if (windows.getTrustedRole(e.sender.id) === 'longshot' && config.get().capture.autoSaveHistory === true) {
+        autoSaveToHistory(dataURL, 'long');
+      }
+    } catch (error) {
+      console.error('[clipboard] 图片已复制，但长截图历史保存失败：', error);
+    }
     return true;
   });
   ipcMain.handle(C.CLIPBOARD_WRITE_TEXT, (_e, text) => {

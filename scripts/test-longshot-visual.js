@@ -82,13 +82,16 @@ ipcMain.handle('longshot-visual:save', (event, dataURL) => {
   const context = contextFor(event);
   assert.ok(dataURL.startsWith('data:image/png;base64,'));
   context.saveCalls += 1;
-  return { saved: true };
+  context.savedImages.push(dataURL);
+  if (context.saveError) throw new Error(context.saveError);
+  return context.saveResult;
 });
 
 ipcMain.handle('longshot-visual:copy', (event, dataURL) => {
   const context = contextFor(event);
   assert.ok(dataURL.startsWith('data:image/png;base64,'));
   context.copyCalls += 1;
+  context.copiedImages.push(dataURL);
   return context.copySucceeds;
 });
 
@@ -114,7 +117,8 @@ function createHiddenWindow(width, height, withBridge = true) {
   win.on('closed', () => windows.delete(win));
   win.webContents.on('render-process-gone', (_event, details) => runtimeErrors.push(details));
   win.webContents.on('console-message', (event) => {
-    if (event.level === 'error' && !String(event.message).includes('复制到剪贴板失败')) {
+    if (event.level === 'error' && !String(event.message).includes('复制到剪贴板失败')
+      && !String(event.message).includes('fixture-save-failed')) {
       runtimeErrors.push(event.message);
     }
   });
@@ -162,6 +166,7 @@ async function createControls(frames, { width = 660, height = 76, autoStart = tr
   const context = {
     controls, guide: null, frames, frameIndex: 0, captureCalls: 0,
     updates: [], latest: null, saveCalls: 0, copyCalls: 0, closeCalls: 0,
+    savedImages: [], copiedImages: [], saveResult: { saved: true }, saveError: null,
     copySucceeds: true, pendingCapture: null,
     init: {
       rect: { x: 100, y: 70, width: FRAME_WIDTH, height: FRAME_HEIGHT },
@@ -197,7 +202,48 @@ const execute = (context, code) => context.controls.webContents.executeJavaScrip
 const click = (context, id) => execute(context, `document.getElementById(${JSON.stringify(id)}).click()`);
 
 async function clickToClose(context, id) {
-  activeStage = `click ${id} and await owned window closure`;
+  return actionToClose(context, () => click(context, id), `click ${id}`);
+}
+
+const pressKey = (context, key, modifier = false) => execute(context, `(() => {
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  window.dispatchEvent(new KeyboardEvent('keydown', {
+    key: ${JSON.stringify(key)}, metaKey: ${modifier}, bubbles: true, cancelable: true,
+  }));
+})()`);
+
+async function pressEnterOnFocusedButton(context, id) {
+  const focused = await execute(context, `(() => {
+    const button = document.getElementById(${JSON.stringify(id)});
+    button.focus();
+    return { id: document.activeElement.id, tagName: button.tagName, disabled: button.disabled };
+  })()`);
+  assert.deepEqual(focused, { id, tagName: 'BUTTON', disabled: false },
+    'Enter must reach the actual enabled, focused production button');
+  const contents = context.controls.webContents;
+  const debuggerApi = contents.debugger;
+  assert.equal(debuggerApi.isAttached(), false, 'this test must own its debugger session');
+  debuggerApi.attach('1.3');
+  try {
+    // CDP delivers a Chromium key event, including native button activation.
+    // dispatchEvent(new KeyboardEvent(...)) cannot exercise that default action.
+    // Target only our hidden renderer: no OS focus or system key injection is used.
+    await debuggerApi.sendCommand('Input.dispatchKeyEvent', {
+      type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+      text: '\r', unmodifiedText: '\r',
+    });
+    if (!contents.isDestroyed()) {
+      await debuggerApi.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+      });
+    }
+  } finally {
+    if (!contents.isDestroyed() && debuggerApi.isAttached()) debuggerApi.detach();
+  }
+}
+
+async function actionToClose(context, action, description) {
+  activeStage = `${description} and await owned window closure`;
   const win = context.controls;
   let onClosed;
   const closed = new Promise((resolve) => { onClosed = resolve; win.once('closed', onClosed); });
@@ -205,13 +251,31 @@ async function clickToClose(context, id) {
     // A click can synchronously destroy its own renderer before the JS result
     // reaches Electron. The owned window's closed event is authoritative; do
     // not wait forever for a reply from the destroyed execution context.
-    await Promise.race([closed, click(context, id).catch((error) => {
+    await Promise.race([closed, action().catch((error) => {
       if (!win.isDestroyed()) throw error;
     })]);
-    await until(`${id} must destroy its owned controls window`, () => win.isDestroyed());
+    await until(`${description} must destroy its owned controls window`, () => win.isDestroyed());
   } finally {
     win.removeListener('closed', onClosed);
   }
+}
+
+async function readyControls(frames) {
+  const context = await createControls(frames);
+  await until('export fixture has an actual first frame', () => context.latest?.frameCount === 1);
+  return context;
+}
+
+async function assertExportRetained(context, expectedSaveCalls, description) {
+  await until(description, async () => {
+    assert.equal(context.controls.isDestroyed(), false, 'unsuccessful export must retain the image window');
+    return context.saveCalls === expectedSaveCalls
+      && await execute(context, `!document.getElementById('btnSave').disabled && !document.getElementById('btnDone').disabled`);
+  });
+  assert.equal(context.closeCalls, 0);
+  assert.equal(context.copyCalls, 0, 'save cancellation/failure must never fall through to the clipboard');
+  assert.equal(context.latest.frameCount, 1);
+  assert.equal(context.latest.outputHeight, FRAME_HEIGHT);
 }
 
 async function captureArtifact(win, name) {
@@ -356,16 +420,21 @@ async function run() {
   const firstPreview = context.latest.previewDataURL;
   const initial = await execute(context, `({
     label: document.querySelector('#btnStart .label').textContent,
+    copyLabel: document.getElementById('btnDone').textContent,
+    saveLabel: document.getElementById('btnSave')?.textContent,
     adjustHidden: document.getElementById('adjustPanel').hidden,
     adjustDisplay: getComputedStyle(document.getElementById('adjustPanel')).display,
     hiddenLeaks: Array.from(document.querySelectorAll('[hidden]')).filter((element) => getComputedStyle(element).display !== 'none').map((element) => element.id),
   })`);
   assert.equal(initial.label, '暂停');
+  assert.match(initial.copyLabel, /复制/, 'the default export button must clearly say Copy');
+  assert.match(initial.saveLabel || '', /保存|下载/, 'saving must have its own visible action');
   assert.equal(initial.adjustHidden, true);
   assert.equal(initial.adjustDisplay, 'none');
   assert.deepEqual(initial.hiddenLeaks, []);
   await assertNoOverflow(context, 'collapsed controls');
   checks.push('auto-first-frame-and-hidden-controls');
+  checks.push('default-copy-and-independent-save-actions-visible');
   await captureArtifact(context.controls, '01-controls-first-frame');
 
   await createGuide(context);
@@ -415,9 +484,12 @@ async function run() {
     const field = document.getElementById('fixedTop');
     field.focus();
     field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    field.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', metaKey: true, bubbles: true }));
+    field.dispatchEvent(new KeyboardEvent('keydown', { key: 's', metaKey: true, bubbles: true }));
   })()`);
   await delay(100);
   assert.equal(context.saveCalls, 0, 'pressing Enter in an adjustment input must not unexpectedly export');
+  assert.equal(context.copyCalls, 0, 'editing-field shortcuts must not copy the full image');
   await execute(context, `(() => { const crop = document.getElementById('cropTop'); crop.value = '20'; crop.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await until('crop changes must immediately update the visible output size', () => context.latest.outputHeight === FRAME_HEIGHT + STEP - 20);
   await execute(context, `(() => { const crop = document.getElementById('cropTop'); crop.value = '0'; crop.dispatchEvent(new Event('input', { bubbles: true })); })()`);
@@ -432,14 +504,65 @@ async function run() {
   await click(context, 'btnDone');
   await until('clipboard error must keep the captured image retryable', () => execute(context, `document.getElementById('hint').textContent.includes('复制到剪贴板失败')`));
   assert.equal(context.closeCalls, 0);
-  assert.equal(context.saveCalls, 1);
+  assert.equal(context.saveCalls, 0, 'copy must never open a save dialog, including a failed attempt');
   assert.equal(context.copyCalls, 1);
+  assert.equal(context.latest.outputHeight, FRAME_HEIGHT + STEP, 'copy failure preserves the completed long image');
   context.copySucceeds = true;
   await clickToClose(context, 'btnDone');
   await until('successful retry must close the controls and guide', () => context.controls.isDestroyed() && context.guide.isDestroyed());
-  assert.equal(context.saveCalls, 1, 'copy retry must reuse the successful in-memory save checkpoint');
+  assert.equal(context.saveCalls, 0, 'copy retry remains independent of saving');
   assert.equal(context.copyCalls, 2);
-  checks.push('copy-failure-retry-and-owned-window-cleanup');
+  assert.equal(context.copiedImages[0], context.copiedImages[1], 'copy retry must preserve the original PNG exactly');
+  checks.push('copy-only-failure-retains-png-and-retry-cleans-owned-windows');
+
+  const save = await readyControls(frames);
+  save.saveResult = { saved: false, canceled: true };
+  await click(save, 'btnSave');
+  await assertExportRetained(save, 1, 'canceled save retains the image and both export actions');
+  save.saveError = 'fixture-save-failed';
+  await click(save, 'btnSave');
+  await assertExportRetained(save, 2, 'failed save retains the image and can be retried');
+  save.saveError = null;
+  save.saveResult = { saved: true };
+  await actionToClose(save, () => pressKey(save, 's', true), 'Cmd+S save-only retry');
+  assert.equal(save.saveCalls, 3);
+  assert.equal(save.copyCalls, 0, 'successful saving must not modify the clipboard');
+  assert.equal(save.closeCalls, 1);
+  assert.equal(new Set(save.savedImages).size, 1, 'canceled/failed/successful save attempts preserve identical PNG bytes');
+  checks.push('save-only-cancel-error-and-cmd-s-retry-retain-identical-png');
+
+  for (const [key, modifier, description] of [['Enter', false, 'Enter'], ['c', true, 'Cmd+C']]) {
+    const shortcut = await readyControls(frames);
+    await actionToClose(shortcut, () => pressKey(shortcut, key, modifier), `${description} default copy`);
+    assert.equal(shortcut.copyCalls, 1);
+    assert.equal(shortcut.saveCalls, 0, `${description} must copy without opening a save dialog`);
+    assert.equal(shortcut.closeCalls, 1);
+    checks.push(`${description}-copies-only-and-closes`);
+  }
+
+  const focusedSave = await readyControls(frames);
+  await actionToClose(focusedSave, () => pressEnterOnFocusedButton(focusedSave, 'btnSave'), 'focused Save button Enter');
+  assert.equal(focusedSave.saveCalls, 1, 'Enter on Save must activate Save rather than the default Copy action');
+  assert.equal(focusedSave.copyCalls, 0, 'Enter on Save must not modify the clipboard');
+  assert.equal(focusedSave.closeCalls, 1);
+  checks.push('focused-save-button-enter-saves-only-and-closes');
+
+  const focusedCancel = await readyControls(frames);
+  await actionToClose(focusedCancel, () => pressEnterOnFocusedButton(focusedCancel, 'btnCancel'), 'focused Cancel button Enter');
+  assert.equal(focusedCancel.saveCalls, 0, 'Enter on Cancel must not save the image');
+  assert.equal(focusedCancel.copyCalls, 0, 'Enter on Cancel must not copy the image');
+  assert.equal(focusedCancel.closeCalls, 1);
+  checks.push('focused-cancel-button-enter-closes-without-export');
+
+  const canceledSaveThenCopy = await readyControls(frames);
+  canceledSaveThenCopy.saveResult = { saved: false, canceled: true };
+  await click(canceledSaveThenCopy, 'btnSave');
+  await assertExportRetained(canceledSaveThenCopy, 1, 'save cancellation permits switching to copy');
+  await clickToClose(canceledSaveThenCopy, 'btnDone');
+  assert.equal(canceledSaveThenCopy.saveCalls, 1, 'switching to copy must not repeat the canceled save');
+  assert.equal(canceledSaveThenCopy.copyCalls, 1);
+  assert.equal(canceledSaveThenCopy.savedImages[0], canceledSaveThenCopy.copiedImages[0]);
+  checks.push('canceled-save-can-switch-directly-to-copy');
 
   const cancel = await createControls(frames);
   await until('cancel fixture must start automatically', () => cancel.latest && cancel.latest.frameCount === 1);

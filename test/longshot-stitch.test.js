@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const zlib = require('node:zlib');
 
 const {
   hasVisualContent,
@@ -159,6 +160,89 @@ test('tolerance does not let a one-row near match silently win over the exact ov
   assert.equal(match.meanError, 0);
 });
 
+test('a settled one- or two-pixel scroll tail is retained after an intermediate fixed-header frame', () => {
+  let seed = 0x13579;
+  const body = Array.from({ length: 1000 }, () => {
+    seed ^= seed << 13;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;
+    return [seed & 255, (seed >>> 8) & 255, (seed >>> 16) & 255, 255];
+  });
+  const header = Array.from({ length: 64 }, () => [210, 210, 210, 255]);
+  for (const positions of [[0, 120, 238, 240], [0, 120, 239, 240], [0, 1, 2, 3]]) {
+    const timeline = createStitchTimeline();
+    for (const top of positions) {
+      const frame = rowFrame('at-' + top, [...header, ...body.slice(top, top + 586)]);
+      const added = timeline.addFrame(frame);
+      assert.equal(added.ok, true, `scroll ${top}: ${JSON.stringify(added)}`);
+      assert.equal(added.status, top === 0 ? 'initial' : 'accepted', `the actual ${top}-pixel source position must not be treated as idle`);
+      assert.equal(timeline.getState().height, 650 + top);
+    }
+    const top = positions[positions.length - 1];
+    const expected = rowFrame('expected', [...header, ...body.slice(0, 586 + top)]);
+    const composed = timeline.compose();
+    assert.equal(composed.height, expected.height);
+    assert.deepEqual(composed.pixels, expected.pixels, 'an intermediate capture must not lose the final source rows');
+    assert.equal(timeline.addFrame(rowFrame('unchanged', [...header, ...body.slice(top, top + 586)])).status, 'idle');
+  }
+});
+
+test('a pale fixed header at the color-tolerance boundary is not matching foreground evidence', () => {
+  const fixture = require('./fixtures/longshot-fractional-scroll.json');
+  const frames = [fixture.initialFrame, fixture.frames[0]].map((frame) => {
+    const pixels = new Uint8ClampedArray(zlib.inflateSync(Buffer.from(frame.rgbaDeflateBase64, 'base64')));
+    // NativeImage -> sRGB canvas shifts this pale header's R channel by one.
+    // A distance of 18 cannot count as both foreground and a matching background.
+    for (let offset = 0; offset < pixels.length; offset += 4) {
+      if (pixels[offset] === 238 && pixels[offset + 1] === 241 && pixels[offset + 2] === 246) pixels[offset] = 237;
+    }
+    return { id: 'header-' + frame.captureLabel, width: fixture.width, height: fixture.height, scaleFactor: 1, pixels };
+  });
+  assert.equal(matchAdjacentFrames(frames[0], frames[1], { ignoreRightRatio: 0 }).ok, false,
+    'a 24-row gray-header/white-margin match must not jump 626 rows');
+  const timeline = createStitchTimeline({ ignoreRightRatio: 0 });
+  timeline.addFrame(frames[0]);
+  const accepted = timeline.addFrame(frames[1]);
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.motion.novelHeight, 120);
+  const expected = new Uint8ClampedArray(fixture.width * 770 * 4);
+  expected.set(frames[0].pixels);
+  expected.set(frames[1].pixels.subarray(fixture.width * 530 * 4), frames[0].pixels.length);
+  assert.deepEqual(timeline.compose().pixels, expected);
+});
+
+test('white margins cannot turn a transient fractional-scroll text mismatch into a confident overlap', () => {
+  const fixture = require('./fixtures/longshot-fractional-scroll.json');
+  const [first, transient, settled] = fixture.frames.map((frame) => ({
+    id: 'capture-' + frame.captureLabel,
+    width: fixture.width,
+    height: fixture.height,
+    scaleFactor: 1,
+    pixels: new Uint8ClampedArray(zlib.inflateSync(Buffer.from(frame.rgbaDeflateBase64, 'base64'))),
+  }));
+  const options = { fixedBands: { top: fixture.fixedTop, bottom: 0 }, ignoreRightRatio: 0 };
+  const wrong = matchAdjacentFrames(first, transient, options);
+  assert.equal(wrong.ok, false,
+    'the old 17-row match agreed on white margins, but all 17 sampled foreground pixels disagreed');
+
+  const timeline = createStitchTimeline({ ignoreRightRatio: 0 });
+  assert.equal(timeline.addFrame(first).ok, true);
+  assert.equal(timeline.setFixedBands(options.fixedBands).ok, true);
+  const before = timeline.getState();
+  assert.equal(timeline.addFrame(transient).ok, false);
+  assert.deepEqual(timeline.getState(), before, 'a transient raster must preserve all accepted pixels and geometry');
+  const accepted = timeline.addFrame(settled);
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.status, 'accepted');
+  assert.equal(accepted.motion.novelHeight, 120);
+  const composed = timeline.compose();
+  const expected = new Uint8ClampedArray(fixture.width * (fixture.height + 120) * 4);
+  expected.set(first.pixels);
+  expected.set(settled.pixels.subarray(fixture.width * (fixture.height - 120) * 4), first.pixels.length);
+  assert.equal(composed.height, 770);
+  assert.deepEqual(composed.pixels, expected, 'the settled frame must append exactly the final 120 source rows');
+});
+
 test('real prepend geometry produces a negative displacement and locks out later reversal', () => {
   const initial = rowFrame('initial', globalRows(4, 6));
   const earlier = rowFrame('earlier', globalRows(2, 6));
@@ -176,6 +260,67 @@ test('real prepend geometry produces a negative displacement and locks out later
   assert.equal(reversal.ok, false);
   assert.equal(reversal.reason, 'reverse-direction');
   assert.equal(reversal.detectedDirection, 'append');
+});
+
+test('a repeated short footnote is insufficient overlap evidence for a full-size viewport', () => {
+  const fixture = require('./fixtures/longshot-fractional-scroll.json');
+  const [first, second] = [fixture.frames[2], fixture.nextSettledFrame].map((frame) => ({
+    id: 'footer-' + frame.captureLabel, width: fixture.width, height: fixture.height, scaleFactor: 1,
+    pixels: new Uint8ClampedArray(zlib.inflateSync(Buffer.from(frame.rgbaDeflateBase64, 'base64'))),
+  }));
+  const matched = matchAdjacentFrames(first, second, { ignoreRightRatio: 0, fixedBands: { top: 64, bottom: 0 } });
+  assert.equal(matched.ok, true, '46 repeated footer rows alone cannot justify a 540px jump in a 586px body');
+  assert.equal(matched.overlap, 466);
+  assert.equal(matched.novelHeight, 120);
+  assert.equal(matchAdjacentFrames(first, second, {
+    ignoreRightRatio: 0, minOverlap: 1, fixedBands: { top: 64, bottom: 0 },
+  }).novelHeight, 120, 'an explicit pixel floor cannot disable minimum viewport evidence');
+});
+
+test('exact low-contrast textures remain matchable even when every color is near the dominant background', () => {
+  const width = 240;
+  let seed = 1234;
+  const document = new Uint8ClampedArray(width * 1000 * 4);
+  for (let offset = 0; offset < document.length; offset += 4) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    const ratio = seed / 0x100000000;
+    const gray = ratio < 0.5 ? 238 : ratio < 0.75 ? 221 : 255;
+    document.set([gray, gray, gray, 255], offset);
+  }
+  const frame = (top) => ({ id: 'low-contrast-' + top, width, height: 650, scaleFactor: 1,
+    pixels: document.slice(top * width * 4, (top + 650) * width * 4) });
+  const matched = matchAdjacentFrames(frame(0), frame(120), { ignoreRightRatio: 0 });
+  assert.equal(matched.ok, true, 'an exact textured strip is evidence even without a high-contrast foreground');
+  assert.equal(matched.overlap, 530);
+  assert.equal(matched.meanError, 0);
+});
+
+test('large repeated content remains ambiguous above the minimum overlap evidence floor', () => {
+  const colors = [[30, 20, 180, 255], [60, 170, 10, 255], [210, 60, 70, 255], [100, 210, 240, 255]];
+  const frame = (top) => rowFrame('periodic-' + top, Array.from({ length: 100 }, (_, index) => colors[(top + index) % colors.length]));
+  const matched = matchAdjacentFrames(frame(0), frame(2), { minOverlap: 1 });
+  assert.equal(matched.ok, false);
+  assert.equal(matched.reason, 'ambiguous-match', 'the evidence floor does not authorize guessing among valid repeated overlaps');
+});
+
+test('foreground verification tolerates minor color drift in a full-size textured screenshot', () => {
+  const width = 1100;
+  let seed = 9123;
+  const document = new Uint8ClampedArray(width * 800 * 4);
+  for (let offset = 0; offset < document.length; offset += 4) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    document.set([seed & 255, (seed >>> 8) & 255, (seed >>> 16) & 255, 255], offset);
+  }
+  const frame = (top) => ({ id: 'photo-' + top, width, height: 650, scaleFactor: 1,
+    pixels: document.slice(top * width * 4, (top + 650) * width * 4) });
+  const first = frame(0);
+  const second = frame(120);
+  for (let offset = 0; offset < second.pixels.length; offset += 4) {
+    for (let channel = 0; channel < 3; channel += 1) second.pixels[offset + channel] += 1;
+  }
+  const matched = matchAdjacentFrames(first, second);
+  assert.equal(matched.ok, true, 'ordinary rendering color drift must not prevent matching image content');
+  assert.equal(matched.novelHeight, 120);
 });
 
 test('width and DPR changes fail explicitly without mutating retained raw frames', () => {

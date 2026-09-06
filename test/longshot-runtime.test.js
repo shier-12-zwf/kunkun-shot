@@ -157,7 +157,7 @@ function createRuntime({ stitchApi = LongshotStitch } = {}) {
   const faults = { createImageData: 0 };
   const elements = new Map();
   const buttonIds = new Set([
-    'btnStart', 'btnDone', 'btnDir', 'btnCancel', 'btnDeleteSegment',
+    'btnStart', 'btnDone', 'btnSave', 'btnDir', 'btnCancel', 'btnDeleteSegment',
     'btnUndo', 'btnRedo', 'btnSuggestFixed', 'btnApplyFixed',
   ]);
   const inputIds = new Set(['cropTop', 'cropBottom', 'fixedTop', 'fixedBottom']);
@@ -249,6 +249,9 @@ function createRuntime({ stitchApi = LongshotStitch } = {}) {
     queueCapture(url) { captureQueue.push(url); },
     failNextTimelineRender() { faults.createImageData += 1; },
     click(id) { getElement(id).dispatch('click'); },
+    keydown(key, options = {}) {
+      windowListeners.get('keydown')({ key, preventDefault() {}, ...options });
+    },
     async runNextTimer() {
       const entry = pendingTimers.entries().next().value;
       assert.ok(entry, 'a capture timer must be scheduled');
@@ -264,6 +267,100 @@ async function settle() {
   await Promise.resolve();
   await new Promise((resolve) => setImmediate(resolve));
 }
+
+async function readyExportRuntime() {
+  const runtime = createRuntime();
+  runtime.defineFrame('frame:a', 0);
+  runtime.queueCapture('frame:a');
+  runtime.click('btnStart');
+  await settle();
+  return runtime;
+}
+
+test('copy click, Enter and Cmd+C export without a save dialog', async () => {
+  for (const trigger of [r => r.click('btnDone'), r => r.keydown('Enter'), r => r.keydown('c', { metaKey: true })]) {
+    const r = await readyExportRuntime();
+    const calls = [];
+    r.kkapi.saveImage = async () => { calls.push('save'); return { saved: true }; };
+    r.kkapi.copyImage = async () => { calls.push('copy'); return true; };
+    r.kkapi.closeSelf = async () => { calls.push('close'); };
+    trigger(r);
+    await settle();
+    assert.deepEqual(calls, ['copy', 'close']);
+  }
+});
+
+test('Enter on a focused native button preserves its own action instead of copying', async () => {
+  for (const id of ['btnSave', 'btnCancel', 'btnStart', 'btnDone']) {
+    const r = await readyExportRuntime();
+    const calls = [];
+    let prevented = false;
+    r.kkapi.saveImage = async () => { calls.push('save'); return { saved: true }; };
+    r.kkapi.copyImage = async () => { calls.push('copy'); return true; };
+    r.kkapi.closeSelf = async () => { calls.push('close'); };
+    r.keydown('Enter', { target: { id, tagName: 'BUTTON' }, preventDefault() { prevented = true; } });
+    await settle();
+    assert.equal(prevented, false, id + ' must retain native Enter activation');
+    assert.deepEqual(calls, [], id + ' must not be intercepted by the window shortcut');
+  }
+});
+
+test('canceling save retains the PNG and restores both export actions for copy', async () => {
+  const r = await readyExportRuntime();
+  let savedPNG;
+  let copiedPNG;
+  let closed = 0;
+  r.kkapi.saveImage = async data => { savedPNG = data; return { saved: false, canceled: true }; };
+  r.kkapi.copyImage = async data => { copiedPNG = data; return true; };
+  r.kkapi.closeSelf = async () => { closed++; };
+  r.click('btnSave');
+  await settle();
+  assert.ok(savedPNG);
+  assert.equal(closed, 0);
+  assert.equal(r.elements.get('btnSave').disabled, false);
+  assert.equal(r.elements.get('btnDone').disabled, false);
+  assert.match(r.elements.get('hint').textContent, /取消保存/);
+  r.click('btnDone');
+  await settle();
+  assert.equal(copiedPNG, savedPNG);
+  assert.equal(closed, 1);
+});
+
+test('Cmd+S saves without changing clipboard and export shortcuts ignore text fields', async () => {
+  const r = await readyExportRuntime();
+  const calls = [];
+  r.kkapi.saveImage = async () => { calls.push('save'); return { saved: true }; };
+  r.kkapi.copyImage = async () => { calls.push('copy'); return true; };
+  r.kkapi.closeSelf = async () => { calls.push('close'); };
+  for (const tagName of ['INPUT', 'SELECT', 'TEXTAREA']) {
+    r.keydown('c', { metaKey: true, target: { tagName } });
+    r.keydown('s', { metaKey: true, target: { tagName } });
+    r.keydown('Enter', { target: { tagName } });
+  }
+  await settle();
+  assert.deepEqual(calls, []);
+  r.keydown('s', { metaKey: true });
+  await settle();
+  assert.deepEqual(calls, ['save', 'close']);
+});
+
+test('cancel during clipboard write ignores its late completion and prevents duplicate export', async () => {
+  const r = await readyExportRuntime();
+  let resolveCopy;
+  const calls = [];
+  r.kkapi.copyImage = () => { calls.push('copy'); return new Promise(resolve => { resolveCopy = resolve; }); };
+  r.kkapi.saveImage = async () => { calls.push('save'); return { saved: true }; };
+  r.kkapi.closeSelf = async () => { calls.push('close'); };
+  r.click('btnDone');
+  await settle();
+  assert.equal(r.elements.get('btnDone').disabled, true);
+  assert.equal(r.elements.get('btnSave').disabled, true);
+  r.click('btnSave');
+  r.keydown('Escape');
+  resolveCopy(true);
+  await settle();
+  assert.deepEqual(calls, ['copy', 'close']);
+});
 
 function renderedGreenRows(canvas) {
   const rows = [];
@@ -440,7 +537,7 @@ test('renderer keeps the longshot window retryable and shows an error when clipb
     runtime.click('btnDone');
     await settle();
 
-    assert.deepEqual(calls, ['save', 'copy'], outcome.name);
+    assert.deepEqual(calls, ['copy'], outcome.name);
     assert.match(runtime.elements.get('hint').textContent, /复制到剪贴板失败/, outcome.name);
     assert.equal(runtime.elements.get('bar').classList.contains('busy'), false, outcome.name);
     assert.equal(runtime.elements.get('btnStart').disabled, false, outcome.name);
@@ -471,10 +568,10 @@ test('renderer retries clipboard without reopening save when the exported image 
   runtime.click('btnDone');
   await settle();
 
-  assert.deepEqual(calls, ['save', 'copy', 'copy', 'close']);
+  assert.deepEqual(calls, ['copy', 'copy', 'close']);
 });
 
-test('renderer saves again after crop or timeline changes following a clipboard failure', async () => {
+test('renderer still copies without saving after crop or timeline changes following a clipboard failure', async () => {
   const mutations = [
     {
       name: 'crop',
@@ -521,6 +618,6 @@ test('renderer saves again after crop or timeline changes following a clipboard 
     runtime.click('btnDone');
     await settle();
 
-    assert.deepEqual(calls, ['save', 'copy', 'save', 'copy', 'close'], mutation.name);
+    assert.deepEqual(calls, ['copy', 'copy', 'close'], mutation.name);
   }
 });

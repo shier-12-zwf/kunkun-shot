@@ -142,6 +142,8 @@ async function runVisibleFixture() {
   let lastFrame;
   let savedData = null;
   let copiedData = null;
+  let saveCalls = 0;
+  let copyCalls = 0;
   ipcMain.handle(C.CAPTURE_REGION, (event) => factory.withLongShotCapture(event.sender.id, async () => {
     lastFrame = await captureOwnedRect();
     if (!firstFrame) firstFrame = lastFrame;
@@ -149,8 +151,8 @@ async function runVisibleFixture() {
     return lastFrame.toDataURL();
   }));
   ipcMain.handle(C.LONGSHOT_UPDATE, (event, payload) => factory.updateLongshotPresentation(event.sender.id, payload));
-  ipcMain.handle(C.IMAGE_SAVE, (_event, dataURL) => { savedData = dataURL; return { saved: true }; });
-  ipcMain.handle(C.CLIPBOARD_WRITE_IMAGE, (_event, dataURL) => { copiedData = dataURL; return true; });
+  ipcMain.handle(C.IMAGE_SAVE, (_event, dataURL) => { saveCalls += 1; savedData = dataURL; return { saved: true }; });
+  ipcMain.handle(C.CLIPBOARD_WRITE_IMAGE, (_event, dataURL) => { copyCalls += 1; copiedData = dataURL; return true; });
   ipcMain.handle(C.WINDOW_CLOSE_SELF, () => { factory.closeLongShot(); return { ok: true }; });
   const controls = track(factory.createLongShot({ rect, displayId: display.id, displayBounds: display.bounds, scaleFactor: sf, autoStart: true }), 'controls');
   const snapshot = factory.getLongShotSnapshot();
@@ -227,9 +229,13 @@ async function runVisibleFixture() {
   evidence.checks.push('overlapping-controls-hidden-during-native-capture-and-restored');
 
   await controls.webContents.executeJavaScript("document.getElementById('btnDone').click()").catch(() => {});
-  await until('done exports and destroys production session', () => !factory.getLongShotSnapshot());
-  assert.ok(savedData && savedData === copiedData, 'export must save/copy same longshot without touching real clipboard/files');
-  evidence.checks.push('production-done-exports-and-closes-both-session-windows');
+  await until('default copy exports and destroys production session', () => !factory.getLongShotSnapshot());
+  assert.equal(saveCalls, 0, 'default copy must not open the native save dialog');
+  assert.equal(savedData, null);
+  assert.equal(copyCalls, 1);
+  assert.ok(copiedData && copiedData.startsWith('data:image/png;base64,'), 'copy exports the actual PNG without touching the real clipboard');
+  evidence.export = { action: 'copy', saveCalls, copyCalls };
+  evidence.checks.push('production-default-copy-without-save-closes-both-session-windows');
 }
 
 async function finish(error) {

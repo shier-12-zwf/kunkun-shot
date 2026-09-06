@@ -132,6 +132,11 @@
     let same = 0;
     let total = 0;
     let errorTotal = 0;
+    let foregroundSame = 0;
+    let foregroundTotal = 0;
+    // A pixel still inside the background's match tolerance cannot also count
+    // as independent foreground evidence (notably pale fixed navigation bars).
+    const foregroundThreshold = Math.max(tolerance, (Number(opts.contentRange) || 18) - 1);
     const low = [255, 255, 255, 255];
     const high = [0, 0, 0, 0];
     const secondLow = [255, 255, 255, 255];
@@ -144,7 +149,13 @@
         const secondOffset = (secondRow * second.width + column) * 4;
         total += 1;
         let withinTolerance = true;
+        let foreground = false;
         for (let channel = 0; channel < 4; channel += 1) {
+          if (opts.firstBackground && opts.secondBackground &&
+              (Math.abs(first.pixels[firstOffset + channel] - opts.firstBackground[channel]) > foregroundThreshold ||
+               Math.abs(second.pixels[secondOffset + channel] - opts.secondBackground[channel]) > foregroundThreshold)) {
+            foreground = true;
+          }
           if (opts.requireContent) {
             const value = first.pixels[firstOffset + channel];
             if (value < low[channel]) low[channel] = value;
@@ -160,6 +171,10 @@
         if (
           withinTolerance
         ) same += 1;
+        if (foreground) {
+          foregroundTotal += 1;
+          if (withinTolerance) foregroundSame += 1;
+        }
       }
     }
     if (opts.requireContent && (!high.some((value, channel) => value - low[channel] >= (Number(opts.contentRange) || 18)) ||
@@ -167,7 +182,13 @@
       return { score: 0, meanError: Infinity };
     }
     return {
-      score: total ? same / total : 0,
+      // Large white/dark margins are not evidence that text lines align. Require
+      // the same agreement among visible foreground pixels as across the strip.
+      // Otherwise a transient subpixel text frame can match a completely wrong
+      // short overlap merely because almost every sampled pixel is background.
+      score: Math.min(total ? same / total : 0,
+        opts.firstBackground && opts.secondBackground
+          ? (foregroundTotal ? foregroundSame / foregroundTotal : (errorTotal === 0 ? 1 : 0)) : 1),
       // The threshold score is intentionally tolerant, but it cannot distinguish
       // an exact alignment from a neighbouring row whose colours merely fall
       // inside that threshold. Mean error is the deterministic tie-breaker that
@@ -222,6 +243,29 @@
     return rows;
   }
 
+  function dominantBackground(frame, bounds, options) {
+    const opts = options || {};
+    const columns = sampledColumns(frame.width, opts.sampleColumns || 24, opts.ignoreRightRatio == null ? 0.03 : opts.ignoreRightRatio);
+    const counts = new Map();
+    let mostFrequent = 0;
+    let background = 0;
+    // One bounded-column scan per body, not a full-pixel scan per candidate.
+    for (let row = bounds.start; row < bounds.end; row += 1) {
+      for (const column of columns) {
+        const offset = (row * frame.width + column) * 4;
+        const color = ((frame.pixels[offset] << 24) | (frame.pixels[offset + 1] << 16) |
+          (frame.pixels[offset + 2] << 8) | frame.pixels[offset + 3]) >>> 0;
+        const count = (counts.get(color) || 0) + 1;
+        counts.set(color, count);
+        if (count > mostFrequent) {
+          mostFrequent = count;
+          background = color;
+        }
+      }
+    }
+    return [background >>> 24, (background >>> 16) & 255, (background >>> 8) & 255, background & 255];
+  }
+
   function featureOffsets(rows, start, height) {
     function lowerBound(value) {
       let low = 0;
@@ -273,13 +317,20 @@
     }
 
     const maxOverlap = Math.min(earlierBody.height, laterBody.height);
-    const minimum = Math.max(1, Math.min(maxOverlap, finiteInteger(opts.minOverlap, 8)));
+    // A few repeated footer/text rows cannot justify jumping almost a whole
+    // viewport. Require at least 10% body overlap; an explicit minOverlap can
+    // make that floor stricter, but cannot disable this evidence requirement.
+    const minimum = Math.min(maxOverlap, Math.max(1, Math.ceil(maxOverlap * 0.1), finiteInteger(opts.minOverlap, 8)));
     const threshold = Math.max(0.5, Math.min(1, Number(opts.matchThreshold) || 0.9));
     const ambiguityMargin = Math.max(0, Math.min(0.2, Number(opts.ambiguityMargin) || 0.025));
-    const idleThreshold = Math.max(1, finiteInteger(opts.idleThreshold, Math.max(2, Math.floor(laterBody.height * 0.005))));
+    // Inertial scrolling often leaves a final one- or two-pixel step. A uniquely
+    // matched positive displacement is real content, regardless of viewport size.
+    const idleThreshold = Math.max(0, finiteInteger(opts.idleThreshold, 0));
     const candidates = [];
     const earlierFeatures = informativeRows(earlier, earlierBody, opts);
     const laterFeatures = informativeRows(later, laterBody, opts);
+    const firstBackground = dominantBackground(earlier, earlierBody, opts);
+    const secondBackground = dominantBackground(later, laterBody, opts);
 
     for (let overlap = maxOverlap; overlap >= minimum; overlap -= 1) {
       let metrics = stripMetrics(
@@ -298,7 +349,7 @@
           ...featureOffsets(laterFeatures, laterBody.start, overlap),
         ]));
         metrics = stripMetrics(earlier, earlierStart, later, laterBody.start, overlap, {
-          ...opts, rowOffsets, requireContent: true,
+          ...opts, rowOffsets, requireContent: true, firstBackground, secondBackground,
         });
         if (metrics.score >= threshold - ambiguityMargin) {
           candidates.push({ overlap, score: metrics.score, meanError: metrics.meanError });

@@ -19,8 +19,8 @@ html, body { width: 100%; height: 100%; background: transparent; overflow: hidde
 .btn:active { background: #d8dee8; }
 .btn:disabled, .mini-btn:disabled { opacity: .45; cursor: not-allowed; }
 .btn:focus-visible, .mini-btn:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.btn-ok { background: var(--ok); color: white; }
-.btn-ok:hover { background: #116631; }
+.btn-primary { background: var(--accent); color: white; }
+.btn-primary:hover { background: #1d4ed8; }
 .btn-close { font-size: 22px; width: 30px; padding: 0; background: transparent; color: var(--text2); }
 .btn[aria-expanded="true"] { background: #e8efff; color: #1746a2; }
 .status { display: flex; align-items: center; gap: 6px; min-height: 16px; color: var(--text2); font-size: 11px; }
